@@ -418,6 +418,7 @@ pub struct App {
     /// v0.5.6：日历（CalDAV）配置、未来 24 小时事件与设置表单。
     pub(crate) calendar: CalendarState,
     pub(crate) quota: crate::quota_ui::State,
+    pub(crate) hub: crate::hub_ui::State,
     pub(crate) updates: crate::updates::State,
     pub(crate) resident: bar::Motion,
     pub(crate) resident_power: (Option<u8>,bool),
@@ -513,6 +514,7 @@ impl App {
             mail: MailState { accounts: mail::load_accounts(), ..Default::default() },
             calendar: CalendarState::load(),
             quota: crate::quota_ui::State::load(),
+            hub: Default::default(),
             updates: Default::default(),
             resident: Default::default(), resident_power:(None,false),
         }
@@ -1026,7 +1028,7 @@ impl App {
     }
 
     fn island_lyrics_active(&self)->bool {
-        self.settings.island_lyrics && self.settings.visible_pages[0] && self.media.is_music()
+        !self.hub_alerting() && self.settings.island_lyrics && self.settings.visible_pages[0] && self.media.is_music()
             && !self.browser_minimal_active
             && self.ly.key==format!("{}|{}|{:.0}",self.media.title,self.media.artist,self.media.duration)
             && self.ly.lyrics.as_ref().is_some_and(|lyrics|lyrics.synced && lyrics.lines.iter().any(|line|!line.text.trim().is_empty()))
@@ -1116,7 +1118,7 @@ impl App {
     }
 
     pub(crate) fn expanded_height(&self)->f32 {
-        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
+        if self.page==6&&self.hub.active {self.hub.height()}else if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
     }
 
     // ---------------------------------------------------------------
@@ -1132,6 +1134,7 @@ impl App {
         self.last_t = Some(env.t);
         self.t = env.t;
         self.quota_tick();
+        self.hub_tick();
         self.current_hour=env.hour();
         self.system_idle=env.idle_seconds;
         self.dt = dt;
@@ -1171,6 +1174,7 @@ impl App {
         let mut layout=Layout::new(self.settings.show_battery&&env.battery.is_some(),self.quota_bar_indices().len(),self.media.is_music()&&!bell,self.pomo.running,bell,self.pet_enabled());
         layout.reorder(&self.settings.resident_order);
         if self.settings.clock_period!=0 { layout.widen_clock(40.0); }
+        if let Some(extra)=self.hub_bar_extra() { layout.widen_clock(extra); }
         if self.pet_enabled() {
             if let Some(a)=self.notice.as_ref().filter(|_|!self.compact_notices()&&!self.open){layout.x[bar::PET]=Some(22.0-(self.notice_size(a).0+self.pet_space())/2.0);}
             else if self.island_lyrics_active() {layout.x[bar::PET]=Some(60.0-self.lyric_bar_width()/2.0);}
@@ -1181,7 +1185,7 @@ impl App {
         }
         self.update_island_lyric_layout(&ctx);
 
-        let cx = win.center().x;
+        let cx = win.center().x+self.hub_shake();
         let top = win.top();
 
         // ---------- 输入：拖放 ----------
@@ -1350,7 +1354,8 @@ impl App {
         let pet_alpha=self.pet_a*(1.0-smoothstep(0.0,0.3,pc));
         if pet_alpha>0.004 && !minimal_pill {
             let y=(h.min(self.base_size().1)-BAR_H).max(0.0)/2.0;
-            self.pet.draw(&base.shifted(0.0,y).faded(pet_alpha),cx-origin.x+self.resident.position(bar::PET),self.t);
+            let (pet_card,pet_x)=(base.shifted(0.0,y).faded(pet_alpha),cx-origin.x+self.resident.position(bar::PET));
+            if !self.hub_draw_eyes(&pet_card,pet_x) {self.pet.draw(&pet_card,pet_x,self.t);}
         }
         if reveal > 0.004 && !banner && !restoring_lyrics {
             let c = base.shifted(0.0, (1.0 - reveal) * -5.0).faded(reveal);
@@ -1578,7 +1583,7 @@ impl App {
 
         // 时钟：两个字号沿同一路径交叉淡化，避免逐帧换字号
         let cpos = (lerp(pcx, hc, m), lerp(21.0, 23.0, m));
-        let a_pill = (1.0 - smoothstep(0.25, 0.6, m)) * layout.clearance(bar::CLOCK);
+        let a_pill = if self.hub_bar_extra().is_some() {0.0} else {(1.0 - smoothstep(0.25, 0.6, m)) * layout.clearance(bar::CLOCK)};
         let a_head = smoothstep(0.35, 0.75, m);
         if a_pill > 0.0 {
             paint::clock(&base.faded(a_pill),cpos.0,cpos.1,&clock,size::PILL_CLOCK);
@@ -1681,6 +1686,7 @@ impl App {
             3 => ("置物架", "", theme::WHITE),
             4 => ("待办", "清单", theme::GREEN),
             5 => ("邮箱", "", theme::CYAN),
+            6 if self.hub.active => ("账号", "", theme::SOFT_GREEN),
             6 => ("AI", "额度", theme::SOFT_GREEN),
             _ => ("岛仔", "设置", theme::WHITE),
         };
@@ -1692,15 +1698,17 @@ impl App {
 
     fn nav(&mut self, c: &Card) {
         let pages: Vec<_>=self.settings.page_order.iter().copied().filter(|page|self.settings.visible_pages[*page]).collect();
-        if pages.len()<2 { return; }
+        let hub_page=self.page==6&&self.hub.active;
+        if pages.len()<2&&!hub_page { return; }
         let l = c.hit(8.0, 55.0, 26.0, 26.0, "nav-l");
         let r = c.hit(385.0, 55.0, 26.0, 26.0, "nav-r");
         let (lh, lp) = c.hover_t(&l);
         let (rh, rp) = c.hover_t(&r);
         paint::chevron(c, 21.0, 68.0, -1.0, lh, lp);
         paint::chevron(c, 398.0, 68.0, 1.0, rh, rp);
-        if l.clicked() { self.navigate_page(false); }
-        if r.clicked() { self.navigate_page(true); }
+        // 账号页的左右箭头翻账号；翻页仍可用滚轮和页码豆
+        if l.clicked() { if hub_page {self.hub_step(-1);} else {self.navigate_page(false);} }
+        if r.clicked() { if hub_page {self.hub_step(1);} else {self.navigate_page(true);} }
         // 页码豆：宽度由弹簧驱动，整行实时居中；当前页是白色长条
         let gap = 4.0;
         let dot_y=self.expanded_height()-7.2;
