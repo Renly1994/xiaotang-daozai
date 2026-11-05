@@ -143,6 +143,7 @@ pub struct Snapshot {
     pub achievement_game: Option<Game>,
     pub achievements_at: String,
     pub achievement_icons: Vec<String>,
+    pub recent_achievements: Vec<Achievement>,
     pub local_status: &'static str,
     pub player_stale: bool,
 }
@@ -158,7 +159,7 @@ fn tracking_game(config: &Config, player: Option<&Player>, local_app: Option<u32
         None => playing.cloned(),
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Achievement {
     pub api_name: String,
     pub name: String,
@@ -166,6 +167,13 @@ pub struct Achievement {
     pub unlocked: bool,
     pub unlocktime: u64,
     pub icon: Option<String>,
+}
+
+fn recent_unlocked(items:&[Achievement])->Vec<Achievement> {
+    let mut recent=items.iter().filter(|item|item.unlocked && item.unlocktime>0).cloned().collect::<Vec<_>>();
+    recent.sort_by(|a,b|b.unlocktime.cmp(&a.unlocktime).then_with(||a.api_name.cmp(&b.api_name)));
+    recent.truncate(4);
+    recent
 }
 #[derive(Clone, Debug)]
 pub enum Event {
@@ -1101,6 +1109,7 @@ fn worker(
             achievement_title = None;
             snapshot.achievements_at.clear();
             snapshot.achievement_icons.clear();
+            snapshot.recent_achievements.clear();
             snapshot.local_status = "";
             snapshot.total = 0;
             tracker.active = None;
@@ -1139,6 +1148,7 @@ fn worker(
                         }
                     }
                     snapshot.total = snapshot.total.max(items.len());
+                    snapshot.recent_achievements=recent_unlocked(&items);
                     snapshot.achievement_icons=items.iter().filter_map(|item|item.icon.clone()).collect();
                     snapshot.achievement_icons.sort_unstable();
                     snapshot.achievement_icons.dedup();
@@ -1166,6 +1176,7 @@ fn worker(
                             }
                         }
                         snapshot.total = snapshot.total.max(items.len());
+                        snapshot.recent_achievements=recent_unlocked(&items);
                         notices.extend(tracker.observe(&c.steamid, game.id, &items));
                         if title.is_some() {
                             achievement_title = title;

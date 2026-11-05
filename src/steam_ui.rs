@@ -6,20 +6,6 @@ use crate::{
 };
 use eframe::egui::{self, Color32};
 
-fn recent_achievement_icons(history:&std::collections::VecDeque<crate::extras::Alert>,account:&str,app_id:u32)->Vec<(String,String)> {
-    let prefix=format!("{app_id}:");
-    let mut seen=std::collections::HashSet::new();
-    let mut recent=Vec::with_capacity(4);
-    for alert in history {
-        let crate::extras::AlertSource::Steam(owner,key)=&alert.source else{continue;};
-        if owner!=account || !key.starts_with(&prefix) || !seen.insert(key.clone()){continue;}
-        let Some(notice)=alert.steam.as_ref() else{continue;};
-        if let Some(url)=&notice.icon_url {recent.push((url.clone(),notice.achievement.clone()));}
-        if recent.len()==4 {break;}
-    }
-    recent
-}
-
 pub(crate) struct State {
     pub config: Option<Config>,
     pub snapshot: Snapshot,
@@ -551,8 +537,6 @@ impl App {
             .badge()
             .map(|(label, game)| (label, game.clone()))
         {
-            let account=self.steam.config.as_ref().map(|config|config.steamid.as_str()).unwrap_or_default();
-            let recent=recent_achievement_icons(&self.history,account,game.id);
             let icon = self
                 .steam_images
                 .get(c.ui.ctx(), game.icon.as_deref(), None);
@@ -590,13 +574,14 @@ impl App {
                     H::Left,
                 );
             }
-            for (index,(url,name)) in recent.iter().enumerate() {
+            for (index,achievement) in self.steam.snapshot.recent_achievements.iter().filter(|achievement|achievement.icon.is_some()).take(4).enumerate() {
+                let url=achievement.icon.as_deref().unwrap();
                 let x=248.0+34.0*index as f32;
                 c.fill(x,66.0,30.0,30.0,5.0,Color32::from_gray(24));
                 if let Some(texture)=self.steam_images.get(c.ui.ctx(),None,Some(url)) {
                     c.painter.image(texture,c.rect(x,66.0,30.0,30.0),egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)),Color32::WHITE);
                 }
-                c.hit(x,64.0,30.0,34.0,("steam-recent-achievement",index)).on_hover_text(name);
+                c.hit(x,64.0,30.0,34.0,("steam-recent-achievement",index)).on_hover_text(&achievement.name);
             }
         } else if self.steam.config.is_some() {
             crate::extras::device_icon(c, crate::bt::DeviceKind::Gamepad, 59.0, 79.0, 32.0);
