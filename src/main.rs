@@ -11,6 +11,7 @@ mod diagnostics;
 
 struct Shell {
     app: App,
+    canvas_height: f32,
     t0: Instant,
     #[cfg(windows)]
     frame_at: Instant,
@@ -70,6 +71,8 @@ impl Shell {
         if !quota_demo{app.quota_initialize();}
         if std::env::args().any(|arg|arg=="--settings"){app.open_settings();}
         if std::env::args().any(|arg|arg=="--calendar"){app.open_calendar(None);}
+        if std::env::args().any(|arg|arg=="--world-clock"){app.open_world_clock();}
+        if std::env::args().any(|arg|arg=="--world-clock-island"){app.open_world_clock_island();}
         #[cfg(feature="record")]
         if std::env::var("DAOZAI_MAIL_DEMO").is_ok(){app.mail_demo();}
         #[cfg(feature="record")]
@@ -98,6 +101,7 @@ impl Shell {
         #[cfg(windows)] let system_rx=daozai::system::observe(cc.egui_ctx.clone(),system_state.clone(),initial_input);
         Self {
             app,
+            canvas_height: app::WIN_H,
             t0: Instant::now(),
             #[cfg(windows)]
             frame_at: Instant::now(),
@@ -186,6 +190,7 @@ impl Shell {
         let cursor = cursor_logical(ppp).map(|(x, y)| Pos2::new(x - origin.x, y - origin.y));
         Env {
             t: self.t0.elapsed().as_secs_f64(),
+            unix_time: Some(chrono::Utc::now().timestamp()),
             clock,
             today,
             date,
@@ -329,11 +334,16 @@ impl eframe::App for Shell {
             }
             while let Some(ev)=self.quota.try_recv(){self.app.quota_event(ev);}
         }
+        let canvas_height=self.app.canvas_height();
+        if self.canvas_height!=canvas_height {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(app::CANVAS_W,canvas_height)));
+            self.canvas_height=canvas_height;
+        }
         let mut out = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(Color32::TRANSPARENT))
             .show(ctx, |ui| {
-                let win = egui::Rect::from_min_size(ui.max_rect().min,egui::vec2(app::WIN_W,app::WIN_H));
+                let win = egui::Rect::from_min_size(ui.max_rect().min,egui::vec2(app::WIN_W,canvas_height));
                 out = Some(self.app.frame(ui, win, &env));
             });
         let Some(out) = out else { return };
@@ -424,6 +434,7 @@ impl eframe::App for Shell {
         #[cfg(windows)] let autostart = self.autostart;
         #[cfg(not(windows))] let autostart = false;
         self.app.settings_ui(ctx, autostart);
+        self.app.world_clock_window_ui(ctx, &env);
         self.app.mail_reader_ui(ctx);
         #[cfg(windows)] let repaint_after=if self.hidden{Duration::from_secs(1)}else{out.repaint_after};
         #[cfg(not(windows))] let repaint_after=out.repaint_after;

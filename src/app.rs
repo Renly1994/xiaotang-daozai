@@ -23,6 +23,8 @@ use std::path::PathBuf;
 pub const PW: f32 = 419.0; // 展开面板宽
 pub const PH: f32 = 140.0; // 展开面板高
 pub(crate) const CALENDAR_PAGE: usize = 7;
+pub(crate) const WORLD_CLOCK_PAGE: usize = 8;
+pub(crate) const WORLD_CLOCK_H: f32 = 332.0;
 pub(crate) const CALENDAR_H: f32 = 216.0;
 pub const BAR_W: f32 = 163.0; // 收起药丸宽
 pub const BAR_H: f32 = 30.0; // 收起药丸高
@@ -38,7 +40,7 @@ pub const RAD: f32 = 33.0; // 底部圆角
 pub const WIN_W: f32 = 640.0; // 窗口（透明画布）
 pub const CANVAS_W: f32 = WIN_W + 320.0; // 保留右侧通知及阴影的完整空间，原岛仍按 WIN_W 定位。
 pub const WIN_H: f32 = 270.0;
-pub(crate) const PAGE_NAMES: [&str; 8] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程"];
+pub(crate) const PAGE_NAMES: [&str; 9] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "世界时钟"];
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
@@ -72,6 +74,8 @@ impl Default for Options {
 #[derive(Clone, Default)]
 pub struct Env {
     pub t: f64,
+    /// 当前绝对时间；由外壳提供，录制与测试可固定时间。
+    pub unix_time: Option<i64>,
     /// `HH:MM:SS`
     pub clock: String,
     /// `YYYY-MM-DD`
@@ -317,7 +321,7 @@ pub struct App {
     page_dir: f32,
     page_t0: f64,
     slide: Spring,
-    dots: [Spring; 8],
+    dots: [Spring; 9],
     wheel_delta: f32,
     wheel_at: f64,
     wheel_page_at: f64,
@@ -419,6 +423,7 @@ pub struct App {
     pub(crate) calendar: CalendarState,
     pub(crate) quota: crate::quota_ui::State,
     pub(crate) updates: crate::updates::State,
+    pub(crate) world_clock: crate::world_clock::State,
     pub(crate) resident: bar::Motion,
     pub(crate) resident_power: (Option<u8>,bool),
 }
@@ -514,6 +519,7 @@ impl App {
             calendar: CalendarState::load(),
             quota: crate::quota_ui::State::load(),
             updates: Default::default(),
+            world_clock: Default::default(),
             resident: Default::default(), resident_power:(None,false),
         }
     }
@@ -936,7 +942,7 @@ impl App {
 
     pub fn show_page(&mut self,page:usize) {
         if !self.settings.visible_pages[page] {
-            self.settings_tab=[1,2,3,5,4,7,11,8][page];
+            self.settings_tab=[1,2,3,5,4,7,11,8,12][page];
             self.open_settings();
             return;
         }
@@ -1116,7 +1122,14 @@ impl App {
     }
 
     pub(crate) fn expanded_height(&self)->f32 {
-        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
+        if self.page==WORLD_CLOCK_PAGE {WORLD_CLOCK_H}else if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
+    }
+
+    /// 为加高的世界时钟及其切页动效保留足够的透明画布。
+    pub fn canvas_height(&self)->f32 {
+        if self.page==WORLD_CLOCK_PAGE || self.page_from==WORLD_CLOCK_PAGE && self.page_e()<0.7 {
+            (WORLD_CLOCK_H*1.08+24.0).ceil()
+        } else {WIN_H}
     }
 
     // ---------------------------------------------------------------
@@ -1554,9 +1567,10 @@ impl App {
         let m = anim::ease_in_out(smoothstep(0.0, 0.85, p));
         let clock = self.settings.clock_text(&env.clock);
         let show_battery=self.settings.show_battery && env.battery.is_some();
+        let date=if self.settings.locale().is_english(){chrono::NaiveDate::parse_from_str(&env.today,"%Y-%m-%d").map(|day|day.format("%b %d %a").to_string()).unwrap_or_else(|_|env.date.clone())}else{env.date.clone()};
 
         // 顶栏终点布局：[电池][日期][时钟] 作为一组整体居中
-        let date_w = base.text_w(&env.date, size::DATE, W::Regular);
+        let date_w = base.text_w(&date, size::DATE, W::Regular);
         let clock_w = paint::clock_width(base,&clock,size::CLOCK);
         let battery_space=if show_battery {24.0}else{0.0};
         let group = battery_space + date_w + 8.0 + clock_w;
@@ -1588,7 +1602,7 @@ impl App {
         }
         // 日期随内容淡入，从药丸方向轻轻滑出
         if reveal > 0.0 {
-            base.faded(reveal).text(hd + (1.0 - reveal) * 10.0, 22.5, &env.date, size::DATE, W::Regular, Color32::from_rgb(210, 210, 214), H::Left);
+            base.faded(reveal).text(hd + (1.0 - reveal) * 10.0, 22.5, &date, size::DATE, W::Regular, Color32::from_rgb(210, 210, 214), H::Left);
         }
         if has_music && (p>0.1 || layout.x[bar::MUSIC].is_some()) {
             paint::playback_bars(base,lerp(local_cx+layout.x[bar::MUSIC].unwrap_or(0.0),367.0,m),lerp(15.0,18.0,m),self.t,self.media.playing,theme::WHITE);
@@ -1637,11 +1651,12 @@ impl App {
     // 面板主体：页标题 + 页面（带切页过渡）+ 翻页箭头 + 页码豆
     // ---------------------------------------------------------------
     fn panel_body(&mut self, c: &Card, env: &Env, cmds: &mut Vec<Cmd>) {
-        let settings=c.hit(380.0,4.0,28.0,28.0,"page-settings").on_hover_text(format!("打开{}设置窗口",PAGE_NAMES[self.page]));
+        let locale=self.settings.locale();
+        let settings=c.hit(380.0,4.0,28.0,28.0,"page-settings").on_hover_text(if locale.is_english(){format!("Open {} settings",locale.text(PAGE_NAMES[self.page]))}else{format!("打开{}设置窗口",PAGE_NAMES[self.page])});
         let (hover,press)=c.hover_t(&settings);
         c.circle(394.0,18.0,13.0,Color32::from_white_alpha((hover*24.0) as u8));
         paint::gear(&c.scaled(394.0,18.0,0.8*(1.0-press*0.08)),394.0,18.0,paint::mix(theme::GRAY,theme::WHITE,hover));
-        if settings.clicked(){self.settings_tab=[1,2,3,5,4,7,11,8][self.page];self.open_settings();}
+        if settings.clicked(){self.settings_tab=[1,2,3,5,4,7,11,8,12][self.page];self.open_settings();}
         if self.subpage==Some(self.page) {
             c.text(15.0,25.0,"‹",19.0,W::Bold,theme::WHITE,H::Left);
             c.text(37.0,25.0,if self.page==2{"饮水设置"}else{"专注设置"},size::TITLE,W::Bold,theme::WHITE,H::Left);
@@ -1675,7 +1690,7 @@ impl App {
     fn page_title(&self, page: usize, c: &Card) {
         let base = 25.0;
         let (a, b, col) = match page {
-            0 | CALENDAR_PAGE => return,
+            0 | CALENDAR_PAGE | WORLD_CLOCK_PAGE => return,
             1 => ("番茄", "专注", theme::RED_TOP),
             2 => ("饮水", "提醒", theme::BLUE),
             3 => ("置物架", "", theme::WHITE),
@@ -1684,9 +1699,10 @@ impl App {
             6 => ("AI", "额度", theme::SOFT_GREEN),
             _ => ("岛仔", "设置", theme::WHITE),
         };
-        let wa = c.text(15.0, base, a, size::TITLE, W::Bold, theme::WHITE, H::Left);
+        let locale=self.settings.locale();
+        let wa = c.text(15.0, base, locale.text(a), size::TITLE, W::Bold, theme::WHITE, H::Left);
         if !b.is_empty() {
-            c.text(15.0 + wa + 1.5, base, b, size::TITLE, W::Bold, col, H::Left);
+            c.text(15.0 + wa + if locale.is_english(){4.0}else{1.5}, base, locale.text(b), size::TITLE, W::Bold, col, H::Left);
         }
     }
 
@@ -1701,20 +1717,21 @@ impl App {
         paint::chevron(c, 398.0, 68.0, 1.0, rh, rp);
         if l.clicked() { self.navigate_page(false); }
         if r.clicked() { self.navigate_page(true); }
-        // 页码豆：宽度由弹簧驱动，整行实时居中；当前页是白色长条
+        // 页码豆居中排列；世界时钟使用小地球作为页面标识。
         let gap = 4.0;
         let dot_y=self.expanded_height()-7.2;
-        let total: f32 = pages.iter().map(|page| self.dots[*page].pos).sum::<f32>() + gap * (pages.len()-1) as f32;
+        let total: f32 = pages.iter().map(|page|if *page==WORLD_CLOCK_PAGE {self.dots[*page].pos.max(12.0)}else{self.dots[*page].pos}).sum::<f32>() + gap * (pages.len()-1) as f32;
         let mut x = PW / 2.0 - total / 2.0;
         let mut clicked = None;
         for i in pages {
-            let w = self.dots[i].pos.max(3.0);
+            let w = self.dots[i].pos.max(if i==WORLD_CLOCK_PAGE {12.0}else{3.0});
             let on = anim::remap(w, 4.0, 16.0);
             let col = paint::mix(Color32::from_rgb(92, 92, 96), theme::WHITE, on);
-            c.fill(x, dot_y - 2.0, w, 4.0, 2.0, col);
-            let hr = c.hit(x - 2.0, dot_y - 6.0, w + 4.0, 12.0, ("dot", i));
-            hr.clone().on_hover_text(PAGE_NAMES[i]);
-            if hr.hovered() && i != self.page {
+            if i==WORLD_CLOCK_PAGE {crate::world_clock::page_marker(c,x+w/2.0,dot_y,5.5,i==self.page);}
+            else {c.fill(x, dot_y - 2.0, w, 4.0, 2.0, col);}
+            let hr = c.hit(x - 2.0, dot_y - 7.0, w + 4.0, 14.0, ("dot", i));
+            hr.clone().on_hover_text(self.settings.locale().text(PAGE_NAMES[i]));
+            if hr.hovered() && i != self.page && i!=WORLD_CLOCK_PAGE {
                 c.fill(x - 1.0, dot_y - 3.0, w + 2.0, 6.0, 3.0, Color32::from_white_alpha(28));
             }
             if hr.clicked() {
@@ -1739,6 +1756,7 @@ impl App {
             5 => self.page_mail(c, env, cmds),
             6 => self.page_quota(c),
             CALENDAR_PAGE => self.page_calendar(c,env),
+            WORLD_CLOCK_PAGE => self.page_world_clock(c,env),
             _ => self.page_settings(c),
         }
     }

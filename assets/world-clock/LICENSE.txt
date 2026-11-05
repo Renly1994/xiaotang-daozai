@@ -1,0 +1,14 @@
+Natural Earth 1:110m land geometry — public domain.
+Source: https://github.com/nvkelso/natural-earth-vector/blob/master/geojson/ne_110m_land.geojson
+Terms: https://www.naturalearthdata.com/about/terms-of-use/
+
+land-mask.bin is a deterministic 1024 x 512, one-bit-per-pixel rasterization
+of that land geometry in equirectangular coordinates, from 180 W to 180 E
+and 90 N to 90 S. Bits are stored least-significant-bit first.
+No attribution or permission is required by Natural Earth; this notice
+records the source of the geographic data.
+
+cities.json contains representative timezone locations derived from IANA
+Time Zone Database zone.tab, which is in the public domain.
+Source: https://data.iana.org/time-zones/tzdb/zone.tab
+The Beijing and New Delhi labels use the coordinates of those named cities.

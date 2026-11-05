@@ -87,13 +87,15 @@ fn replace_file(tmp:&Path,path:&Path)->std::io::Result<()> {
 pub struct Settings {
     pub display_id: String,
     pub settings_theme: crate::settings_theme::SettingsTheme,
+    pub language: crate::i18n::Language,
     pub pet: bool,
     pub minimal: bool,
     pub browser_minimal: bool,
     pub avoid_browsers: bool,
     pub avoid_apps: Vec<(String,String)>,
-    pub visible_pages: [bool; 8],
-    pub page_order: [usize; 8],
+    pub visible_pages: [bool; 9],
+    pub page_order: [usize; 9],
+    pub world_clock_cities: Vec<String>,
     pub show_battery: bool,
     pub clock_12h: bool,
     pub clock_period: u8,
@@ -129,11 +131,13 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
+        Self { display_id: String::new(), settings_theme: Default::default(), language: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 9], page_order: [0,1,2,3,4,5,6,7,8], world_clock_cities: crate::world_clock::default_cities(), show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
     }
 }
 
 impl Settings {
+    pub fn locale(&self)->crate::i18n::Locale {self.language.resolve()}
+
     pub fn clock_text(&self, clock: &str) -> String {
         use chrono::Timelike;
         let Ok(time) = chrono::NaiveTime::parse_from_str(clock.get(..5).unwrap_or(""), "%H:%M") else { return "--:--".into(); };
@@ -144,7 +148,9 @@ impl Settings {
             2=>match time.hour() {0..=5=>"凌晨",6..=10=>"上午",11..=12=>"中午",13..=16=>"下午",17..=18=>"傍晚",_=>"晚上"},
             _=>return digits,
         };
-        format!("{period} {digits}")
+        let locale=self.locale();
+        let period=if locale.is_english() && self.clock_period==2 {match period {"上午"=>"Morning","下午"=>"Afternoon",_=>locale.text(period)}}else{locale.text(period)};
+        if locale.is_english(){format!("{digits} {period}")}else{format!("{period} {digits}")}
     }
 
     pub fn load() -> Self {
@@ -152,6 +158,7 @@ impl Settings {
         for (k, v) in read_kv(&config_dir().join("settings.txt")) {
             match k.as_str() {
                 "settings_theme" => s.settings_theme=crate::settings_theme::SettingsTheme::parse(&v),
+                "language" => s.language=crate::i18n::Language::parse(&v),
                 "display_id" => s.display_id = v,
                 "pet" => s.pet = v == "1" || v.eq_ignore_ascii_case("true"),
                 "minimal" => s.minimal = v == "1" || v.eq_ignore_ascii_case("true"),
@@ -164,15 +171,21 @@ impl Settings {
                 }
                 "page_order" => {
                     if let Ok(order)=v.split(',').map(str::parse::<usize>).collect::<Result<Vec<_>,_>>() {
-                        if order.len()==8 && (0..8).all(|page|order.contains(&page)) {
-                            s.page_order.copy_from_slice(&order);
+                        if (8..=9).contains(&order.len()) && (0..order.len()).all(|page|order.contains(&page)) {
+                            s.page_order[..order.len()].copy_from_slice(&order);
                         }
                     }
                 }
                 "clock_period" => s.clock_period = v.parse::<u8>().ok().filter(|v|*v<=2).unwrap_or(0),
                 "clock_12h" => s.clock_12h = v == "1",
                 "show_battery" => s.show_battery = v != "0",
-                "visible_pages" if (6..=8).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
+                "world_clock_cities" => {
+                    if let Ok(cities)=serde_json::from_str::<Vec<String>>(&v) {
+                        let cities=crate::world_clock::valid_cities(cities);
+                        if !cities.is_empty(){s.world_clock_cities=cities;}
+                    }
+                }
+                "visible_pages" if (6..=9).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
                     for (enabled,value) in s.visible_pages.iter_mut().zip(v.bytes()) { *enabled=value==b'1'; }
                     for enabled in &mut s.visible_pages[v.len()..]{*enabled=v.bytes().any(|b|b==b'1');}
                 }
@@ -213,6 +226,7 @@ impl Settings {
             &[
                 ("display_id".into(),self.display_id.clone()),
                 ("settings_theme".into(),self.settings_theme.key().into()),
+                ("language".into(),self.language.key().into()),
                 ("pet".into(), if self.pet { "1".to_string() } else { "0".to_string() }),
                 ("minimal".into(), if self.minimal { "1".to_string() } else { "0".to_string() }),
                 ("browser_minimal".into(), (self.browser_minimal as u8).to_string()),
@@ -220,6 +234,7 @@ impl Settings {
                 ("avoid_apps".into(), serde_json::to_string(&self.avoid_apps).unwrap_or_default()),
                 ("visible_pages".into(), self.visible_pages.iter().map(|enabled|if *enabled {'1'}else{'0'}).collect()),
                 ("page_order".into(),self.page_order.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
+                ("world_clock_cities".into(),serde_json::to_string(&self.world_clock_cities).unwrap_or_default()),
                 ("resident_order".into(),self.resident_order.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
                 ("clock_period".into(), self.clock_period.to_string()),
                 ("clock_12h".into(), (self.clock_12h as u8).to_string()),

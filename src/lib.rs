@@ -18,6 +18,7 @@ mod calendar_editor;
 pub mod glass;
 pub mod icons;
 pub mod input;
+pub mod i18n;
 pub mod lyrics;
 pub mod mail;
 mod mail_reader;
@@ -41,6 +42,7 @@ pub mod smtc;
 pub mod theme;
 pub mod settings_theme;
 mod updates;
+mod world_clock;
 
 #[cfg(windows)]
 pub mod native;
