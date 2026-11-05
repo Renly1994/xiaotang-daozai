@@ -123,10 +123,12 @@ impl App {
     pub fn quota_event(&mut self,event:quota::Event){self.quota.receive(event);}
     pub fn quota_set_source(&mut self,path:std::path::PathBuf){self.quota.source=path.to_string_lossy().into_owned();}
     pub(crate) fn quota_bar_indices(&self)->Vec<usize>{
+        if self.hub.active{return self.hub_bar_indices();}
         if !self.quota.config.enabled || !self.quota.config.compact || !self.settings.visible_pages[6] || self.settings.minimal || self.t<self.notification_bell_until{return vec![];}
         self.quota.config.pinned_indices()
     }
     pub(crate) fn draw_quota_bar(&mut self,c:&Card,cx:f32,layout:&crate::bar_layout::Layout){
+        if self.hub.active{return self.hub_draw_bar(c,cx,layout);}
         let indices=self.quota_bar_indices();let mut chosen=None;
         for (position,i)in indices.iter().take(3).enumerate(){
             let alpha=layout.pet_clearance(crate::bar_layout::QUOTA+position);
@@ -142,6 +144,7 @@ impl App {
         if let Some(id)=chosen{self.quota.config.selected=id;self.quota.config.save();self.show_page(6);}
     }
     pub(crate) fn page_quota(&mut self,c:&Card){
+        if self.hub.active{return self.page_hub(c);}
         if c.hit(303.0,8.0,32.0,21.0,"quota-refresh").on_hover_text("刷新额度").clicked(){self.pending.push(Cmd::QuotaRefresh);}
         c.text(319.0,23.0,if self.quota.busy.is_empty(){"刷新"}else{"更新中"},10.5,W::Regular,theme::GRAY,H::Center);
         let Some(selected)=self.quota.config.selected_index() else{
@@ -175,6 +178,8 @@ impl App {
         }else{let message=if self.quota.busy.contains(&a.id){"正在更新额度…"}else{result.and_then(|r|r.as_ref().err()).map(String::as_str).unwrap_or("等待更新额度")};for(i,line)in c.wrap(message,11.0,W::Regular,197.0,2).iter().enumerate(){c.text(157.0,87.0+i as f32*17.0,line,11.0,W::Regular,theme::GRAY,H::Left);}}
     }
     pub(crate) fn quota_settings(&mut self,ui:&mut egui::Ui){
+        if self.hub.active{return self.hub_settings(ui);}
+        if self.hub_mode_offer(ui){return;}
         let before=self.quota.config.clone();settings_label(ui,"显示");settings_card(ui,|ui|{
             setting_row(ui,"AI 额度","每 3 分钟自动更新，可手动刷新",&mut self.quota.config.enabled);ui.separator();
             setting_row(ui,"收起时显示圆环","常驻账号最多显示 3 个，点击查看详情",&mut self.quota.config.compact);

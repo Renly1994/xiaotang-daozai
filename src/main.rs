@@ -57,6 +57,8 @@ struct Shell {
     quota: daozai::quota::Service,
     quota_sig: Option<(bool,Vec<daozai::quota::Account>)>,
     quota_at: PollClock,
+    /// 账号岛：只有打开多账号模式后才启动后台线程。
+    hub: Option<daozai::hub::Service>,
 }
 
 impl Shell {
@@ -67,7 +69,7 @@ impl Shell {
         #[cfg(feature="record")] let quota_demo=std::env::var("DAOZAI_QUOTA_DEMO").is_ok();
         #[cfg(not(feature="record"))] let quota_demo=false;
         diagnostics::startup("初始化额度配置");
-        if !quota_demo{app.quota_initialize();}
+        if !quota_demo{if app.hub_wanted(){app.hub_enable();}else{app.quota_initialize();}}
         if std::env::args().any(|arg|arg=="--settings"){app.open_settings();}
         if std::env::args().any(|arg|arg=="--calendar"){app.open_calendar(None);}
         #[cfg(feature="record")]
@@ -133,7 +135,7 @@ impl Shell {
             mail_sig: (false, 0, Vec::new()),
             cal: daozai::calendar::Service::start(),
             cal_sig: (Vec::new(), true),
-            quota: daozai::quota::Service::start(), quota_sig: None, quota_at: PollClock::default(),
+            quota: daozai::quota::Service::start(), quota_sig: None, quota_at: PollClock::default(), hub: None,
         }
     }
 
@@ -321,7 +323,15 @@ impl eframe::App for Shell {
         while let Some(ev)=self.cal.try_recv(){self.app.calendar_event(ev);}
         #[cfg(feature="record")] let quota_demo=std::env::var("DAOZAI_QUOTA_DEMO").is_ok();
         #[cfg(not(feature="record"))] let quota_demo=false;
-        if !quota_demo {
+        if self.app.hub_active() {
+            let wake=ctx.clone();
+            let hub=self.hub.get_or_insert_with(move||daozai::hub::Service::start(move||wake.request_repaint()));
+            while let Some(ev)=hub.try_recv(){
+                if let daozai::hub::Ev::Copy(text)=&ev {ctx.copy_text(text.clone());}
+                self.app.hub_event(ev);
+            }
+        }else{self.hub=None;}
+        if !quota_demo && !self.app.hub_active() {
             let config=self.app.quota_config();let sig=(config.enabled,config.accounts.iter().cloned().map(|mut a|{a.alias.clear();a.pinned=false;a}).collect::<Vec<_>>());
             if self.quota_sig.as_ref()!=Some(&sig) || self.quota_at.ready(Duration::from_secs(180)){
                 let accounts:Vec<_>=sig.1.iter().filter(|a|sig.0 && a.enabled).cloned().collect();
@@ -346,6 +356,7 @@ impl eframe::App for Shell {
             let hit=if self.hidden {(0.0,0.0,0.0,0.0)} else {r(out.hit)};
             native.update(region, hit, if self.hidden{None}else{out.notice_hit.map(r)},if self.hidden{None}else{out.file_drop_zone.map(r)},ctx.pixels_per_point(), out.editing, !self.hidden && out.expanded);
         }
+        for req in self.app.hub_drain(){if let Some(hub)=&self.hub{hub.send(req);}}
         for cmd in out.cmds {
             match cmd {
                 Cmd::Media(t) => {
@@ -374,6 +385,7 @@ impl eframe::App for Shell {
                 Cmd::QuotaChooseFile=>{
                     #[cfg(windows)] match daozai::system::pick_files_for("选择 AI 账号的登录 JSON 文件",false){Ok(files)=>if let Some(path)=files.into_iter().next(){self.app.quota_set_source(path);},Err(_)=>self.app.say("无法选择登录文件")}
                 },
+                Cmd::QuotaRefresh if self.app.hub_active()=>{if let Some(hub)=&self.hub{hub.send(daozai::hub::Req::Refresh(None));}},
                 Cmd::QuotaRefresh=>{
                     if self.quota_at.ready(Duration::from_secs(15)) {
                         let config=self.app.quota_config();let accounts:Vec<_>=config.accounts.iter().filter(|a|config.enabled && a.enabled).cloned().collect();

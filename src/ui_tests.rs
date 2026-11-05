@@ -1382,6 +1382,207 @@ fn resident_layout_gallery(){
     eprintln!("常驻组件预览：{}",dest.display());
 }
 
+// 账号岛：用合成数据，不碰真实账号。
+fn hub_demo_view(phase:crate::hub::Phase,week:f32,five:f32)->crate::hub::View{
+    use crate::hub::{usage::{Limits,Win},AccountView,Group,store::Account};
+    let reset=Some(chrono::Utc::now().timestamp_millis()+3*3_600_000);
+    let acc=|id:&str,group:Group,email:&str,uuid:Option<&str>,w5:f32,w:f32,signed:bool,sessions:Option<usize>,missing:Option<usize>|AccountView{
+        a:Account{id:id.into(),group,kind:"cli".into(),email:email.into(),mail_url:"https://mail.example.com".into(),plan:"Pro".into(),reg_date:"2026-10-25".into(),note:String::new(),status:"active".into(),status_at:String::new(),account_uuid:uuid.map(str::to_owned),config_dir:Some(format!("C:\\demo\\{id}-usage").into()),quota_dir:None,color:None,pinned:true},
+        lim:Some(Limits{at:1,w5:Some(Win{used:w5,resets_at:reset}),week:Some(Win{used:w,resets_at:reset}),plan:String::new()}),
+        sessions,missing,signed_in:signed,has_password:true,quota_note:String::new(),exhausted:vec!["11-03 21:40 · 5 小时用完".into(),"10-29 16:05 · 本周用完".into()],backups:2,logging_in:false};
+    crate::hub::View{accounts:vec![
+        acc("work-main",Group::Claude,"work.main@example.com",Some("11111111-aaaa-4aaa-8aaa-111111111111"),five,week,true,Some(11),Some(0)),
+        acc("spare",Group::Claude,"spare.account@example.com",Some("22222222-bbbb-4bbb-8bbb-222222222222"),72.0,7.0,false,Some(10),Some(2)),
+        acc("codex-a",Group::Codex,"codex@example.com",None,0.0,4.0,false,None,None),
+    ],current:"work-main".into(),current_codex:"codex-a".into(),phase,app_running:true,quota_busy:false,unbound:None,auto_fill:true,last_auto_fill:"11-04 18:31 给 work-main 补了 2 条".into(),alert:Default::default()}
+}
+fn hub_demo_tasks(states:&[crate::hub::tasks::TaskState])->Vec<crate::hub::tasks::Task>{
+    let names=[("把账号岛的额度提醒接到系统通知并补上测试","账号岛"),("给发票工具加批量导出","发票工具"),("整理知识库里的重复条目","知识库"),("修复日报脚本的时区问题","日报脚本"),("官网首页改版的样式调整","官网"),("清洗上个月的销售数据","数据清洗")];
+    let now=chrono::Utc::now().timestamp_millis();
+    states.iter().enumerate().map(|(i,s)|crate::hub::tasks::Task{id:format!("task-{i}"),title:names[i].0.into(),project:names[i].1.into(),state:*s,since:now-(i as i64+3)*300_000}).collect()
+}
+/// 收起时的刘海：不展开面板，眼睛打开
+fn hub_bar_harness(view:crate::hub::View,tasks:Vec<crate::hub::tasks::Task>)->H{
+    let mut h=H::new();h.app.settings.pet=true;h.app.hub_enable();h.app.hub_event(crate::hub::Ev::View(Box::new(view)));
+    h.app.hub_event(crate::hub::Ev::Tasks(tasks));h
+}
+fn hub_bar_scenes()->Vec<(&'static str,H)>{
+    use crate::hub::{Phase,tasks::TaskState::{Done,Running as Run,Waiting as Ask}};
+    let idle=||hub_demo_view(Phase::Idle,84.0,33.0);
+    vec![
+        ("bar-standby",hub_bar_harness(idle(),vec![])),
+        ("bar-running",hub_bar_harness(idle(),hub_demo_tasks(&[Run]))),
+        ("bar-waiting",hub_bar_harness(idle(),hub_demo_tasks(&[Ask]))),
+        ("bar-done",hub_bar_harness(idle(),hub_demo_tasks(&[Done]))),
+        ("bar-six",hub_bar_harness(idle(),hub_demo_tasks(&[Run,Run,Ask,Done,Run,Run]))),
+        ("bar-out",hub_bar_harness(hub_demo_view(Phase::Idle,84.0,100.0),hub_demo_tasks(&[Run]))),
+    ]
+}
+fn hub_harness(view:crate::hub::View,setup:impl FnOnce(&mut H))->H{
+    let mut h=H::new();h.app.settings.pet=false;h.app.hub_enable();h.app.hub_event(crate::hub::Ev::View(Box::new(view)));
+    setup(&mut h);h.app.show_page(6);h
+}
+fn hub_scenes()->Vec<(&'static str,H)>{
+    use crate::hub::Phase;use crate::hub_ui::Page;
+    let steps=vec!["强制关闭 Claude 桌面端".to_string(),"同步会话列表（2 条）".into(),"自动启动 Claude 桌面端".into(),"检测桌面端登录".into()];
+    vec![
+        ("quota-current",hub_harness(hub_demo_view(Phase::Idle,84.0,33.0),|_|{})),
+        ("quota-other",hub_harness(hub_demo_view(Phase::Idle,84.0,33.0),|h|{h.app.hub.claude_at="spare".into();})),
+        ("quota-info",hub_harness(hub_demo_view(Phase::Idle,84.0,33.0),|h|{h.app.hub.info=true;})),
+        ("quota-exhausted",hub_harness(hub_demo_view(Phase::Idle,84.0,100.0),|_|{})),
+        ("quota-unused",hub_harness(hub_demo_view(Phase::Idle,0.0,0.0),|_|{})),
+        ("quota-tasks",hub_harness(hub_demo_view(Phase::Idle,84.0,100.0),|h|{h.app.hub.tasks=hub_demo_tasks(&[crate::hub::tasks::TaskState::Running,crate::hub::tasks::TaskState::Waiting]);})),
+        ("quick",hub_harness(hub_demo_view(Phase::Idle,84.0,100.0),|h|{h.app.hub.page=Page::Quick;})),
+        ("quick-busy",hub_harness(hub_demo_view(Phase::Idle,84.0,100.0),|h|{h.app.hub.page=Page::Quick;h.app.hub.tasks=hub_demo_tasks(&[crate::hub::tasks::TaskState::Running]);})),
+        ("tasks",hub_harness(hub_demo_view(Phase::Idle,84.0,33.0),|h|{use crate::hub::tasks::TaskState::{Done,Running as Run,Waiting as Ask};h.app.hub.page=Page::Tasks;h.app.hub.tasks=hub_demo_tasks(&[Ask,Run,Run,Run,Run,Done]);})),
+        ("switch-running",hub_harness(hub_demo_view(Phase::Running{target:"spare".into(),steps,at:1},84.0,33.0),|h|{h.app.hub.claude_at="spare".into();})),
+        ("switch-waiting",hub_harness(hub_demo_view(Phase::Waiting{target:"spare".into(),still:Some("work-main".into()),wrong:None},84.0,33.0),|h|{h.app.hub.claude_at="spare".into();})),
+        ("manage",hub_harness(hub_demo_view(Phase::Idle,84.0,33.0),|h|{h.app.hub.page=Page::Manage;})),
+        ("detail",hub_harness(hub_demo_view(Phase::Idle,84.0,33.0),|h|{h.app.hub.page=Page::Detail;h.app.hub.detail="work-main".into();h.app.hub.heat=Some(("work-main".into(),(0..28u64).map(|i|i*i%37).collect()));})),
+        ("codex",hub_harness(hub_demo_view(Phase::Idle,84.0,33.0),|h|{h.app.hub.codex_tab=true;h.app.hub.codex_at="codex-a".into();})),
+    ]
+}
+#[test]
+#[ignore="按需导出账号岛各页面的实际渲染画面"]
+fn account_island_gallery(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_HUB_PREVIEW_DIR").expect("需指定预览目录"));std::fs::create_dir_all(&dest).unwrap();
+    for (name,mut h) in hub_scenes().into_iter().chain(hub_bar_scenes()){
+        let mut raster=crate::preview_raster::Raster::new(1280,540);
+        for frame in 0..90 {
+            let t=frame as f64/60.0;
+            let env=Env{t,clock:"09:41:00".into(),today:"2026-10-31".into(),date:"10月31日 周六".into(),bt_ready:true,..Default::default()};
+            let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(WIN_W,WIN_H))),time:Some(t),
+                viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};
+            let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{let win=ui.max_rect();h.app.frame(ui,win,&env);});});
+            raster.update_textures(&output.textures_delta);
+            if frame==89 {
+                raster.buf.fill([0.09,0.11,0.18,1.0]);raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);
+                let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+                let image=image::RgbaImage::from_raw(1280,540,rgba).unwrap();
+                image::imageops::crop_imm(&image,200,0,880,540).to_image().save(dest.join(format!("{name}.png"))).unwrap();
+            }
+            raster.free_textures(&output.textures_delta);
+        }
+    }
+    eprintln!("账号岛预览：{}",dest.display());
+}
+fn hub_frames(h:&mut H,frames:usize)->Vec<egui::epaint::ClippedShape>{
+    let mut last=Vec::new();
+    for frame in 0..frames {
+        let t=frame as f64/60.0;
+        let env=Env{t,clock:"09:41:00".into(),today:"2026-10-31".into(),date:"10月31日 周六".into(),bt_ready:true,..Default::default()};
+        let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(WIN_W,WIN_H))),time:Some(t),..Default::default()};
+        last=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{let win=ui.max_rect();h.app.frame(ui,win,&env);});}).shapes;
+    }
+    last
+}
+#[test]
+fn account_island_text_never_overlaps_or_leaves_the_panel(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for (name,mut h) in hub_scenes(){
+        let shapes=hub_frames(&mut h,90);
+        let panel=H::local(0.0,0.0).x;
+        let texts:Vec<(String,Rect)>=shapes.iter().filter_map(|s|match &s.shape {egui::Shape::Text(t) if !t.galley.text().trim().is_empty()=>Some((t.galley.text().to_owned(),t.visual_bounding_rect().shrink(1.5))),_=>None}).collect();
+        assert!(texts.len()>3,"{name} 应画出内容");
+        for (i,(a,r)) in texts.iter().enumerate(){
+            assert!(r.left()>=panel&&r.right()<=panel+crate::app::PW,"{name}：{a} 超出面板");
+            assert!(r.bottom()<=h.app.expanded_height(),"{name}：{a} 超出面板底部");
+            for (b,o) in &texts[i+1..]{assert!(!r.intersects(*o),"{name}：{a} 与 {b} 不得重叠");}
+        }
+    }
+}
+#[test]
+fn account_island_reminds_once_but_never_switches_by_itself(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=hub_harness(hub_demo_view(crate::hub::Phase::Idle,84.0,100.0),|_|{});
+    h.app.hub.page=crate::hub_ui::Page::Manage;h.app.hub_drain();
+    h.app.t=100.0;
+    h.app.hub_event(crate::hub::Ev::Exhausted{id:"work-main".into(),window:"5 小时".into(),resets_at:None,repeat:false});
+    assert!(h.app.hub.page==crate::hub_ui::Page::Manage,"提醒不抢用户正在看的页面");
+    assert!(h.app.pending.iter().any(|c|matches!(c,crate::app::Cmd::Notify(t,b) if t=="额度用完了"&&b.contains("work-main"))));
+    assert!((h.app.hub.shake_until-103.0).abs()<0.01,"默认只短震 3 秒");
+    assert!(!h.app.hub_drain().iter().any(|r|matches!(r,crate::hub::Req::Switch(_))),"提醒不能发起切换");
+    // 再提醒：只发消息，不再震动
+    h.app.t=500.0;h.app.pending.clear();
+    h.app.hub_event(crate::hub::Ev::Exhausted{id:"work-main".into(),window:"5 小时".into(),resets_at:None,repeat:true});
+    assert!(h.app.pending.iter().any(|c|matches!(c,crate::app::Cmd::Notify(t,_) if t=="额度还没恢复")));
+    assert!(h.app.hub.shake_until<h.app.t,"再提醒默认不震动");
+    assert!(!h.app.hub_drain().iter().any(|r|matches!(r,crate::hub::Req::Switch(_))),"再提醒也不能发起切换");
+}
+/// 刘海上画出来的文字
+fn hub_bar_texts(h:&mut H,frames:usize)->Vec<String>{
+    hub_frames(h,frames).iter().filter_map(|s|match &s.shape{egui::Shape::Text(t) if !t.galley.text().trim().is_empty()=>Some(t.galley.text().to_owned()),_=>None}).collect()
+}
+#[test]
+fn account_island_standby_shows_only_the_current_account_and_the_clock(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=hub_bar_harness(hub_demo_view(crate::hub::Phase::Idle,84.0,33.0),vec![]);
+    let texts=hub_bar_texts(&mut h,30);
+    assert_eq!(h.app.hub_bar_indices().len(),1,"待机只显示当前账号");
+    assert!(h.app.hub_bar_extra().is_none(),"没有任务时显示时钟");
+    assert_eq!(texts.iter().filter(|t|t.len()==1&&t.chars().all(|c|c.is_ascii_uppercase())).count(),1,"只画一个账号字母：{texts:?}");
+}
+#[test]
+fn account_island_running_task_hides_the_clock_and_flips_its_whole_title(){
+    use crate::hub::tasks::TaskState::Running;
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=hub_bar_harness(hub_demo_view(crate::hub::Phase::Idle,84.0,33.0),hub_demo_tasks(&[Running]));
+    let first=hub_bar_texts(&mut h,30).join("");
+    assert!(h.app.hub_bar_extra().is_some());
+    assert!(!first.contains("09:41")&&!first.contains("41"),"有任务时隐藏时间：{first}");
+    assert!(first.contains("把账号岛"),"先显示开头：{first}");
+    // 分段翻动：过一会儿显示后半段（测试帧的时间从 0 重新算，这里把起点往前拨）
+    h.app.hub.flip_at=-3.2;
+    let later=hub_bar_texts(&mut h,30).join("");
+    assert!(later.contains("测试"),"翻到后半段：{later}");
+}
+#[test]
+fn account_island_many_tasks_keep_their_numbers_and_show_counts(){
+    use crate::hub::tasks::TaskState::{Done,Running,Waiting};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=hub_bar_harness(hub_demo_view(crate::hub::Phase::Idle,84.0,33.0),hub_demo_tasks(&[Running,Running,Waiting,Done,Running,Running]));
+    let texts=hub_bar_texts(&mut h,30);
+    assert!(texts.iter().any(|t|t=="1/6"),"有编号：{texts:?}");
+    assert!(texts.iter().any(|t|t=="4")&&texts.iter().any(|t|t=="1"),"有各状态计数：{texts:?}");
+    // 状态变了，编号对应的任务不变
+    let mut changed=hub_demo_tasks(&[Done,Running,Running,Done,Waiting,Running]);changed[0].title=h.app.hub.tasks[0].title.clone();
+    h.app.hub_event(crate::hub::Ev::Tasks(changed));
+    assert_eq!(h.app.hub.tasks[0].title,hub_demo_tasks(&[Running])[0].title);
+}
+#[test]
+fn account_island_used_up_quota_shows_only_the_alert_not_the_tasks(){
+    use crate::hub::tasks::TaskState::Running;
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=hub_bar_harness(hub_demo_view(crate::hub::Phase::Idle,84.0,100.0),hub_demo_tasks(&[Running]));
+    let texts=hub_bar_texts(&mut h,30).join("");
+    assert!(texts.contains("额度已用完"),"显示提醒：{texts}");
+    assert!(!texts.contains("把账号岛"),"用完时不翻任务名：{texts}");
+    assert!(h.app.hub_alerting());
+}
+#[test]
+fn account_island_quick_switch_needs_a_second_click_only_when_tasks_are_running(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=hub_harness(hub_demo_view(crate::hub::Phase::Idle,84.0,100.0),|h|{h.app.hub.page=crate::hub_ui::Page::Quick;});
+    let texts=hub_bar_texts(&mut h,90).join("|");
+    assert!(texts.contains("spare")&&texts.contains("切换"),"列出别的账号：{texts}");
+    assert!(texts.contains("5 小时剩余 28%"),"显示剩余额度：{texts}");
+    assert!(texts.contains("work-main 的 5 小时额度用完了"),"{texts}");
+    assert!(!h.app.hub_drain().iter().any(|r|matches!(r,crate::hub::Req::Switch(_))),"不点不会切换");
+}
+#[test]
+fn account_island_password_is_hidden_again_after_ten_seconds(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=hub_harness(hub_demo_view(crate::hub::Phase::Idle,84.0,33.0),|h|{h.app.hub.info=true;});
+    hub_frames(&mut h,3);
+    h.app.hub_event(crate::hub::Ev::Secret("work-main".into(),"synthetic-secret".into()));
+    assert!(h.app.hub.secret.is_some());
+    assert!(h.app.hub.secret.as_ref().unwrap().2>=h.app.t+9.9,"明文最多显示 10 秒");
+    h.app.hub.secret.as_mut().unwrap().2=-1.0;
+    hub_frames(&mut h,2);
+    assert!(h.app.hub.secret.is_none(),"到时间后明文要从内存里丢弃");
+}
+
 #[test]
 fn quota_text_stays_inside_the_inner_ring_at_zero_and_full_usage() {
     use crate::quota::{Event,Snapshot,Window};
