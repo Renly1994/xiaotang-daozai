@@ -57,6 +57,7 @@ struct Shell {
     quota: daozai::quota::Service,
     quota_sig: Option<(bool,Vec<daozai::quota::Account>)>,
     quota_at: PollClock,
+    steam: daozai::steam::Service,
 }
 
 impl Shell {
@@ -70,6 +71,7 @@ impl Shell {
         if !quota_demo{app.quota_initialize();}
         if std::env::args().any(|arg|arg=="--settings"){app.open_settings();}
         if std::env::args().any(|arg|arg=="--calendar"){app.open_calendar(None);}
+        if std::env::args().any(|arg|arg=="--steam"){app.open_steam_settings();}
         #[cfg(feature="record")]
         if std::env::var("DAOZAI_MAIL_DEMO").is_ok(){app.mail_demo();}
         #[cfg(feature="record")]
@@ -134,6 +136,7 @@ impl Shell {
             cal: daozai::calendar::Service::start(),
             cal_sig: (Vec::new(), true),
             quota: daozai::quota::Service::start(), quota_sig: None, quota_at: PollClock::default(),
+            steam: daozai::steam::Service::start(cc.egui_ctx.clone()),
         }
     }
 
@@ -298,6 +301,7 @@ impl eframe::App for Shell {
             }
         }
         let env = self.env(ctx);
+        while let Some(event)=self.steam.try_recv(){self.app.steam_event(event);}
         // v0.5.5 邮件：开关 / 间隔 / 账号清单变了就重新对齐收信线程，再把事件交给界面。
         let sig=(self.app.settings.mail_enabled,self.app.settings.mail_interval,self.app.mail_accounts().to_vec());
         if sig!=self.mail_sig{
@@ -342,7 +346,7 @@ impl eframe::App for Shell {
         if let Some(native) = &mut self.native {
             let r = |r: egui::Rect| (r.left(), r.top(), r.width(), r.height());
             // 保留主窗口的事件循环，避免全屏隐藏后设置窗口无法关闭或重新打开。
-            let region=if self.hidden {(0.0,0.0,0.0,0.0)} else {r(out.region)};
+            let region=if self.hidden && !self.app.steam_fullscreen_notice() {(0.0,0.0,0.0,0.0)} else {r(out.region)};
             let hit=if self.hidden {(0.0,0.0,0.0,0.0)} else {r(out.hit)};
             native.update(region, hit, if self.hidden{None}else{out.notice_hit.map(r)},if self.hidden{None}else{out.file_drop_zone.map(r)},ctx.pixels_per_point(), out.editing, !self.hidden && out.expanded);
         }
@@ -407,6 +411,7 @@ impl eframe::App for Shell {
                 },
                 Cmd::MailTest(account,password)=>self.mail.test(account,password),
                 Cmd::CalendarTest(cfg,password)=>self.cal.test(cfg,password),
+                Cmd::Steam(action)=>self.steam.send(action),
                 Cmd::CalendarSync=>self.cal.sync_now(),
                 Cmd::CalendarMonth(month)=>self.cal.view_month(month),
                 Cmd::CalendarForget=>{
@@ -425,7 +430,7 @@ impl eframe::App for Shell {
         #[cfg(not(windows))] let autostart = false;
         self.app.settings_ui(ctx, autostart);
         self.app.mail_reader_ui(ctx);
-        #[cfg(windows)] let repaint_after=if self.hidden{Duration::from_secs(1)}else{out.repaint_after};
+        #[cfg(windows)] let repaint_after=if self.hidden && !self.app.steam_fullscreen_notice(){Duration::from_secs(1)}else{out.repaint_after};
         #[cfg(not(windows))] let repaint_after=out.repaint_after;
         schedule_repaint(ctx,repaint_after);
     }

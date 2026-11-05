@@ -69,6 +69,10 @@ fn tomato(c:&Card,x:f32,y:f32,fraction:f32,t:f32){
     c.poly(&[(x,y),(x+0.3+sway,y-3.3),(x+2.0,y-0.4)],leaf);
 }
 
+pub(crate) fn shortcut(c:&Card,x:f32,y:f32){
+    tomato(c,x,y,1.0,0.0);
+}
+
 pub(crate) fn tea(c:&Card,x:f32,y:f32,fraction:f32,t:f32){
     let porcelain=Color32::from_rgb(245,242,234);
     c.fill(x-5.6,y-1.5,10.0,7.5,2.7,porcelain);

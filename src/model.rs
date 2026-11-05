@@ -92,12 +92,15 @@ pub struct Settings {
     pub browser_minimal: bool,
     pub avoid_browsers: bool,
     pub avoid_apps: Vec<(String,String)>,
-    pub visible_pages: [bool; 8],
-    pub page_order: [usize; 8],
+    pub visible_pages: [bool; 9],
+    pub page_order: [usize; 9],
+    pub steam_notice_seconds: u32,
     pub show_battery: bool,
     pub clock_12h: bool,
     pub clock_period: u8,
     pub resident_order: Vec<usize>,
+    pub resident_pages: [bool;9],
+    pub hover_page_delay_ms: u32,
     pub system_hud: bool,
     pub bluetooth_notifications: bool,
     pub read_notifications:bool,
@@ -129,7 +132,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
+        Self { display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 9], page_order: [0,1,2,3,4,5,6,7,8], steam_notice_seconds: 8, show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), resident_pages:[false;9], hover_page_delay_ms:500, system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
     }
 }
 
@@ -160,22 +163,30 @@ impl Settings {
                 "avoid_apps" => s.avoid_apps = serde_json::from_str(&v).unwrap_or_default(),
                 "resident_order" => {
                     let order:Vec<usize>=v.split(',').filter_map(|n|n.parse().ok()).collect();
-                    if crate::bar_layout::valid_order(&order){s.resident_order=order;}
+                    if let Some(order)=crate::bar_layout::normalize_order(&order){s.resident_order=order;}
                 }
+                "resident_pages" if v.len()==9 && v.bytes().all(|b|b==b'0'||b==b'1')=>{
+                    for (on,value) in s.resident_pages.iter_mut().zip(v.bytes()){*on=value==b'1';}
+                }
+                "hover_page_delay_ms" => s.hover_page_delay_ms=v.parse::<u32>().unwrap_or(500).clamp(200,1500),
                 "page_order" => {
                     if let Ok(order)=v.split(',').map(str::parse::<usize>).collect::<Result<Vec<_>,_>>() {
-                        if order.len()==8 && (0..8).all(|page|order.contains(&page)) {
+                        if order.len()==9 && (0..9).all(|page|order.contains(&page)) {
                             s.page_order.copy_from_slice(&order);
+                        } else if order.len()==8 && (0..8).all(|page|order.contains(&page)) {
+                            s.page_order[..8].copy_from_slice(&order);
                         }
                     }
                 }
                 "clock_period" => s.clock_period = v.parse::<u8>().ok().filter(|v|*v<=2).unwrap_or(0),
                 "clock_12h" => s.clock_12h = v == "1",
                 "show_battery" => s.show_battery = v != "0",
-                "visible_pages" if (6..=8).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
+                "visible_pages" if (6..=9).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
                     for (enabled,value) in s.visible_pages.iter_mut().zip(v.bytes()) { *enabled=value==b'1'; }
                     for enabled in &mut s.visible_pages[v.len()..]{*enabled=v.bytes().any(|b|b==b'1');}
+                    if v.len()<9 { s.visible_pages[8]=true; }
                 }
+                "steam_notice_seconds" => s.steam_notice_seconds=v.parse::<u32>().unwrap_or(8).clamp(3,30),
                 "read_notifications" => s.read_notifications=v=="1",
                 "notification_preview" => s.notification_preview=v=="1",
                 "system_hud" => s.system_hud = v != "0",
@@ -220,7 +231,10 @@ impl Settings {
                 ("avoid_apps".into(), serde_json::to_string(&self.avoid_apps).unwrap_or_default()),
                 ("visible_pages".into(), self.visible_pages.iter().map(|enabled|if *enabled {'1'}else{'0'}).collect()),
                 ("page_order".into(),self.page_order.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
+                ("steam_notice_seconds".into(),self.steam_notice_seconds.to_string()),
                 ("resident_order".into(),self.resident_order.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
+                ("resident_pages".into(),self.resident_pages.iter().map(|on|if *on{'1'}else{'0'}).collect()),
+                ("hover_page_delay_ms".into(),self.hover_page_delay_ms.to_string()),
                 ("clock_period".into(), self.clock_period.to_string()),
                 ("clock_12h".into(), (self.clock_12h as u8).to_string()),
                 ("show_battery".into(), (self.show_battery as u8).to_string()),

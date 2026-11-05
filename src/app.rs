@@ -3,10 +3,10 @@
 //!
 //! 时间一律来自 `Env::t`（秒），不直接读系统时钟，所以录屏可逐帧复现。
 
-use crate::extras::{Alert, PetState};
 use crate::anim::{self, lerp, smoothstep, Spring};
 use crate::bar_layout::{self as bar, Layout};
 use crate::calendar;
+use crate::extras::{Alert, PetState};
 use crate::glass;
 use crate::lyrics;
 use crate::mail;
@@ -23,7 +23,8 @@ use std::path::PathBuf;
 pub const PW: f32 = 419.0; // 展开面板宽
 pub const PH: f32 = 140.0; // 展开面板高
 pub(crate) const CALENDAR_PAGE: usize = 7;
-pub(crate) const CALENDAR_H: f32 = 216.0;
+pub(crate) const CALENDAR_H: f32 = 176.0;
+pub(crate) const CALENDAR_EDITOR_H: f32 = 224.0;
 pub const BAR_W: f32 = 163.0; // 收起药丸宽
 pub const BAR_H: f32 = 30.0; // 收起药丸高
 pub(crate) const HUD_W: f32 = 260.0;
@@ -38,7 +39,9 @@ pub const RAD: f32 = 33.0; // 底部圆角
 pub const WIN_W: f32 = 640.0; // 窗口（透明画布）
 pub const CANVAS_W: f32 = WIN_W + 320.0; // 保留右侧通知及阴影的完整空间，原岛仍按 WIN_W 定位。
 pub const WIN_H: f32 = 270.0;
-pub(crate) const PAGE_NAMES: [&str; 8] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程"];
+pub(crate) const PAGE_NAMES: [&str; 9] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程",
+    "Steam",
+];
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
@@ -64,7 +67,8 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { fetch_lyrics: true, pet_idle: 45.0 }
+        Self { fetch_lyrics: true, pet_idle: 45.0 ,
+        }
     }
 }
 
@@ -139,6 +143,7 @@ pub enum Cmd {
     CalendarMonth(chrono::NaiveDate),
     /// 断开并删除日历配置（凭据由界面删除）。
     CalendarForget,
+Steam(crate::steam::Action),
 }
 
 pub struct FrameOut {
@@ -185,14 +190,14 @@ pub(crate) struct LyricsState {
     pub error: Option<lyrics::FetchError>,
     pub retry_at: Option<f64>,
     pub lyrics: Option<lyrics::Lyrics>,
-    pub rx: Option<std::sync::mpsc::Receiver<Result<(lyrics::Lyrics,bool), lyrics::FetchError>>>,
+    pub rx: Option<std::sync::mpsc::Receiver<Result<(lyrics::Lyrics, bool), lyrics::FetchError>>>,
     pub native_rx: Option<std::sync::mpsc::Receiver<Option<lyrics::Lyrics>>>,
 }
 
 /// v0.5.5：邮件面板与设置表单的界面状态。正文只在内存里过一次，不落盘。
 #[derive(Default)]
 pub(crate) struct MailState {
-    pub privacy:crate::mail_privacy::Privacy,
+    pub privacy: crate::mail_privacy::Privacy,
     pub accounts: Vec<mail::Account>,
     /// 每个账号的连接状态，键是邮箱小写。
     pub status: HashMap<String, mail::Status>,
@@ -221,7 +226,9 @@ pub(crate) struct MailForm {
 
 impl MailState {
     /// 最近一封带验证码的邮件。
-    pub fn code_item(&self) -> Option<&mail::Item> {self.recent.iter().find(|m|m.code.is_some())}
+    pub fn code_item(&self) -> Option<&mail::Item> {
+        self.recent.iter().find(|m| m.code.is_some())
+    }
     pub fn status_of(&self, email: &str) -> mail::Status {
         self.status
             .get(&email.to_ascii_lowercase())
@@ -268,8 +275,15 @@ pub(crate) struct CalendarFeed {
 
 impl CalendarFeed {
     fn new(config: calendar::Config) -> Self {
-        Self { config, events: vec![], month: Default::default(), connected: false,
-            last_sync: String::new(), failures: 0, error: String::new() }
+        Self {
+            config,
+            events: vec![],
+            month: Default::default(),
+            connected: false,
+            last_sync: String::new(),
+            failures: 0,
+            error: String::new(),
+        }
     }
 }
 
@@ -285,13 +299,31 @@ pub(crate) struct CalendarForm {
 impl CalendarState {
     pub fn load() -> Self {
         let config = calendar::load_config();
-        let form = CalendarForm { provider: calendar::selected_provider(),
-            username: config.as_ref().map(|cfg| cfg.username.clone()).unwrap_or_default(), ..Default::default() };
-        let feeds = calendar::load_configs().into_iter().map(CalendarFeed::new).collect();
-        let (local,local_error)=match crate::local_calendar::load(){Ok(events)=>(events,String::new()),Err(error)=>(vec![],error)};
-        Self { config, form, feeds, local, local_error, ..Default::default() }
+        let form = CalendarForm {
+            provider: calendar::selected_provider(),
+            username: config
+                .as_ref()
+                .map(|cfg| cfg.username.clone())
+                .unwrap_or_default(),
+            ..Default::default()
+        };
+        let feeds = calendar::load_configs()
+            .into_iter()
+            .map(CalendarFeed::new)
+            .collect();
+        let (local, local_error) = match crate::local_calendar::load() {
+            Ok(events) => (events, String::new()),
+            Err(error) => (vec![], error),
+        };
+        Self {
+            config,
+            form,
+            feeds,
+            local,
+            local_error,
+            ..Default::default()
+        }
     }
-
 }
 
 pub struct App {
@@ -306,6 +338,8 @@ pub struct App {
     h: Spring,
     pub(crate) open: bool,
     hover_since: Option<f64>,
+    hover_page_target: Option<usize>,
+    hover_page_since: Option<f64>,
     leave_since: Option<f64>,
     /// 前台切换导致的强制收起：光标离开前不再自动展开。
     pub hover_lock: bool,
@@ -317,7 +351,7 @@ pub struct App {
     page_dir: f32,
     page_t0: f64,
     slide: Spring,
-    dots: [Spring; 8],
+    dots: [Spring; 9],
     wheel_delta: f32,
     wheel_at: f64,
     wheel_page_at: f64,
@@ -363,19 +397,19 @@ pub struct App {
     island_lyric_layout: Option<std::sync::Arc<egui::Galley>>,
     media_anchor: (String, f64, f64, bool),
     pub(crate) media: NowPlaying,
-    pub(crate) music_artwork: Option<(std::sync::Arc<egui::ColorImage>,egui::TextureHandle)>,
+    pub(crate) music_artwork: Option<(std::sync::Arc<egui::ColorImage>, egui::TextureHandle)>,
 
-    forced_open_until:f64,
-    pub settings_open:bool,
-    pub displays:Vec<crate::display_layout::Display>,
-    browser_at_top:bool,
-    browser_minimal_active:bool,
-    pub(crate) settings_focus_requested:bool,
-    pub(crate) settings_tab:usize,
-    pub(crate) settings_category:usize,
-    pub(crate) notification_apps:model::NotificationApps,
-    pub(crate) subpage:Option<usize>,
-    pub(crate) task_dialog:Option<crate::extras::TaskDraft>,
+    forced_open_until: f64,
+    pub settings_open: bool,
+    pub displays: Vec<crate::display_layout::Display>,
+    browser_at_top: bool,
+    browser_minimal_active: bool,
+    pub(crate) settings_focus_requested: bool,
+    pub(crate) settings_tab: usize,
+    pub(crate) settings_category: usize,
+    pub(crate) notification_apps: model::NotificationApps,
+    pub(crate) subpage: Option<usize>,
+    pub(crate) task_dialog: Option<crate::extras::TaskDraft>,
     pub listener_status: String,
     pub(crate) notification_bell_until: f64,
     pub(crate) notification_bell_at: f64,
@@ -419,8 +453,10 @@ pub struct App {
     pub(crate) calendar: CalendarState,
     pub(crate) quota: crate::quota_ui::State,
     pub(crate) updates: crate::updates::State,
+    pub(crate) steam: crate::steam_ui::State,
+    pub(crate) steam_images: crate::steam_assets::Images,
     pub(crate) resident: bar::Motion,
-    pub(crate) resident_power: (Option<u8>,bool),
+    pub(crate) resident_power: (Option<u8>, bool),
 }
 
 impl App {
@@ -435,10 +471,19 @@ impl App {
             s.visuals.selection.bg_fill = theme::alpha_blue(0.45);
         });
         let settings = model::Settings::load();
-        let (bw, bh) = if settings.minimal { (BAR_W_MIN, BAR_H_MIN) } else { (BAR_W, BAR_H) };
-        let focus_seconds=settings.focus_minutes as f32*60.0;
-        let initial_lyrics=settings.lyrics_enabled;
-        let initial_page=settings.page_order.iter().copied().find(|page|settings.visible_pages[*page]).unwrap_or(0);
+        let (bw, bh) = if settings.minimal {
+            (BAR_W_MIN, BAR_H_MIN)
+        } else {
+            (BAR_W, BAR_H)
+        };
+        let focus_seconds = settings.focus_minutes as f32 * 60.0;
+        let initial_lyrics = settings.lyrics_enabled;
+        let initial_page = settings
+            .page_order
+            .iter()
+            .copied()
+            .find(|page| settings.visible_pages[*page])
+            .unwrap_or(0);
         Self {
             opts,
             settings,
@@ -449,6 +494,8 @@ impl App {
             h: Spring::new(bh, CLOSE.0, CLOSE.1),
             open: false,
             hover_since: None,
+            hover_page_target: None,
+            hover_page_since: None,
             leave_since: None,
             hover_lock: false,
             reveal: 0.0,
@@ -457,7 +504,9 @@ impl App {
             page_dir: 1.0,
             page_t0: -10.0,
             slide: Spring::new(0.0, 260.0, 0.92),
-            dots: std::array::from_fn(|i| Spring::new(if i == initial_page { 16.0 } else { 4.0 }, 380.0, 0.86)),
+            dots: std::array::from_fn(|i| {
+                Spring::new(if i == initial_page { 16.0 } else { 4.0 }, 380.0, 0.86)
+            }),
             wheel_delta: 0.0,
             wheel_at: -1.0,
             wheel_page_at: -1.0,
@@ -468,7 +517,8 @@ impl App {
             shelf_first: 0,
             shelf_x: HashMap::new(),
             shelf_born: HashMap::new(),
-            icons: Default::default(), avoidance: Default::default(),
+            icons: Default::default(),
+            avoidance: Default::default(),
             confirm_clear: None,
             water_ring: Spring::new(0.0, 120.0, 0.9),
             water_ml: 0.0,
@@ -476,7 +526,11 @@ impl App {
             water_view_t: Spring::new(0.0, 200.0, 0.9),
             remind_t: Spring::new(1.0, 400.0, 0.8),
             last_reminder: 0.0,
-            pomo: Pomo { phase: Phase::Focus, remaining: focus_seconds, running: false },
+            pomo: Pomo {
+                phase: Phase::Focus,
+                remaining: focus_seconds,
+                running: false,
+            },
             ring_shown: Spring::new(1.0, 160.0, 0.95),
             reset_spin: Spring::new(0.0, 160.0, 0.82),
             adding: false,
@@ -491,18 +545,42 @@ impl App {
             media_anchor: (String::new(), 0.0, 0.0, false),
             media: NowPlaying::default(),
             music_artwork: None,
-            forced_open_until:0.0, settings_open:false, displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, settings_focus_requested:false, settings_tab:0, settings_category:0, notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
+            forced_open_until: 0.0,
+            settings_open: false,
+            displays: Vec::new(),
+            browser_at_top: false,
+            browser_minimal_active: false,
+            settings_focus_requested: false,
+            settings_tab: 0,
+            settings_category: 0,
+            notification_apps: model::NotificationApps::load(),
+            subpage: None,
+            task_dialog: None,
             listener_status: "尚未连接".into(),
-            notification_bell_until: 0.0, notification_bell_at: -10.0, notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, alerts: Default::default(), history: Default::default(), pending: vec![],
-            todo_first: 0, pet: Default::default(), last_drink: None,
-            toast: None, toast_below: false,
-            last_input: 0.0, system_idle: None,
+            notification_bell_until: 0.0,
+            notification_bell_at: -10.0,
+            notice: None,
+            hud_notice: None,
+            hud_alpha: 0.0,
+            notice_width: Spring::new(0.0, CLOSE.0, CLOSE.1),
+            notice_details: false,
+            alerts: Default::default(),
+            history: Default::default(),
+            pending: vec![],
+            todo_first: 0,
+            pet: Default::default(),
+            last_drink: None,
+            toast: None,
+            toast_below: false,
+            last_input: 0.0,
+            system_idle: None,
             last_cursor: None,
             pet_a: 0.0,
             last_t: None,
             t: 0.0,
             dt: 0.0,
-            today: String::new(), current_hour: 0,
+            today: String::new(),
+            current_hour: 0,
             cursor_local: None,
             started: false,
             volume_ui: None,
@@ -510,11 +588,17 @@ impl App {
             volume_a: 0.0,
             bt_shown: Vec::new(),
             bt_initialized: false,
-            mail: MailState { accounts: mail::load_accounts(), ..Default::default() },
+            mail: MailState {
+                accounts: mail::load_accounts(),
+                ..Default::default()
+            },
             calendar: CalendarState::load(),
             quota: crate::quota_ui::State::load(),
             updates: Default::default(),
-            resident: Default::default(), resident_power:(None,false),
+            steam: crate::steam_ui::State::load(),
+            steam_images: crate::steam_assets::Images::default(),
+            resident: Default::default(),
+            resident_power: (None, false),
         }
     }
 
@@ -523,25 +607,31 @@ impl App {
         self.toast_below = false;
     }
 
-    pub(crate) fn code_copied(&mut self, _code:&str) {
+    pub(crate) fn code_copied(&mut self, _code: &str) {
         self.say("验证码已复制");
         self.toast_below = true;
     }
 
-    pub(crate) fn mail_code_hidden(&self,item:&mail::Item)->bool {
-        self.mail.privacy.hidden(item,self.t,self.settings.mail_code_hide_seconds)
+    pub(crate) fn mail_code_hidden(&self, item: &mail::Item) -> bool {
+        self.mail
+            .privacy
+            .hidden(item, self.t, self.settings.mail_code_hide_seconds)
     }
-    pub(crate) fn reveal_mail_code(&mut self,item:&mail::Item){self.mail.privacy.reveal(item,self.t);}
-    pub(crate) fn display_mail(&self,item:&mail::Item)->mail::Item {
-        let mut safe=item.clone();
+    pub(crate) fn reveal_mail_code(&mut self, item: &mail::Item) {
+        self.mail.privacy.reveal(item, self.t);
+    }
+    pub(crate) fn display_mail(&self, item: &mail::Item) -> mail::Item {
+        let mut safe = item.clone();
         if self.mail_code_hidden(item) {
-            if let Some(code)=&item.code {
-                safe.subject=crate::mail_privacy::mask(&safe.subject,code);
-                safe.from=crate::mail_privacy::mask(&safe.from,code);
-                safe.summary=self.mail.privacy.masked_body(item);
+            if let Some(code) = &item.code {
+                safe.subject = crate::mail_privacy::mask(&safe.subject, code);
+                safe.from = crate::mail_privacy::mask(&safe.from, code);
+                safe.summary = self.mail.privacy.masked_body(item);
                 safe.links.clear(); // Avoid tooltip/URL/copy leaks while hidden.
-                if let Some(event)=&mut safe.meeting {event.title=crate::mail_privacy::mask(&event.title,code);}
-                safe.code=None;
+                if let Some(event) = &mut safe.meeting {
+                    event.title = crate::mail_privacy::mask(&event.title, code);
+                }
+                safe.code = None;
             }
         }
         safe
@@ -549,26 +639,45 @@ impl App {
 
     /// 收信服务推来的事件；历史邮件静默，新邮件进入通知队列。
     pub fn mail_event(&mut self, ev: mail::Event) {
-        let watching=|email:&str|self.settings.mail_enabled && self.mail.accounts.iter().any(|a|a.enabled && a.email.eq_ignore_ascii_case(email));
+        let watching = |email: &str| {
+            self.settings.mail_enabled
+                && self
+                    .mail
+                    .accounts
+                    .iter()
+                    .any(|a| a.enabled && a.email.eq_ignore_ascii_case(email))
+        };
         match ev {
             mail::Event::Status { account, status } => {
-                if !watching(&account){return;}
-                self.mail.status.insert(account.to_ascii_lowercase(), status);
+                if !watching(&account) {
+                    return;
+                }
+                self.mail
+                    .status
+                    .insert(account.to_ascii_lowercase(), status);
             }
             mail::Event::Mail { item, new } => {
-                if !watching(&item.account){return;}
-                self.mail.privacy.observe(&item,new,self.t,chrono::Utc::now().timestamp());
+                if !watching(&item.account) {
+                    return;
+                }
                 self.mail
-                    .recent
-                    .retain(|m| !(m.account.eq_ignore_ascii_case(&item.account) && m.uid == item.uid));
+                    .privacy
+                    .observe(&item, new, self.t, chrono::Utc::now().timestamp());
+                self.mail.recent.retain(|m| {
+                    !(m.account.eq_ignore_ascii_case(&item.account) && m.uid == item.uid)
+                });
                 self.mail.recent.insert(0, item);
                 self.mail.recent.truncate(60);
                 self.mail.privacy.retain(&self.mail.recent);
                 if new && self.settings.mail_enabled {
-                    let item=&self.mail.recent[0];
-                    let body=format!("{} · {}",item.from,item.subject);
-                    let body=item.code.as_ref().map(|code|crate::mail_privacy::mask(&body,code)).unwrap_or(body);
-                    self.alert("新邮件",body,5,false);
+                    let item = &self.mail.recent[0];
+                    let body = format!("{} · {}", item.from, item.subject);
+                    let body = item
+                        .code
+                        .as_ref()
+                        .map(|code| crate::mail_privacy::mask(&body, code))
+                        .unwrap_or(body);
+                    self.alert("新邮件", body, 5, false);
                     self.notification_bell_at = self.t;
                     self.notification_bell_until = self.t + 6.0;
                 }
@@ -600,7 +709,12 @@ impl App {
     /// v0.5.6：日历服务推来的事件。失败不弹窗，只累计次数（连续两次才显示红字）。
     pub fn calendar_event(&mut self, ev: calendar::Event) {
         match ev {
-            calendar::Event::Test { ok, message, count, config } => {
+            calendar::Event::Test {
+                ok,
+                message,
+                count,
+                config,
+            } => {
                 self.calendar.testing = false;
                 if !ok {
                     self.calendar.note = message;
@@ -612,22 +726,28 @@ impl App {
                     self.calendar.note_error = true;
                     return;
                 };
-                if let Err(e) = calendar::save_connection(&cfg, &self.calendar.test_password, self.calendar.config.as_ref()) {
+                if let Err(e) = calendar::save_connection(
+                    &cfg,
+                    &self.calendar.test_password,
+                    self.calendar.config.as_ref(),
+                ) {
                     self.calendar.note = e;
                     self.calendar.note_error = true;
                     return;
                 }
                 self.calendar.note = format!("已连接 · 未来 24 小时 {count} 个日程");
                 self.calendar.note_error = false;
-                if self.calendar.config.as_ref()!=Some(&cfg) {
+                if self.calendar.config.as_ref() != Some(&cfg) {
                     self.calendar.events.clear();
                     self.calendar.view.events.clear();
-                    self.calendar.view.loaded=None;
-                    self.calendar.view.loading=false;
+                    self.calendar.view.loaded = None;
+                    self.calendar.view.loading = false;
                     self.calendar.view.error.clear();
                 }
                 if !self.calendar.feeds.iter().any(|feed| feed.config == cfg) {
-                    self.calendar.feeds.retain(|feed| feed.config.provider != cfg.provider);
+                    self.calendar
+                        .feeds
+                        .retain(|feed| feed.config.provider != cfg.provider);
                     self.calendar.feeds.push(CalendarFeed::new(cfg.clone()));
                 }
                 self.calendar.config = Some(cfg);
@@ -638,44 +758,87 @@ impl App {
                 self.calendar.test_password.clear();
                 self.calendar.form.password.clear();
                 self.pending.push(Cmd::CalendarSync);
-                if self.page==CALENDAR_PAGE {self.select_calendar_day(self.calendar.view.day);}
+                if self.page == CALENDAR_PAGE {
+                    self.select_calendar_day(self.calendar.view.day);
+                }
             }
             calendar::Event::Synced { config, events, at } => {
-                if let Some(feed)=self.calendar.feeds.iter_mut().find(|feed|feed.config==config) {
-                    feed.events=events.clone();feed.connected=true;feed.failures=0;feed.error.clear();feed.last_sync=at.clone();
+                if let Some(feed) = self
+                    .calendar
+                    .feeds
+                    .iter_mut()
+                    .find(|feed| feed.config == config)
+                {
+                    feed.events = events.clone();
+                    feed.connected = true;
+                    feed.failures = 0;
+                    feed.error.clear();
+                    feed.last_sync = at.clone();
                 }
-                if self.calendar.config.as_ref()!=Some(&config){return;}
+                if self.calendar.config.as_ref() != Some(&config) {
+                    return;
+                }
                 self.calendar.events = events;
                 self.calendar.connected = true;
                 self.calendar.failures = 0;
                 self.calendar.error.clear();
                 self.calendar.last_sync = at;
             }
-            calendar::Event::MonthLoaded { config, month, result } => {
+            calendar::Event::MonthLoaded {
+                config,
+                month,
+                result,
+            } => {
                 if !self.calendar.feeds.is_empty() {
-                    if month!=self.calendar.view.month {return;}
-                    let Some(feed)=self.calendar.feeds.iter_mut().find(|feed|feed.config==config) else{return;};
-                    feed.month.loading=false;
+                    if month != self.calendar.view.month {
+                        return;
+                    }
+                    let Some(feed) = self
+                        .calendar
+                        .feeds
+                        .iter_mut()
+                        .find(|feed| feed.config == config)
+                    else {
+                        return;
+                    };
+                    feed.month.loading = false;
                     match result {
-                        Ok(events)=>{feed.month.events=events;feed.month.loaded=Some(month);feed.month.error.clear();}
-                        Err(message)=>feed.month.error=message,
+                        Ok(events) => {
+                            feed.month.events = events;
+                            feed.month.loaded = Some(month);
+                            feed.month.error.clear();
+                        }
+                        Err(message) => feed.month.error = message,
                     }
                     self.refresh_calendar_month_status();
                     return;
                 }
-                let view=&mut self.calendar.view;
-                if month!=view.month || self.calendar.config.as_ref()!=Some(&config){return;}
-                view.loading=false;
+                let view = &mut self.calendar.view;
+                if month != view.month || self.calendar.config.as_ref() != Some(&config) {
+                    return;
+                }
+                view.loading = false;
                 match result {
-                    Ok(events)=>{view.events=events;view.loaded=Some(month);view.error.clear();}
-                    Err(message)=>view.error=message,
+                    Ok(events) => {
+                        view.events = events;
+                        view.loaded = Some(month);
+                        view.error.clear();
+                    }
+                    Err(message) => view.error = message,
                 }
             }
             calendar::Event::Failed { config, message } => {
-                if let Some(feed)=self.calendar.feeds.iter_mut().find(|feed|feed.config==config) {
-                    feed.connected=false;feed.failures=feed.failures.saturating_add(1);feed.error=message.clone();
+                if let Some(feed) = self
+                    .calendar
+                    .feeds
+                    .iter_mut()
+                    .find(|feed| feed.config == config)
+                {
+                    feed.connected = false;
+                    feed.failures = feed.failures.saturating_add(1);
+                    feed.error = message.clone();
                 }
-                if self.calendar.config.as_ref()==Some(&config) {
+                if self.calendar.config.as_ref() == Some(&config) {
                     self.calendar.connected = false;
                     self.calendar.failures = self.calendar.failures.saturating_add(1);
                     self.calendar.error = message;
@@ -686,44 +849,86 @@ impl App {
 
     /// 所有已连接的平台都参与同步，设置标签只决定正在编辑的账号。
     pub fn calendar_configs(&self) -> Vec<calendar::Config> {
-        if self.calendar.feeds.is_empty() {self.calendar.config.clone().into_iter().collect()}
-        else {self.calendar.feeds.iter().map(|feed|feed.config.clone()).collect()}
+        if self.calendar.feeds.is_empty() {
+            self.calendar.config.clone().into_iter().collect()
+        } else {
+            self.calendar
+                .feeds
+                .iter()
+                .map(|feed| feed.config.clone())
+                .collect()
+        }
     }
 
     pub(crate) fn refresh_calendar_month_status(&mut self) {
-        let month=self.calendar.view.month;
-        self.calendar.view.loading=self.calendar.feeds.iter().any(|feed|feed.month.loading);
-        self.calendar.view.loaded=(!self.calendar.feeds.is_empty() && self.calendar.feeds.iter().all(|feed|feed.month.loaded==Some(month))).then_some(month);
-        self.calendar.view.error=self.calendar.feeds.iter().filter(|feed|!feed.month.error.is_empty())
-            .map(|feed|format!("{}：{}",feed.config.provider.label(),feed.month.error)).collect::<Vec<_>>().join("；");
+        let month = self.calendar.view.month;
+        self.calendar.view.loading = self.calendar.feeds.iter().any(|feed| feed.month.loading);
+        self.calendar.view.loaded = (!self.calendar.feeds.is_empty()
+            && self
+                .calendar
+                .feeds
+                .iter()
+                .all(|feed| feed.month.loaded == Some(month)))
+        .then_some(month);
+        self.calendar.view.error = self
+            .calendar
+            .feeds
+            .iter()
+            .filter(|feed| !feed.month.error.is_empty())
+            .map(|feed| format!("{}：{}", feed.config.provider.label(), feed.month.error))
+            .collect::<Vec<_>>()
+            .join("；");
     }
 
     pub(crate) fn select_calendar_provider(&mut self, provider: calendar::Provider) {
-        if self.calendar.testing || self.calendar.form.provider == provider { return; }
+        if self.calendar.testing || self.calendar.form.provider == provider {
+            return;
+        }
         if let Err(error) = calendar::select_provider(provider) {
             self.calendar.note = error;
             self.calendar.note_error = true;
             return;
         }
-        let feed=self.calendar.feeds.iter().find(|feed|feed.config.provider==provider);
-        self.calendar.config=feed.map(|feed|feed.config.clone());
-        self.calendar.events=feed.map(|feed|feed.events.clone()).unwrap_or_default();
-        self.calendar.connected=feed.is_some_and(|feed|feed.connected);
-        self.calendar.last_sync=feed.map(|feed|feed.last_sync.clone()).unwrap_or_default();
-        self.calendar.failures=feed.map(|feed|feed.failures).unwrap_or_default();
-        self.calendar.error=feed.map(|feed|feed.error.clone()).unwrap_or_default();
-        self.calendar.form=CalendarForm{provider,username:self.calendar.config.as_ref().map(|cfg|cfg.username.clone()).unwrap_or_default(),..Default::default()};
-        self.calendar.note.clear();self.calendar.note_error=false;
+        let feed = self
+            .calendar
+            .feeds
+            .iter()
+            .find(|feed| feed.config.provider == provider);
+        self.calendar.config = feed.map(|feed| feed.config.clone());
+        self.calendar.events = feed.map(|feed| feed.events.clone()).unwrap_or_default();
+        self.calendar.connected = feed.is_some_and(|feed| feed.connected);
+        self.calendar.last_sync = feed.map(|feed| feed.last_sync.clone()).unwrap_or_default();
+        self.calendar.failures = feed.map(|feed| feed.failures).unwrap_or_default();
+        self.calendar.error = feed.map(|feed| feed.error.clone()).unwrap_or_default();
+        self.calendar.form = CalendarForm {
+            provider,
+            username: self
+                .calendar
+                .config
+                .as_ref()
+                .map(|cfg| cfg.username.clone())
+                .unwrap_or_default(),
+            ..Default::default()
+        };
+        self.calendar.note.clear();
+        self.calendar.note_error = false;
     }
 
     /// 只移除正在管理的平台，保留其他平台的日程与提醒。
     pub fn forget_calendar(&mut self) -> Option<calendar::Config> {
         let old = self.calendar.config.take();
-        if let Some(config)=&old {
-            self.calendar.feeds.retain(|feed|feed.config!=*config);
-            let is_old=|alert:&crate::extras::Alert|alert.meeting.as_ref().is_some_and(|(_,source)|source==config.provider.label());
-            self.alerts.retain(|alert|!is_old(alert));
-            if self.notice.as_ref().is_some_and(is_old){self.notice=None;}
+        if let Some(config) = &old {
+            self.calendar.feeds.retain(|feed| feed.config != *config);
+            let is_old = |alert: &crate::extras::Alert| {
+                alert
+                    .meeting
+                    .as_ref()
+                    .is_some_and(|(_, source)| source == config.provider.label())
+            };
+            self.alerts.retain(|alert| !is_old(alert));
+            if self.notice.as_ref().is_some_and(is_old) {
+                self.notice = None;
+            }
         }
         self.calendar.connected = false;
         self.calendar.events.clear();
@@ -762,14 +967,29 @@ impl App {
             self.mail.form.password = "invalid-auth-code".into();
             self.mail.note = "test@qq.com：正在测试连接…".into();
             self.pending.push(Cmd::MailTest(
-                Account { custom: None, email: "test@qq.com".into(), provider: Provider::Qq, enabled: true },
+                Account {
+                    custom: None,
+                    email: "test@qq.com".into(),
+                    provider: Provider::Qq,
+                    enabled: true,
+                },
                 "invalid-auth-code".into(),
             ));
             return;
         }
         self.mail.accounts = vec![
-            Account { custom: None, email: "tang@qq.com".into(), provider: Provider::Qq, enabled: false },
-            Account { custom: None, email: "hi@icloud.com".into(), provider: Provider::ICloud, enabled: false },
+            Account {
+                custom: None,
+                email: "tang@qq.com".into(),
+                provider: Provider::Qq,
+                enabled: false,
+            },
+            Account {
+                custom: None,
+                email: "hi@icloud.com".into(),
+                provider: Provider::ICloud,
+                enabled: false,
+            },
         ];
         for a in &self.mail.accounts {
             self.mail.status.insert(a.email.clone(), Status::Ready);
@@ -778,7 +998,11 @@ impl App {
         // 启动即触发一次「会议提醒」。
         let mstart = chrono::Local::now().timestamp() + 600;
         let mat = chrono::DateTime::from_timestamp(mstart, 0)
-            .map(|d| d.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string())
+            .map(|d| {
+                d.with_timezone(&chrono::Local)
+                    .format("%m-%d %H:%M")
+                    .to_string()
+            })
             .unwrap_or_default();
         let rows = [
             (
@@ -819,14 +1043,26 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, (from, subject, time, code, summary, meeting))| Item {
-                received_unix: None, account: "tang@qq.com".into(),
+                received_unix: None,
+                account: "tang@qq.com".into(),
                 from: (*from).into(),
                 subject: (*subject).into(),
                 time: (*time).into(),
-                code: if with_code { (*code).map(str::to_string) } else { None },
+                code: if with_code {
+                    (*code).map(str::to_string)
+                } else {
+                    None
+                },
                 summary: (*summary).into(),
                 links: Vec::new(),
-                meeting: meeting.as_ref().map(|(start, at)| mail::Meeting { all_day:false, end:None, title: "周五方案评审".into(), start: *start, at: at.clone(), uid: "demo-ics-1".into() }),
+                meeting: meeting.as_ref().map(|(start, at)| mail::Meeting {
+                    all_day: false,
+                    end: None,
+                    title: "周五方案评审".into(),
+                    start: *start,
+                    at: at.clone(),
+                    uid: "demo-ics-1".into(),
+                }),
                 uid: 900 - i as u32,
             })
             .collect();
@@ -850,13 +1086,19 @@ impl App {
         let later = |secs: i64| chrono::Local::now().timestamp() + secs;
         let label = |ts: i64| {
             chrono::DateTime::from_timestamp(ts, 0)
-                .map(|d| d.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string())
+                .map(|d| {
+                    d.with_timezone(&chrono::Local)
+                        .format("%m-%d %H:%M")
+                        .to_string()
+                })
                 .unwrap_or_default()
         };
         let demo_cfg = calendar::Config {
             provider: Provider::Feishu,
             username: "demo***@feishu.example".into(),
-            href: Some("https://caldav.feishu.cn/calendars/8f3c2d7a-1111-2222-3333-444455556666/".into()),
+            href: Some(
+                "https://caldav.feishu.cn/calendars/8f3c2d7a-1111-2222-3333-444455556666/".into(),
+            ),
             server: None,
         };
         match mode.as_str() {
@@ -879,8 +1121,10 @@ impl App {
                 let b = later(6 * 3600);
                 self.calendar.form.password = "demo-pass-123".into();
                 self.calendar.events = vec![
-                    mail::Meeting { all_day:false, end:None, title: "产品评审".into(), start: a, at: label(a), uid: "demo-cal-1".into() },
-                    mail::Meeting { all_day:false, end:None, title: "设计周会".into(), start: b, at: label(b), uid: "demo-cal-2".into() },
+                    mail::Meeting { all_day:false, end:None, title: "产品评审".into(), start: a, at: label(a), uid: "demo-cal-1".into() ,
+                    },
+                    mail::Meeting { all_day:false, end:None, title: "设计周会".into(), start: b, at: label(b), uid: "demo-cal-2".into() ,
+                    },
                 ];
                 self.calendar.config = Some(demo_cfg.clone());
                 self.calendar.connected = true;
@@ -891,7 +1135,8 @@ impl App {
             "alert" => {
                 let s = later(600);
                 self.calendar.events =
-                    vec![mail::Meeting { all_day:false, end:None, title: "飞书日程：产品评审".into(), start: s, at: label(s), uid: "demo-cal-alert".into() }];
+                    vec![mail::Meeting { all_day:false, end:None, title: "飞书日程：产品评审".into(), start: s, at: label(s), uid: "demo-cal-alert".into() ,
+                }];
                 self.calendar.config = Some(demo_cfg.clone());
                 self.calendar.connected = true;
                 self.calendar.last_sync = calendar::now_label();
@@ -911,8 +1156,10 @@ impl App {
         if !self.settings.bluetooth_notifications {
             self.bt_shown.clear();
             self.bt_initialized=false;
-            self.alerts.retain(|a|a.source!=crate::extras::AlertSource::Internal || a.title!="蓝牙设备");
-            if self.notice.as_ref().is_some_and(|a|a.source==crate::extras::AlertSource::Internal && a.title=="蓝牙设备") {self.notice=None;}
+            self.alerts.retain(|a|{
+                a.source!=crate::extras::AlertSource::Internal || a.title!="蓝牙设备"});
+            if self.notice.as_ref().is_some_and(|a|{
+                a.source==crate::extras::AlertSource::Internal && a.title=="蓝牙设备"}) {self.notice=None;}
             return;
         }
         if !env.bt_ready { return; }
@@ -936,7 +1183,7 @@ impl App {
 
     pub fn show_page(&mut self,page:usize) {
         if !self.settings.visible_pages[page] {
-            self.settings_tab=[1,2,3,5,4,7,11,8][page];
+            self.settings_tab=[1,2,3,5,4,7,11,8, 12][page];
             self.open_settings();
             return;
         }
@@ -1029,9 +1276,13 @@ impl App {
         self.settings.island_lyrics && self.settings.visible_pages[0] && self.media.is_music()
             && !self.browser_minimal_active
             && self.ly.key==format!("{}|{}|{:.0}",self.media.title,self.media.artist,self.media.duration)
-            && self.ly.lyrics.as_ref().is_some_and(|lyrics|lyrics.synced && lyrics.lines.iter().any(|line|!line.text.trim().is_empty()))
+            && self.ly.lyrics.as_ref().is_some_and(|lyrics|{
+                lyrics.synced && lyrics.lines.iter().any(|line|!line.text.trim().is_empty())})
     }
-    pub(crate) fn compact_notices(&self)->bool {self.island_lyrics_active()&&!self.open&&!self.notice.as_ref().is_some_and(|a|a.meeting.is_some()||self.settings.notification_preview&&matches!(a.source,crate::extras::AlertSource::External(_)))}
+    pub(crate) fn compact_notices(&self)->bool {self.island_lyrics_active()&&!self.open&&!self.notice.as_ref().is_some_and(|a|{
+                a.meeting.is_some()||matches!(a.source,crate::extras::AlertSource::Steam(..))
+                    || self.settings.notification_preview
+                        && matches!(a.source, crate::extras::AlertSource::External(_))})}
 
     /// 换句、分段和展开高亮共用时间调整；正数延后，负数提前。
     pub(crate) fn lyric_position(&self)->f32 {(self.media.position-self.settings.lyric_delay_ms as f64/1000.0)as f32}
@@ -1057,7 +1308,8 @@ impl App {
             } else {""};
         let ink=if current.is_some(){theme::WHITE}else{theme::GRAY};
         let layout=|text:String| {
-            let mut job=egui::text::LayoutJob::simple(text,theme::font(11.0,W::Semibold),ink,LYRIC_BAR_W-80.0);
+            let mut job=egui::text::LayoutJob::simple(text,theme::font(11.0,W::Semibold),ink,LYRIC_BAR_W-80.0,
+            );
             job.halign=egui::Align::Center;
             job.wrap.break_anywhere=true;
             ctx.fonts(|fonts|fonts.layout_job(job))
@@ -1084,7 +1336,9 @@ impl App {
     fn lyric_focus_space(&self)->f32 {if self.pomo.running{crate::focus_bar::LYRIC_WIDTH+10.0}else{0.0}}
     fn lyric_bar_width(&self)->f32 {LYRIC_BAR_W+if self.pet_enabled(){48.0}else{0.0}+self.lyric_focus_space()}
     fn notice_size(&self,a:&Alert)->(f32,f32) {
-        let (width,height)=if a.meeting.is_some(){(360.0,136.0)}else if a.source==crate::extras::AlertSource::Internal && a.title=="蓝牙设备"{(HUD_W,48.0)}else if a.is_hud(){(HUD_W,38.0)}else{(334.0,44.0)};
+        let (width,height)=if a.meeting.is_some(){(360.0,136.0)
+        } else if a.steam.is_some() {
+            (380.0, 96.0)}else if a.source==crate::extras::AlertSource::Internal && a.title=="蓝牙设备"{(HUD_W,48.0)}else if a.is_hud(){(HUD_W,38.0)}else{(334.0,44.0)};
         (width,height)
     }
     pub fn set_pet(&mut self,enabled:bool) {
@@ -1116,7 +1370,7 @@ impl App {
     }
 
     pub(crate) fn expanded_height(&self)->f32 {
-        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
+        if self.calendar.draft.is_some(){CALENDAR_EDITOR_H}else if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
     }
 
     // ---------------------------------------------------------------
@@ -1160,7 +1414,8 @@ impl App {
         let hud_active=self.notice.clone();
         if hud_active.as_ref().map(|a|&a.title)!=self.hud_notice.as_ref().map(|a|&a.title)||hud_active.is_none(){self.notice_details=false;}
         if let Some(a)=&hud_active {self.hud_notice=Some(a.clone());}
-        self.hud_alpha=anim::approach(self.hud_alpha,if hud_active.is_some(){1.0}else{0.0},if hud_active.is_some(){16.0}else{8.0},dt);
+        self.hud_alpha=anim::approach(self.hud_alpha,if hud_active.is_some(){1.0}else{0.0},if hud_active.is_some(){16.0}else{8.0},dt,
+        );
         if hud_active.is_none() && self.hud_alpha<0.003 {self.hud_notice=None;}
         let notice_target=if self.compact_notices()&&(self.notice.is_some()||self.t<self.notification_bell_until) {44.0}else{0.0};
         self.notice_width.target=notice_target;
@@ -1168,14 +1423,22 @@ impl App {
         self.update_media(env,&ctx);
         let bell=self.t<self.notification_bell_until&&!self.compact_notices();
         self.resident_power=(env.battery,env.charging);
-        let mut layout=Layout::new(self.settings.show_battery&&env.battery.is_some(),self.quota_bar_indices().len(),self.media.is_music()&&!bell,self.pomo.running,bell,self.pet_enabled());
+        let mut pinned=self.settings.resident_pages;
+        for (page,on) in pinned.iter_mut().enumerate(){*on &= self.settings.visible_pages[page];}
+        let focus_width=if self.pomo.running {crate::focus_bar::WIDTH}else{20.0};
+        let mut layout=Layout::with_focus_width(self.settings.show_battery&&env.battery.is_some(),self.quota_bar_indices().len().max(usize::from(pinned[6])),self.media.is_music() || pinned[0],self.pomo.running || pinned[1],bell,self.pet_enabled(),focus_width,
+        );
+        layout.add_pages(pinned,self.settings.visible_pages[8]&&self.steam.badge().is_some());
         layout.reorder(&self.settings.resident_order);
         if self.settings.clock_period!=0 { layout.widen_clock(40.0); }
+        layout.fit(PW);
         if self.pet_enabled() {
             if let Some(a)=self.notice.as_ref().filter(|_|!self.compact_notices()&&!self.open){layout.x[bar::PET]=Some(22.0-(self.notice_size(a).0+self.pet_space())/2.0);}
             else if self.island_lyrics_active() {layout.x[bar::PET]=Some(60.0-self.lyric_bar_width()/2.0);}
         }
-        self.resident.step(layout,dt,ctx.style().animation_time>0.0&&bar::animations_enabled());
+        self.resident.step(layout,dt,ctx.style().animation_time>0.0&&bar::animations_enabled(),
+        );
+        self.steam_images.prefetch(&ctx,&self.steam.snapshot.achievement_icons);
         if self.opts.fetch_lyrics {
             self.poll_lyrics();
         }
@@ -1213,7 +1476,43 @@ impl App {
         let p_prev = self.progress();
         let hit = self.hit_rect(cx, top, p_prev);
         let inside = env.cursor.is_some_and(|c| hit.contains(c));
-        let on_notice=env.cursor.is_some_and(|c|self.notice_rect(cx,top).is_some_and(|r|r.contains(c))||self.notice_details_rect(cx,top).is_some_and(|r|r.contains(c)));
+        if !self.open && p_prev < 0.1 && inside && !self.hover_lock && self.notice.is_none() && !self.is_editing() {
+            if let Some(cursor) = env.cursor {
+                let layout = self.resident.current();
+                let slots = [
+                        (bar::MUSIC, 0, 12.0),
+                        (bar::FOCUS, 1, if self.pomo.running {24.0}else{11.0}),
+                        (bar::WATER, 2, 11.0),
+                        (bar::SHELF, 3, 11.0),
+                        (bar::TODO, 4, 11.0),
+                        (bar::MAIL, 5, 11.0),
+                        (bar::QUOTA, 6, 15.0),
+                        (bar::BELL, 5, 12.0),
+                        (bar::CLOCK, CALENDAR_PAGE, 22.0),
+                        (bar::STEAM, 8, 11.0),
+                ];
+                let target=slots.into_iter().find_map(|(slot,page,radius)|{
+                    layout.x[slot]
+                        .filter(|x|(cursor.x-(cx+x)).abs()<=radius && (cursor.y-(top+15.0)).abs()<=15.0)
+                        .filter(|_|self.settings.visible_pages[page])
+                        .map(|_|(slot,page))
+                });
+                let slot=target.map(|(slot,_)|slot);
+                if slot!=self.hover_page_target || self.hover_page_since.is_none() {
+                    self.hover_page_target=slot;
+                    self.hover_page_since=Some(env.t);
+                }
+                if let Some((_,page))=target {
+                    let delay=self.settings.hover_page_delay_ms as f64/1000.0;
+                    if self.hover_page_since.is_some_and(|since|env.t-since>=delay){self.go(page,1.0);}
+                }
+            }
+        } else {
+            self.hover_page_target=None;
+            self.hover_page_since=None;
+        }
+        let on_notice=env.cursor.is_some_and(|c|{
+            self.notice_rect(cx,top).is_some_and(|r|r.contains(c))||self.notice_details_rect(cx,top).is_some_and(|r|r.contains(c))});
         if !inside {
             self.hover_lock = false;
         }
@@ -1227,7 +1526,10 @@ impl App {
             self.cancel_edit();
         }
         if !self.is_editing() && inside && self.open && self.reveal > 0.95 {
-            let (scroll, left, right, esc) = ctx.input(|i| (i.raw_scroll_delta.y, i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight), i.key_pressed(egui::Key::Escape)));
+            let (scroll, left, right, esc) = ctx.input(|i| {
+                (i.raw_scroll_delta.y, i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight), i.key_pressed(egui::Key::Escape),
+                )
+            });
             if esc { self.hover_lock = true; }
             if left || right {
                 self.wheel_delta=0.0;
@@ -1247,13 +1549,22 @@ impl App {
                         let next=self.wheel_delta<0.0;
                         self.wheel_delta=0.0;
                         let calendar_len=if self.page==CALENDAR_PAGE {self.calendar_entries(self.calendar.view.day).len()}else{0};
-                        let calendar_body=self.page==CALENDAR_PAGE && Rect::from_min_max(Pos2::new(163.0,52.0),Pos2::new(378.0,208.0)).contains(cursor);
+                        let calendar_body=self.page==CALENDAR_PAGE && Rect::from_min_max(Pos2::new(163.0,48.0),Pos2::new(378.0,145.0)).contains(cursor);
                         let list=match self.page {
-                            CALENDAR_PAGE if calendar_body=>Some((&mut self.calendar.view.first,calendar_len.saturating_sub(4))),
-                            4 if Rect::from_min_max(Pos2::new(196.0,31.0),Pos2::new(377.0,124.0)).contains(cursor)
-                                =>Some((&mut self.todo_first,self.todos.items.len().saturating_sub(3))),
-                            3 if Rect::from_min_max(Pos2::new(36.0,28.0),Pos2::new(383.0,128.0)).contains(cursor)
-                                =>Some((&mut self.shelf_first,self.shelf.items.len().saturating_sub(5))),
+                            CALENDAR_PAGE if calendar_body=>Some((&mut self.calendar.view.first,calendar_len.saturating_sub(2),
+                            )),
+                            4 if Rect::from_min_max(Pos2::new(196.0,31.0),Pos2::new(377.0,124.0),
+                            ).contains(cursor)
+                                =>{
+                                Some((&mut self.todo_first,self.todos.items.len().saturating_sub(3),
+                                ))
+                            }
+                            3 if Rect::from_min_max(Pos2::new(36.0,28.0),Pos2::new(383.0,128.0),
+                            ).contains(cursor)
+                                =>{
+                                Some((&mut self.shelf_first,self.shelf.items.len().saturating_sub(5),
+                                ))
+                            }
                             _=>None,
                         };
                         let scrolled=list.is_some_and(|(first,max)|{
@@ -1288,11 +1599,13 @@ impl App {
         let flare_h = lerp(8.0, FLARE_H, pc);
         let thick = glass::thickness(PH);
         let shadow_k = glass::shadow_alpha(0.0, thick) / 0.12;
-        shape::shadow(&painter, panel, flare, flare_h, radius, smoothstep(0.1, 0.9, pc) * shadow_k);
+        shape::shadow(&painter, panel, flare, flare_h, radius, smoothstep(0.1, 0.9, pc) * shadow_k,
+        );
         let notice_rect=self.notice_rect(cx,top);
         let notice_shape=notice_rect.map(|r|Rect::from_min_max(Pos2::new(r.left()-36.0,r.top()),r.max));
         if let Some(r)=notice_shape {shape::shadow(&painter,r,5.0,8.0,12.5,0.5*shadow_k);}
-        shape::fill(&painter, panel, flare, flare_h, radius, Color32::BLACK, feather);
+        shape::fill(&painter, panel, flare, flare_h, radius, Color32::BLACK, feather,
+        );
         if let Some(r)=notice_shape {shape::fill(&painter,r,5.0,8.0,12.5,Color32::BLACK,feather);}
 
         // 内容只随形体「揭开」：不缩放，按面板裁剪，到 55% 才开始淡入
@@ -1304,23 +1617,30 @@ impl App {
         self.cursor_local = env.cursor.map(|p| base.to_local(p));
 
         let banner=!self.compact_notices()&&self.notice.is_some()&&!self.open;
-        let restoring_lyrics=!self.open&&self.notice.is_none()&&self.island_lyrics_active()&&self.hud_notice.as_ref().is_some_and(|a|a.meeting.is_some()||matches!(a.source,crate::extras::AlertSource::External(_)));
+        let restoring_lyrics=!self.open&&self.notice.is_none()&&self.island_lyrics_active()&&self.hud_notice.as_ref().is_some_and(|a|{
+                a.meeting.is_some()||matches!(a.source,crate::extras::AlertSource::External(_))});
         let fading_hud=!self.compact_notices()&&!self.open&&self.hud_notice.as_ref().is_some_and(|a|a.is_hud())&&(banner||self.hud_alpha>0.003);
         if fading_hud {
             let from=self.resident.target.width;let to=HUD_W+self.pet_space();
             let width_progress=if (to-from).abs()<1.0 {if banner{1.0}else{0.0}}else{((self.w.pos-from)/(to-from)).clamp(0.0,1.0)};
-            let (opacity,header_opacity)=if banner {(self.hud_alpha*smoothstep(0.45,0.85,width_progress),1.0-smoothstep(0.05,0.40,width_progress))}
-                else {(self.hud_alpha*smoothstep(0.20,0.60,width_progress),1.0-smoothstep(0.05,0.25,width_progress))};
+            let (opacity,header_opacity)=if banner {(self.hud_alpha*smoothstep(0.45,0.85,width_progress),1.0-smoothstep(0.05,0.40,width_progress),
+                )}
+                else {(self.hud_alpha*smoothstep(0.20,0.60,width_progress),1.0-smoothstep(0.05,0.25,width_progress),
+                )};
             if !minimal_pill||pc>0.0 {self.shared_header(&base.faded(header_opacity),cx,pc,reveal,env);}
             if let Some(a)=self.hud_notice.clone(){
-                let overlay=Card::new(ui,panel.min+Vec2::new(self.pet_space(),0.0),panel.intersect(ui.max_rect())).faded(opacity);
+                let overlay=Card::new(ui,panel.min+Vec2::new(self.pet_space(),0.0),panel.intersect(ui.max_rect()),
+                ).faded(opacity);
                 let overlay=if opacity<0.85||!banner{overlay.ghost()}else{overlay};
                 self.draw_notice(&overlay,panel,&a,&mut cmds);
             }
         }else if banner {
-            if let Some(a)=self.notice.clone(){self.draw_notice(&Card::new(ui,panel.min+Vec2::new(self.pet_space(),0.0),panel.intersect(ui.max_rect())),panel,&a,&mut cmds);}
+            if let Some(a)=self.notice.clone(){self.draw_notice(&Card::new(ui,panel.min+Vec2::new(self.pet_space(),0.0),panel.intersect(ui.max_rect()),
+                    ),panel,&a,&mut cmds,
+                );}
         }else if !minimal_pill || pc > 0.0 {
-            self.shared_header(&base, cx, if restoring_lyrics{0.0}else{pc}, reveal, env);
+            self.shared_header(&base, cx, if restoring_lyrics{0.0}else{pc}, reveal, env,
+            );
         }
         if let Some(rect)=notice_rect {
             let c=Card::new(ui,rect.min,rect.intersect(ui.max_rect()));
@@ -1328,13 +1648,16 @@ impl App {
                 let opacity=self.hud_alpha*smoothstep(0.45,0.95,self.notice_width.pos/44.0);
                 let c=c.faded(opacity);let c=if self.notice.is_none()||opacity<0.85 {c.ghost()}else{c};
                 if matches!(a.source,crate::extras::AlertSource::External(_)) {
-                    paint::bell(&c.scaled(18.0,15.0,0.85),18.0,15.0,theme::WHITE,paint::bell_swing(self.t-a.at));
+                    paint::bell(&c.scaled(18.0,15.0,0.85),18.0,15.0,theme::WHITE,paint::bell_swing(self.t-a.at),
+                    );
                     c.circle(22.0,10.5,2.0,Color32::from_rgb(255,72,72));
                 }else{crate::extras::notice_badge(&c,18.0,15.0,&a);}
-                let button=crate::quota_ui::bar_tooltip(c.hit(0.0,0.0,36.0,BAR_H,"notice-badge"),format!("{}\n{}",a.title,a.body));
+                let button=crate::quota_ui::bar_tooltip(c.hit(0.0,0.0,36.0,BAR_H,"notice-badge"),format!("{}\n{}",a.title,a.body),
+                );
                 if button.clicked(){self.notice_details=!self.notice_details;}
             }else if self.t<self.notification_bell_until {
-                paint::bell(&c.scaled(20.0,14.0,1.2),20.0,14.0,theme::WHITE,paint::bell_swing(self.t-self.notification_bell_at));
+                paint::bell(&c.scaled(20.0,14.0,1.2),20.0,14.0,theme::WHITE,paint::bell_swing(self.t-self.notification_bell_at),
+                );
                 c.circle(24.0,9.5,2.0,Color32::from_rgb(255,72,72));
                 if c.hit(6.0,0.0,28.0,30.0,"bell-mail").clicked(){self.show_page(5);}
             }
@@ -1344,13 +1667,18 @@ impl App {
             let radius=if self.hud_notice.as_ref().is_some_and(|a|a.meeting.is_some()){14.0}else{10.0};
             shape::shadow(&painter,rect,0.0,0.0,radius,0.5*shadow_k);
             painter.rect_filled(rect,radius,Color32::BLACK);
-            self.draw_notice(&Card::new(ui,rect.min,rect.intersect(ui.max_rect())),rect,&self.hud_notice.clone().unwrap(),&mut cmds);
-            if ctx.input(|i|i.pointer.any_pressed()&&i.pointer.interact_pos().is_some_and(|p|!rect.contains(p)&&!notice_rect.is_some_and(|r|r.contains(p)))){self.notice_details=false;}
+            self.draw_notice(&Card::new(ui,rect.min,rect.intersect(ui.max_rect())),rect,&self.hud_notice.clone().unwrap(),&mut cmds,
+            );
+            if ctx.input(|i|{
+                i.pointer.any_pressed()&&i.pointer.interact_pos().is_some_and(|p|{
+                        !rect.contains(p)&&!notice_rect.is_some_and(|r|r.contains(p))})
+            }){self.notice_details=false;}
         }
         let pet_alpha=self.pet_a*(1.0-smoothstep(0.0,0.3,pc));
         if pet_alpha>0.004 && !minimal_pill {
             let y=(h.min(self.base_size().1)-BAR_H).max(0.0)/2.0;
-            self.pet.draw(&base.shifted(0.0,y).faded(pet_alpha),cx-origin.x+self.resident.position(bar::PET),self.t);
+            self.pet.draw(&base.shifted(0.0,y).faded(pet_alpha),cx-origin.x+self.resident.position(bar::PET),self.t,
+            );
         }
         if reveal > 0.004 && !banner && !restoring_lyrics {
             let c = base.shifted(0.0, (1.0 - reveal) * -5.0).faded(reveal);
@@ -1373,10 +1701,12 @@ impl App {
         let rel = |r: Rect| r.translate(-win.min.to_vec2());
         let mut region = if p > 0.02 || self.open {
             let height=self.expanded_height().max(self.h.pos)*1.08+16.0;
-            Rect::from_center_size(Pos2::new(cx, top + height/2.0), Vec2::new(PW + FLARE * 2.0 + 56.0, height))
+            Rect::from_center_size(Pos2::new(cx, top + height/2.0), Vec2::new(PW + FLARE * 2.0 + 56.0, height),
+            )
         } else {
             let (bw, bh) = self.base_size();
-            Rect::from_center_size(Pos2::new(cx, top + (bh * SWELL.1 + 12.0) / 2.0), Vec2::new(bw * SWELL.0 + 24.0, bh * SWELL.1 + 12.0))
+            Rect::from_center_size(Pos2::new(cx, top + (bh * SWELL.1 + 12.0) / 2.0), Vec2::new(bw * SWELL.0 + 24.0, bh * SWELL.1 + 12.0),
+            )
         };
         if let Some(rect)=notice_shape {region=region.union(rect.expand2(Vec2::new(12.0,8.0)));}
         if let Some(rect)=notice_details {region=region.union(rect.expand(12.0));}
@@ -1402,7 +1732,8 @@ impl App {
             || self.open && self.page==2 && !self.water_ring.settled(1.0)
             || self.toast.is_some()
             || self.t < self.notification_bell_until && self.t-self.notification_bell_at < 0.95
-            || self.notice.as_ref().is_some_and(|a|matches!(a.source,crate::extras::AlertSource::External(_))&&self.t-a.at<0.95)
+            || self.notice.as_ref().is_some_and(|a|{
+                matches!(a.source,crate::extras::AlertSource::External(_))&&self.t-a.at<0.95})
             || self.hud_alpha > 0.003 && self.hud_alpha < 0.997
             || !self.notice_width.settled(1.0);
         let pet_visible=self.pet_a>0.01 && !self.open && !minimal_pill;
@@ -1417,7 +1748,10 @@ impl App {
             region: rel(floating_toast.map_or(region,|toast|region.union(toast)).intersect(ui.max_rect())),
             hit: rel(self.hit_rect(cx, top, self.progress())),
             notice_hit:notice_shape.map(|r|rel(notice_details.map_or(r,|details|r.union(details)))),
-            file_drop_zone:self.settings.visible_pages[3].then(||rel(Rect::from_min_size(Pos2::new(cx-PW/2.0,top),Vec2::new(PW,96.0)))),
+            file_drop_zone:self.settings.visible_pages[3].then(||{
+                rel(Rect::from_min_size(Pos2::new(cx-PW/2.0,top),Vec2::new(PW,96.0),
+                ))
+            }),
             expanded: self.open,
             editing: self.is_editing(),
             animating,
@@ -1433,9 +1767,11 @@ impl App {
             let height=self.h.pos.min(height);
             Rect::from_min_size(Pos2::new(cx-width/2.0,top),Vec2::new(width,height))
         } else if self.notice.is_some()&&!self.compact_notices()&&!self.open {
-            let (w,h)=self.base_size();Rect::from_min_size(Pos2::new(cx-(w+8.0)/2.0,top),Vec2::new(w+8.0,h+6.0))
+            let (w,h)=self.base_size();Rect::from_min_size(Pos2::new(cx-(w+8.0)/2.0,top),Vec2::new(w+8.0,h+6.0),
+            )
         } else if p > 0.04 || self.open {
-            Rect::from_min_size(Pos2::new(cx - PW / 2.0 - 4.0, top), Vec2::new(PW + 8.0, self.expanded_height() + 2.0))
+            Rect::from_min_size(Pos2::new(cx - PW / 2.0 - 4.0, top), Vec2::new(PW + 8.0, self.expanded_height() + 2.0),
+            )
         } else {
             let (bw,bh)=self.base_size();
             let (hit_w,hit_h)=(bw+12.0,bh+4.0);
@@ -1446,12 +1782,16 @@ impl App {
     fn notice_rect(&self,cx:f32,top:f32)->Option<Rect>{
         if !self.compact_notices(){return None;}
         let width=self.notice_width.pos-8.0;
-        (width>0.5).then(||Rect::from_min_size(Pos2::new(cx+self.w.pos/2.0+8.0,top),Vec2::new(width,BAR_H)))
+        (width>0.5).then(||{
+            Rect::from_min_size(Pos2::new(cx+self.w.pos/2.0+8.0,top),Vec2::new(width,BAR_H),
+            )
+        })
     }
     fn notice_details_rect(&self,cx:f32,top:f32)->Option<Rect>{
         let a=self.hud_notice.as_ref().filter(|_|self.notice_details&&self.notice.is_some())?;
         let badge=self.notice_rect(cx,top)?;let (width,height)=self.notice_size(a);
-        Some(Rect::from_min_size(badge.left_bottom()+Vec2::new(0.0,6.0),Vec2::new(width,height)))
+        Some(Rect::from_min_size(badge.left_bottom()+Vec2::new(0.0,6.0),Vec2::new(width,height),
+        ))
     }
 
     /// 悬停状态机：意图缓冲 → 弹簧展开 → 离开延迟 → 临界阻尼收起；全程可打断。
@@ -1460,8 +1800,10 @@ impl App {
         if want {
             self.leave_since = None;
             let since = *self.hover_since.get_or_insert(t);
-            let intent=if self.effective_minimal() {MINIMAL_HOVER_INTENT}else{HOVER_INTENT};
-            if !self.open && (self.drag_hot || t - since >= intent) {
+            let delay=self.settings.hover_page_delay_ms as f64/1000.0;
+            let intent=delay.max(if self.effective_minimal() {MINIMAL_HOVER_INTENT}else{HOVER_INTENT});
+            let target_ready=self.hover_page_since.is_none_or(|start|t-start>=delay);
+            if !self.open && (self.drag_hot || t - since >= intent && target_ready) {
                 self.open = true;
                 self.w.tune(OPEN_W.0, OPEN_W.1);
                 self.h.tune(OPEN_H.0, OPEN_H.1);
@@ -1532,20 +1874,28 @@ impl App {
                 let [width,height]=image.size;
                 let uv_size=if width>height {egui::vec2(height as f32/width as f32,1.0)}else{egui::vec2(1.0,width as f32/height as f32)};
                 let uv=Rect::from_center_size(Pos2::new(0.5,0.5),uv_size);
-                c.painter.add(egui::epaint::RectShape::filled(c.rect(left+12.0,center_y-10.0,20.0,20.0),5.0*c.s,Color32::WHITE).with_texture(texture.id(),uv));
+                c.painter.add(egui::epaint::RectShape::filled(c.rect(left+12.0,center_y-10.0,20.0,20.0),5.0*c.s,Color32::WHITE,
+                    ).with_texture(texture.id(),uv),
+                );
             } else {
                 c.fill(left+12.0,center_y-10.0,20.0,20.0,5.0,theme::CARD);
                 paint::note(&c,left+22.0,center_y,13.0,theme::WHITE);
             }
             let index=lyric.map_or(0,|(index,_)|index);
-            let shown=c.ui.ctx().animate_value_with_time(egui::Id::new(("island-lyric-line",&self.ly.key)),index as f32,0.18);
+            let shown=c.ui.ctx().animate_value_with_time(egui::Id::new(("island-lyric-line",&self.ly.key)),index as f32,0.18,
+            );
             let fade=1.0-(index as f32-shown).abs().min(1.0);
-            let position=c.pos(left+content_width-LYRIC_BAR_W/2.0,center_y-galley.size().y/2.0+(1.0-fade)*3.0);
-            c.painter.galley(position,galley,if lyric.is_some(){theme::WHITE}else{theme::GRAY});
-            paint::playback_bars(&c,left+content_width-21.0,center_y,self.t,self.media.playing,theme::WHITE);
+            let position=c.pos(left+content_width-LYRIC_BAR_W/2.0,center_y-galley.size().y/2.0+(1.0-fade)*3.0,
+            );
+            c.painter.galley(position,galley,if lyric.is_some(){theme::WHITE}else{theme::GRAY},
+            );
+            paint::playback_bars(&c,left+content_width-21.0,center_y,self.t,self.media.playing,theme::WHITE,
+            );
             if self.pomo.running {
-                let alpha=smoothstep(0.88,1.0,(width-content_width)/self.lyric_focus_space());
-                crate::focus_bar::draw(&c.faded(alpha),left+width-14.0-crate::focus_bar::LYRIC_WIDTH/2.0,center_y,self.t,&self.pomo,self.phase_secs(self.pomo.phase),true);
+                let alpha=smoothstep(0.88,1.0,(width-content_width)/self.lyric_focus_space(),
+                );
+                crate::focus_bar::draw(&c.faded(alpha),left+width-14.0-crate::focus_bar::LYRIC_WIDTH/2.0,center_y,self.t,&self.pomo,self.phase_secs(self.pomo.phase),true,
+                );
             }
         }
         if lyric_alpha>=0.997 {return;}
@@ -1556,7 +1906,23 @@ impl App {
         let show_battery=self.settings.show_battery && env.battery.is_some();
 
         // 顶栏终点布局：[电池][日期][时钟] 作为一组整体居中
-        let date_w = base.text_w(&env.date, size::DATE, W::Regular);
+        let header = self
+            .steam
+            .badge()
+            .map(|(label, g)| {
+                base.fit(
+                    &if label.is_empty() {
+                        g.name.clone()
+                    } else {
+                        format!("{label} · {}", g.name)
+                    },
+                    size::DATE,
+                    W::Regular,
+                    160.0,
+                )
+            })
+            .unwrap_or_else(|| env.date.clone());
+        let date_w = base.text_w(&header, size::DATE, W::Regular);
         let clock_w = paint::clock_width(base,&clock,size::CLOCK);
         let battery_space=if show_battery {24.0}else{0.0};
         let group = battery_space + date_w + 8.0 + clock_w;
@@ -1574,29 +1940,67 @@ impl App {
         // 电池：位置/大小连续插值
         let bk = lerp(1.0, 0.8, m);
         let bpos = (lerp(pb.0, hb.0, m), lerp(pb.1, hb.1, m));
-        if show_battery {paint::battery(&base.faded(lerp(layout.clearance(bar::BATTERY),1.0,m)), bpos.0, bpos.1, env.battery, env.charging, bk);}
+        if show_battery {paint::battery(&base.faded(lerp(layout.clearance(bar::BATTERY),1.0,m)), bpos.0, bpos.1, env.battery, env.charging, bk,
+            );}
 
         // 时钟：两个字号沿同一路径交叉淡化，避免逐帧换字号
         let cpos = (lerp(pcx, hc, m), lerp(21.0, 23.0, m));
         let a_pill = (1.0 - smoothstep(0.25, 0.6, m)) * layout.clearance(bar::CLOCK);
         let a_head = smoothstep(0.35, 0.75, m);
         if a_pill > 0.0 {
-            paint::clock(&base.faded(a_pill),cpos.0,cpos.1,&clock,size::PILL_CLOCK);
+            paint::clock(&base.faded(a_pill),cpos.0,cpos.1,&clock,size::PILL_CLOCK,
+            );
         }
         if a_head > 0.0 {
-            paint::clock(&base.faded(a_head),cpos.0,cpos.1-0.5,&clock,size::CLOCK);
+            paint::clock(&base.faded(a_head),cpos.0,cpos.1-0.5,&clock,size::CLOCK,
+            );
         }
         // 日期随内容淡入，从药丸方向轻轻滑出
         if reveal > 0.0 {
-            base.faded(reveal).text(hd + (1.0 - reveal) * 10.0, 22.5, &env.date, size::DATE, W::Regular, Color32::from_rgb(210, 210, 214), H::Left);
-        }
-        if has_music && (p>0.1 || layout.x[bar::MUSIC].is_some()) {
-            paint::playback_bars(base,lerp(local_cx+layout.x[bar::MUSIC].unwrap_or(0.0),367.0,m),lerp(15.0,18.0,m),self.t,self.media.playing,theme::WHITE);
+            base.faded(reveal).text(hd + (1.0 - reveal) * 10.0, 22.5, &header, size::DATE, W::Regular, Color32::from_rgb(210, 210, 214), H::Left,
+            );
         }
         let compact_alpha=1.0-smoothstep(0.0,0.22,p);
+        if let Some(offset) = layout.x[bar::STEAM] {
+            let (x, y) = (
+                lerp(local_cx + offset, 367.0, m),
+                lerp(15.0, 18.0, m),
+            );
+            if let Some((label,game))=self.steam.badge() {
+                let icon=self.steam_images.get(base.ui.ctx(), game.icon.as_deref(), None);
+                if let Some(texture) = icon {
+                    let rect = base.rect(x - 9.0, y - 9.0, 18.0, 18.0);
+                    base.painter.image(
+                        texture,
+                        rect,
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                } else {
+                    crate::extras::device_icon(
+                        base,
+                        crate::bt::DeviceKind::Gamepad,
+                        x - 9.0,
+                        y - 9.0,
+                        18.0,
+                    );
+                }
+                let tip=if label.is_empty(){game.name.clone()}else{format!("{label} · {}",game.name)};
+                if base.hit(x-13.0,y-13.0,26.0,26.0,"steam-current-game").on_hover_text(tip).clicked(){self.show_page(8);}
+            } else {
+                crate::extras::device_icon(base,crate::bt::DeviceKind::Gamepad,x-9.0,y-9.0,18.0);
+                if base.hit(x-13.0,y-13.0,26.0,26.0,"steam-shortcut").on_hover_text("打开 Steam 页面").clicked(){self.show_page(8);}
+            }
+        }
+        if let Some(offset)=layout.x[bar::MUSIC] {
+            let x=local_cx+offset;let c=base.faded(compact_alpha);
+            if has_music {paint::playback_bars(&c,x,15.0,self.t,self.media.playing,theme::WHITE);}else{paint::note(&c,x,15.0,13.0,theme::WHITE);}
+            if compact_alpha>0.8 && c.hit(x-11.0,3.0,22.0,24.0,"music-shortcut").on_hover_text("打开音乐页面").clicked(){self.show_page(0);}
+        }
         if self.t<self.notification_bell_until&&!self.compact_notices()&&p<0.1 {
             if let Some(x)=layout.x[bar::BELL]{
-                let x=local_cx+x;paint::bell(&base.scaled(x,14.0,1.2),x,14.0,theme::WHITE,paint::bell_swing(self.t-self.notification_bell_at));
+                let x=local_cx+x;paint::bell(&base.scaled(x,14.0,1.2),x,14.0,theme::WHITE,paint::bell_swing(self.t-self.notification_bell_at),
+                );
                 base.circle(x+4.0,9.5,2.0,Color32::from_rgb(255,72,72));
                 if base.hit(x-14.0,3.0,28.0,25.0,"bell-mail").clicked(){self.show_page(5);}
             }
@@ -1606,7 +2010,25 @@ impl App {
             self.draw_quota_bar(&c,local_cx,&layout);
         }
         if self.pomo.running && compact_alpha>0.004 {
-            crate::focus_bar::draw(&base.faded(compact_alpha),local_cx+layout.x[bar::FOCUS].unwrap(),15.0,self.t,&self.pomo,self.phase_secs(self.pomo.phase),false);
+            crate::focus_bar::draw(&base.faded(compact_alpha),local_cx+layout.x[bar::FOCUS].unwrap(),15.0,self.t,&self.pomo,self.phase_secs(self.pomo.phase),false,
+            );
+        }
+        if compact_alpha>0.004 {
+            let c=base.faded(compact_alpha);let c=if compact_alpha<0.8{c.ghost()}else{c};
+            if self.settings.resident_pages[1] && !self.pomo.running {
+                if let Some(x)=layout.x[bar::FOCUS]{let x=local_cx+x;crate::focus_bar::shortcut(&c,x,15.0);if c.hit(x-13.0,2.0,26.0,26.0,"focus-shortcut").on_hover_text("打开番茄专注").clicked(){self.show_page(1);}}
+            }
+            if self.settings.resident_pages[6] && self.quota_bar_indices().is_empty() {
+                if let Some(x)=layout.x[bar::QUOTA]{let x=local_cx+x;c.circle(x,15.0,10.0,Color32::from_rgb(44,78,58));paint::target(&c,x,15.0,theme::SOFT_GREEN);if c.hit(x-13.0,2.0,26.0,26.0,"quota-shortcut").on_hover_text("打开 AI 额度").clicked(){self.show_page(6);}}
+            }
+            for (slot,page) in [
+                (bar::WATER,2),
+                (bar::SHELF,3),
+                (bar::TODO,4),
+                (bar::MAIL,5),
+            ] {
+                if let Some(x)=layout.x[slot]{let x=local_cx+x;match slot{bar::WATER=>paint::resident_water(&c,x,15.0),bar::SHELF=>paint::resident_shelf(&c,x,15.0),bar::TODO=>paint::resident_todo(&c,x,15.0),bar::MAIL=>paint::resident_mail(&c,x,15.0),_=>{}}if c.hit(x-11.0,3.0,22.0,24.0,("page-shortcut",page)).on_hover_text(PAGE_NAMES[page]).clicked(){self.show_page(page);}}
+            }
         }
     }
 
@@ -1628,7 +2050,9 @@ impl App {
         let visible = available && self.pet_a > 0.7 && self.progress() < 0.1;
         self.pet.advance(self.dt, visible);
         let state = self.pet_state();
-        let gaze = env.cursor.map(|p| [((p.x-cx)/28.0).clamp(-3.0,3.0), ((p.y-15.0)/40.0).clamp(-1.0,1.5)])
+        let gaze = env.cursor.map(|p| {
+                [((p.x-cx)/28.0).clamp(-3.0,3.0), ((p.y-15.0)/40.0).clamp(-1.0,1.5),
+                ]})
             .unwrap_or([(self.t as f32 * 0.35).sin()*0.8, 0.0]);
         self.pet.step(state, self.t, self.dt, gaze, visible);
     }
@@ -1639,12 +2063,15 @@ impl App {
     fn panel_body(&mut self, c: &Card, env: &Env, cmds: &mut Vec<Cmd>) {
         let settings=c.hit(380.0,4.0,28.0,28.0,"page-settings").on_hover_text(format!("打开{}设置窗口",PAGE_NAMES[self.page]));
         let (hover,press)=c.hover_t(&settings);
-        c.circle(394.0,18.0,13.0,Color32::from_white_alpha((hover*24.0) as u8));
-        paint::gear(&c.scaled(394.0,18.0,0.8*(1.0-press*0.08)),394.0,18.0,paint::mix(theme::GRAY,theme::WHITE,hover));
-        if settings.clicked(){self.settings_tab=[1,2,3,5,4,7,11,8][self.page];self.open_settings();}
+        c.circle(394.0,18.0,13.0,Color32::from_white_alpha((hover*24.0) as u8),
+        );
+        paint::gear(&c.scaled(394.0,18.0,0.8*(1.0-press*0.08)),394.0,18.0,paint::mix(theme::GRAY,theme::WHITE,hover),
+        );
+        if settings.clicked(){self.settings_tab=[1,2,3,5,4,7,11,8, 12][self.page];self.open_settings();}
         if self.subpage==Some(self.page) {
             c.text(15.0,25.0,"‹",19.0,W::Bold,theme::WHITE,H::Left);
-            c.text(37.0,25.0,if self.page==2{"饮水设置"}else{"专注设置"},size::TITLE,W::Bold,theme::WHITE,H::Left);
+            c.text(37.0,25.0,if self.page==2{"饮水设置"}else{"专注设置"},size::TITLE,W::Bold,theme::WHITE,H::Left,
+            );
             if c.hit(9.0,7.0,28.0,23.0,"subpage-back").clicked(){self.subpage=None;}
             self.page_settings(c);self.nav(c);return;
         }
@@ -1658,7 +2085,8 @@ impl App {
             if old_a > 0.0 {
                 let oc = c.faded(old_a).ghost();
                 self.page_title(self.page_from, &oc);
-                self.render_page(self.page_from, &oc.shifted(old_dx, 0.0), env, &mut Vec::new());
+                self.render_page(self.page_from, &oc.shifted(old_dx, 0.0), env, &mut Vec::new(),
+                );
             }
             let nc = c.faded(new_a);
             self.page_title(self.page, &nc);
@@ -1675,13 +2103,15 @@ impl App {
     fn page_title(&self, page: usize, c: &Card) {
         let base = 25.0;
         let (a, b, col) = match page {
-            0 | CALENDAR_PAGE => return,
+            0 => return,
+            CALENDAR_PAGE => ("日程", "", theme::WHITE),
             1 => ("番茄", "专注", theme::RED_TOP),
             2 => ("饮水", "提醒", theme::BLUE),
             3 => ("置物架", "", theme::WHITE),
             4 => ("待办", "清单", theme::GREEN),
             5 => ("邮箱", "", theme::CYAN),
             6 => ("AI", "额度", theme::SOFT_GREEN),
+            8 => ("Steam", "", theme::WHITE),
             _ => ("岛仔", "设置", theme::WHITE),
         };
         let wa = c.text(15.0, base, a, size::TITLE, W::Bold, theme::WHITE, H::Left);
@@ -1715,7 +2145,8 @@ impl App {
             let hr = c.hit(x - 2.0, dot_y - 6.0, w + 4.0, 12.0, ("dot", i));
             hr.clone().on_hover_text(PAGE_NAMES[i]);
             if hr.hovered() && i != self.page {
-                c.fill(x - 1.0, dot_y - 3.0, w + 2.0, 6.0, 3.0, Color32::from_white_alpha(28));
+                c.fill(x - 1.0, dot_y - 3.0, w + 2.0, 6.0, 3.0, Color32::from_white_alpha(28),
+                );
             }
             if hr.clicked() {
                 clicked = Some(i);
@@ -1723,7 +2154,8 @@ impl App {
             x += w + gap;
         }
         if let Some(i) = clicked {
-            let position=|page|self.settings.page_order.iter().position(|p|*p==page).unwrap();
+            let position=|page|{
+                self.settings.page_order.iter().position(|p|*p==page).unwrap()};
             let dir = if position(i) > position(self.page) { 1.0 } else { -1.0 };
             self.go(i, dir);
         }
@@ -1739,12 +2171,14 @@ impl App {
             5 => self.page_mail(c, env, cmds),
             6 => self.page_quota(c),
             CALENDAR_PAGE => self.page_calendar(c,env),
+            8 => self.page_steam(c),
             _ => self.page_settings(c),
         }
     }
 
     fn toast_layer(&mut self, c: &Card, base_y:f32)->Option<Rect> {
-        let Some((msg, at)) = self.toast.clone() else { return None };
+        let Some((msg, at)) = self.toast.clone() else { return None ;
+        };
         let e = (self.t - at) as f32;
         if e > 2.4 {
             self.toast = None;
@@ -1756,8 +2190,10 @@ impl App {
         let w = c.text_w(&msg, size::BODY, W::Regular) + 26.0;
         let tc = c.faded(a);
         let y = base_y + rise;
-        tc.fill(PW / 2.0 - w / 2.0, y, w, 22.0, 11.0, Color32::from_rgb(44, 44, 48));
-        tc.text(PW / 2.0, y + 15.0, &msg, size::BODY, W::Regular, theme::WHITE, H::Center);
+        tc.fill(PW / 2.0 - w / 2.0, y, w, 22.0, 11.0, Color32::from_rgb(44, 44, 48),
+        );
+        tc.text(PW / 2.0, y + 15.0, &msg, size::BODY, W::Regular, theme::WHITE, H::Center,
+        );
         Some(tc.rect(PW/2.0-w/2.0,y,w,22.0))
     }
 
@@ -1796,10 +2232,12 @@ impl App {
 
         if self.water.remind && self.water.percent() < 100.0 && self.water_hours(env.hour() as u32) && self.t - self.last_reminder >= self.settings.water_minutes as f64 * 60.0 {
             self.last_reminder = self.t;
-            self.alert("喝水时间到了", format!("休息一下，喝 {} ml 水吧", self.settings.serving_ml), 2, true);
+            self.alert("喝水时间到了", format!("休息一下，喝 {} ml 水吧", self.settings.serving_ml), 2, true,
+            );
         }
         let now = format!("{} {}", env.today, env.clock.get(..5).unwrap_or("00:00"));
-        let due: Vec<_> = self.todos.items.iter().enumerate().filter(|(_, item)| item.done_on.is_none() && !item.reminded && item.due.as_ref().is_some_and(|d| d <= &now)).map(|(i,item)| (i,item.text.clone())).collect();
+        let due: Vec<_> = self.todos.items.iter().enumerate().filter(|(_, item)| {
+                item.done_on.is_none() && !item.reminded && item.due.as_ref().is_some_and(|d| d <= &now)}).map(|(i,item)| (i,item.text.clone())).collect();
         for (i,text) in due { self.todos.items[i].reminded = true; self.todos.save(); self.alert("待办到时间了", text, 4, true); }
         // v0.5.5 会议提醒：.ics 里的开始时间，默认提前 15 分钟（可设 5/15/30）。
         // v0.5.6 起日历（CalDAV）事件走同一套：同一场会（UID + DTSTART）只提醒一次，
@@ -1878,7 +2316,8 @@ impl App {
         self.media = np;
         if let Some(image)=&self.media.artwork {
             if !self.music_artwork.as_ref().is_some_and(|(old,_)|std::sync::Arc::ptr_eq(old,image)) {
-                self.music_artwork=Some((image.clone(),ctx.load_texture("music-artwork",image.clone(),egui::TextureOptions::LINEAR)));
+                self.music_artwork=Some((image.clone(),ctx.load_texture("music-artwork",image.clone(),egui::TextureOptions::LINEAR),
+                ));
             }
         } else {self.music_artwork=None;}
     }
@@ -1899,7 +2338,8 @@ impl App {
                 error:native_only.then_some(lyrics::FetchError::NotFound), ..Default::default() };
             let (tx, rx) = std::sync::mpsc::channel();
             self.ly.rx = Some(rx);
-            let (source, title, artist, dur) = (np.source.clone(), np.title.clone(), np.artist.clone(), np.duration);
+            let (source, title, artist, dur) = (np.source.clone(), np.title.clone(), np.artist.clone(), np.duration,
+            );
             let song_id=np.song_id;
             if source.to_ascii_lowercase().contains("kugou") || lyrics::is_soda(&source) {
                 let (tx,rx)=std::sync::mpsc::channel();self.ly.native_rx=Some(rx);
@@ -1935,13 +2375,11 @@ impl App {
                         self.ly.retry_at=None;
                         if waiting_native || lyrics::is_soda(&self.media.source) && !l.synced {self.ly.retry_at=Some(self.t+5.0);}
                         self.ly.lyrics = Some(l);
-                    },
-                    Err(error) => {
+                    }Err(error) => {
                         if lyrics::is_soda(&self.media.source) || self.media.source.to_ascii_lowercase().contains("kugou") && error==lyrics::FetchError::NotFound {self.ly.retry_at=Some(self.t+5.0);}
                         else if matches!(error,lyrics::FetchError::Unavailable(_)|lyrics::FetchError::InvalidResponse(_)){self.ly.retry_at=Some(self.t+30.0);}
                         self.ly.error = Some(error);
-                    },
-                }
+                    }}
                 self.ly.rx = None;
             }
         }
@@ -1998,12 +2436,14 @@ impl App {
             .margin(egui::Margin::ZERO)
             .text_color(theme::WHITE)
             .font(theme::font(size::BODY, W::Regular))
-            .hint_text(egui::RichText::new("要做点什么？回车保存").color(theme::DIM).font(theme::font(size::BODY, W::Regular)))
+            .hint_text(egui::RichText::new("要做点什么？回车保存").color(theme::DIM).font(theme::font(size::BODY, W::Regular)),
+            )
             .desired_width(rect.width());
         let resp = ui.put(rect, te);
         let first_focus=!self.todo_input_focused;
         self.buf=buf;
-        let lost_window=ui.input(|i|i.events.iter().any(|event|matches!(event,egui::Event::WindowFocused(false))));
+        let lost_window=ui.input(|i|{
+            i.events.iter().any(|event|matches!(event,egui::Event::WindowFocused(false)))});
         if !first_focus && self.adding && self.buf.trim().is_empty() && (resp.clicked_elsewhere() || lost_window) {
             resp.surrender_focus();
             self.cancel_edit();
@@ -2025,7 +2465,9 @@ impl App {
                 }
             } else if !text.is_empty() {
                 self.todo_first = 0;
-                self.todos.items.insert(0, model::TodoItem { text, done_on: None, due: None, reminded: false });
+                self.todos.items.insert(0, model::TodoItem { text, done_on: None, due: None, reminded: false ,
+                    },
+                );
                 self.todos.save();
                 self.todo_pop.vel += 6.0;
                 added=true;

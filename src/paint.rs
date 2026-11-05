@@ -612,6 +612,25 @@ pub fn checklist(c: &Card, cx: f32, cy: f32, size: f32, ink: Color32, plate: Col
     }
 }
 
+pub fn resident_water(c: &Card, x: f32, y: f32) {
+    droplet(c, x, y, 16.0, Color32::from_rgb(78, 191, 246));
+}
+
+pub fn resident_todo(c: &Card, x: f32, y: f32) {
+    c.circle(x, y, 8.0, Color32::from_rgb(40, 208, 109));
+    check(c, x, y, 9.0, 1.0, 1.8, Color32::from_rgb(11, 43, 25));
+}
+
+pub fn resident_shelf(c: &Card, x: f32, y: f32) {
+    tray(c, x, y - 1.0, 18.0, 0.0, Color32::from_gray(235), Color32::from_gray(100));
+}
+
+pub fn resident_mail(c: &Card, x: f32, y: f32) {
+    let ink = Color32::from_rgb(112, 206, 242);
+    c.stroke(x - 7.0, y - 5.0, 14.0, 10.0, 2.0, 1.3, ink);
+    c.path(&[(x - 6.2, y - 4.0), (x, y + 0.8), (x + 6.2, y - 4.0)], 1.3, ink);
+}
+
 /// 下载托盘：向下箭头落进收纳盒。`drop` 为箭头下坠位移（拖入时轻微弹跳）。
 pub fn tray(c: &Card, cx: f32, cy: f32, size: f32, drop: f32, color: Color32, shade: Color32) {
     let u = size / 30.0;

@@ -5,6 +5,114 @@ use std::sync::Mutex;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+fn steam_fixture(h:&mut H){
+    use crate::steam::*;
+    h.app.settings.visible_pages[8]=true;
+    h.app.steam_event(Event::Connected(Config{steamid:"76561198000000001".into(),notify:true,fullscreen:false,watch_app:None}));
+    h.app.steam_event(Event::Snapshot{steamid:"76561198000000001".into(),snapshot:Snapshot{player:Some(Player{steamid:"76561198000000001".into(),name:"测试玩家".into(),online:1,public:true,avatar:None,game:Some(Game{id:367520,name:"Hollow Knight".into(),icon:None})}),unlocked:17,total:63,at:"09:41:00".into(),achievement_game:Some(Game{id:367520,name:"Hollow Knight".into(),icon:None}),achievements_at:"09:41:00".into(),..Snapshot::default()}});
+}
+fn steam_unlock(id:&str,api:&str)->crate::steam::Event {
+    use crate::steam::*;
+    Event::Unlocked{steamid:id.into(),game:Game{id:367520,name:"Hollow Knight".into(),icon:None},achievement:Achievement{api_name:api.into(),name:"旅途开始".into(),description:String::new(),unlocked:true,unlocktime:123,icon:None}}
+}
+#[test]
+fn calendar_editor_shows_its_bottom_actions_after_opening(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.open_calendar_editor(None);
+    h.hover(H::local(300.0,40.0),1.0);
+    assert_eq!(h.app.expanded_height(),crate::app::CALENDAR_EDITOR_H);
+    assert!(h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(text)
+        if text.galley.text()=="保存" && shape.clip_rect.contains(text.visual_bounding_rect().center()))),"新建日程的保存按钮不能被岛体裁剪");
+}
+#[test]
+fn steam_account_notifications_are_isolated_and_distinct_achievements_queue(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();steam_fixture(&mut h);
+    h.app.steam_event(steam_unlock("76561198000000002","other"));assert!(h.app.alerts.is_empty());
+    h.app.alert("喝水时间到了","该喝水了",2,false);
+    h.app.steam_event(steam_unlock("76561198000000001","first"));h.app.steam_event(steam_unlock("76561198000000001","second"));
+    assert_eq!(h.app.alerts.iter().filter(|a|a.title==crate::steam::NOTICE).count(),2,"同名的不同成就也必须按顺序显示");
+    let mut config=h.app.steam.config.clone().unwrap();config.notify=false;h.app.steam_event(crate::steam::Event::Connected(config));h.app.tick_alerts();
+    assert!(!h.app.alerts.iter().chain(h.app.notice.iter()).any(|a|a.title==crate::steam::NOTICE));
+    assert!(h.app.notice.as_ref().is_some_and(|a|a.title=="喝水时间到了"));
+}
+#[test]
+fn steam_fullscreen_override_only_applies_to_current_account_achievements(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();steam_fixture(&mut h);
+    h.app.steam_event(steam_unlock("76561198000000001","first"));h.app.tick_alerts();assert!(!h.app.steam_fullscreen_notice());
+    h.app.steam.config.as_mut().unwrap().fullscreen=true;assert!(h.app.steam_fullscreen_notice());
+    h.app.notice=None;h.app.alert(crate::steam::NOTICE,"同名但不是 Steam 成就事件",0,false);h.app.tick_alerts();assert!(!h.app.steam_fullscreen_notice());
+    h.app.steam_event(crate::steam::Event::Disconnected(None));assert!(h.app.steam.config.is_none());assert!(h.app.steam.game().is_none());
+}
+#[test]
+fn steam_game_panel_and_error_staleness_are_visible(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();steam_fixture(&mut h);
+    h.app.show_page(8);h.hover(H::local(210.0,60.0),1.0);
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="Hollow Knight")));
+    h.app.steam_event(crate::steam::Event::Error("连接暂时失败".into()));assert!(h.app.steam.game().is_none());
+    h.frame(vec![]);assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="状态待同步")));
+}
+#[test]
+fn steam_long_game_names_do_not_hide_the_achievement(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();steam_fixture(&mut h);
+    let mut event=steam_unlock("76561198000000001","new");
+    if let crate::steam::Event::Unlocked{ref mut game,..}=event{game.name="A very long game title that would otherwise hide the achievement name".into();}
+    h.app.steam_event(event);h.app.tick_alerts();
+    assert!(h.app.notice.as_ref().unwrap().body.starts_with("旅途开始"));
+}
+#[test]
+fn steam_manual_tracking_badge_does_not_claim_the_game_is_running(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();steam_fixture(&mut h);
+    h.app.steam.config.as_mut().unwrap().watch_app=Some(367520);h.app.steam.snapshot.player.as_mut().unwrap().game=None;
+    assert!(h.app.steam.game().is_none());assert_eq!(h.app.steam.badge().unwrap().0,"");
+    h.app.show_page(8);h.hover(H::local(210.0,60.0),1.0);
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="Hollow Knight")));
+}
+#[test]
+fn steam_notification_preview_uses_the_queue_without_changing_achievement_data(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();steam_fixture(&mut h);
+    let before=h.app.steam.snapshot.unlocked;h.app.steam_preview();h.app.tick_alerts();
+    assert!(h.app.notice.as_ref().is_some_and(|a|a.body.starts_with("测试成就通知")));assert_eq!(h.app.steam.snapshot.unlocked,before);
+    h.app.notice=None;h.app.settings.notifications=false;h.app.steam_preview();h.app.tick_alerts();assert!(h.app.notice.is_none());
+}
+#[test]
+fn steam_settings_fit_both_themes_and_export_synthetic_previews(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for (width,height) in [(600.0,450.0),(690.0,560.0)] {
+        for dark in [false,true] {for connected in [false,true] {
+            let mut h=H::new();if connected{steam_fixture(&mut h);}
+            h.app.settings.settings_theme=if dark{crate::settings_theme::SettingsTheme::Dark}else{crate::settings_theme::SettingsTheme::Light};
+            h.app.open_steam_settings();h.ctx.set_embed_viewports(false);
+            let output=std::sync::Arc::new(std::sync::Mutex::new(None));let capture=output.clone();
+            egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
+                let id=viewport.ids.this;
+                *capture.lock().unwrap()=Some(ctx.run(egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(width,height))),
+                    viewports:std::iter::once((id,egui::ViewportInfo{native_pixels_per_point:Some(1.0),..Default::default()})).collect(),..Default::default()},|ctx|(viewport.viewport_ui_cb)(ctx)));
+            });
+            let mut raster=crate::preview_raster::Raster::new(width as usize,height as usize);
+            for frame in 0..3 {
+                let root=h.ctx.run(egui::RawInput::default(),|ctx|h.app.settings_ui(ctx,false));
+                let child=output.lock().unwrap().take().unwrap();
+                raster.update_textures(&root.textures_delta);raster.update_textures(&child.textures_delta);
+                if frame==2 {
+                    assert!(child.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()==if connected{"跟踪游戏"}else{"Steam Web API Key"})));
+                    for s in &child.shapes {if let egui::Shape::Text(t)=&s.shape {
+                        let visible=t.visual_bounding_rect().intersect(s.clip_rect);
+                        assert!(visible.width()<=width+1.0 && visible.right()<=width+1.0,"Steam 设置内容不能溢出窗口");
+                    }}
+                    if let Some(directory)=std::env::var_os("DAOZAI_STEAM_PREVIEW"){
+                        let dir=std::path::PathBuf::from(directory);std::fs::create_dir_all(&dir).unwrap();
+                        raster.buf.fill([0.0,0.0,0.0,1.0]);raster.draw(&h.ctx.tessellate(child.shapes,child.pixels_per_point),child.pixels_per_point);
+                        let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+                        image::save_buffer(dir.join(format!("steam-{width}-{dark}-{connected}.png")),&rgba,width as u32,height as u32,image::ColorType::Rgba8).unwrap();
+                    }
+                }
+                raster.free_textures(&root.textures_delta);raster.free_textures(&child.textures_delta);
+            }
+        }}
+    }
+}
+
 #[test]
 fn v0649_settings_and_mail_accounts_survive_upgrade(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let _h=H::new();
@@ -238,7 +346,7 @@ fn settings_keep_dark_buttons_when_system_theme_changes() {
 #[test]
 fn expanded_settings_routes_preserve_inline_controls(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-    for (page,tab) in [1,2,3,5,4,7,11,8].into_iter().enumerate(){
+    for (page,tab) in [1,2,3,5,4,7,11,8,12].into_iter().enumerate(){
         let mut h=H::new();h.app.show_page(page);h.hover(H::local(200.0,40.0),1.0);
         h.click(H::local(394.0,18.0));
         assert!(h.app.settings_open,"页面 {page} 应打开设置窗口");
@@ -1134,6 +1242,25 @@ fn hover_expands_with_overshoot_and_leave_collapses() {
 }
 
 #[test]
+fn hover_page_delay_resets_when_moving_between_shortcuts(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.hover_page_delay_ms=800;
+    h.app.settings.resident_pages[1]=true;
+    h.app.settings.resident_pages[2]=true;
+    h.frame(vec![]);
+    let layout=h.app.resident.current();
+    let focus=Pos2::new(WIN_W/2.0+layout.x[crate::bar_layout::FOCUS].unwrap(),15.0);
+    let water=Pos2::new(WIN_W/2.0+layout.x[crate::bar_layout::WATER].unwrap(),15.0);
+    h.hover(focus,0.35);
+    assert!(!h.app.open && h.app.page()==0);
+    h.hover(water,0.35);
+    assert!(!h.app.open && h.app.page()==0,"切到另一个图标应重新计时");
+    h.hover(water,0.55);
+    assert!(h.app.open && h.app.page()==2,"停稳后打开最终悬停的页面");
+}
+
+#[test]
 fn browser_minimal_preserves_preferences_and_restores_the_previous_mode(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.app.settings.pet=true;h.app.settings.minimal=false;h.browser_at_top=Some(true);
@@ -1441,7 +1568,7 @@ fn quota_accounts_switch_independently_and_hide_with_the_page() {
 fn page_visibility_is_saved_and_sets_the_starting_page() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    assert_eq!(h.app.settings.visible_pages,[true;8]);
+    assert_eq!(h.app.settings.visible_pages,[true;9]);
     assert!(h.app.settings.show_battery);
     h.app.settings.show_battery=false;
     h.app.set_page_visible(0,false);
@@ -1449,17 +1576,17 @@ fn page_visibility_is_saved_and_sets_the_starting_page() {
     h.app.settings.save();
     let settings=crate::model::Settings::load();
     assert!(!settings.show_battery);
-    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true]);
+    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true,true]);
     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
     assert_eq!(restarted.page(),1);
     assert_eq!(restarted.settings.visible_pages,settings.visible_pages);
     assert!(!restarted.settings.show_battery);
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=000000\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,false]);
+    assert_eq!(crate::model::Settings::load().visible_pages,[false,false,false,false,false,false,false,false,true]);
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=1000000\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,true],"旧版页面开关应保留，并开启新增的日程页");
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,true,true],"旧版页面开关应保留，并开启新增的日程页和 Steam 页");
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=invalid\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true;8]);
+    assert_eq!(crate::model::Settings::load().visible_pages,[true;9]);
 }
 
 #[test]
@@ -3522,13 +3649,13 @@ fn calendar_sync_result_does_not_enqueue_another_sync() {
 fn page_order_persists_and_controls_navigation() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    h.app.settings.page_order=[5,2,0,1,3,4,6,7];
+    h.app.settings.page_order=[5,2,0,1,3,4,6,7,8];
     h.app.settings.save();
     let settings=crate::model::Settings::load();
-    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7]);
+    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7,8]);
     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
     assert_eq!(restarted.page(),5);
-    for page in [1,3,4,6,7] {h.app.set_page_visible(page,false);}
+    for page in [1,3,4,6,7,8] {h.app.set_page_visible(page,false);}
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
     for expected in [5,2,0] {
         h.click(H::local(398.0,68.0));
@@ -3541,7 +3668,7 @@ fn page_order_persists_and_controls_navigation() {
     assert_eq!(h.app.page,5);
     for invalid in ["0,0,1,2,3,4,5,6","8,1,2,3,4,5,6,7","0,1","invalid"] {
         std::fs::write(crate::model::config_dir().join("settings.txt"),format!("page_order={invalid}\n")).unwrap();
-        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7]);
+        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7,8]);
     }
 }
 
@@ -3568,9 +3695,9 @@ fn page_order_drag_applies_on_release_and_saves() {
     draw(&mut h,vec![egui::Event::PointerMoved(from),button(from,true)]);
     draw(&mut h,vec![egui::Event::PointerMoved(from+egui::vec2(0.0,10.0))]);
     draw(&mut h,vec![egui::Event::PointerMoved(to)]);
-    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7]);
+    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7,8]);
     draw(&mut h,vec![button(to,false)]);
-    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7]);
+    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7,8]);
     assert_eq!(crate::model::Settings::load().page_order,h.app.settings.page_order);
 }
 
