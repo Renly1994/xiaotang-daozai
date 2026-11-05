@@ -87,6 +87,7 @@ fn replace_file(tmp:&Path,path:&Path)->std::io::Result<()> {
 pub struct Settings {
     pub display_id: String,
     pub settings_theme: crate::settings_theme::SettingsTheme,
+    pub language: crate::i18n::Language,
     pub pet: bool,
     pub minimal: bool,
     pub browser_minimal: bool,
@@ -130,11 +131,13 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 9], page_order: [0,1,2,3,4,5,6,7,8], world_clock_cities: crate::world_clock::default_cities(), show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
+        Self { display_id: String::new(), settings_theme: Default::default(), language: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 9], page_order: [0,1,2,3,4,5,6,7,8], world_clock_cities: crate::world_clock::default_cities(), show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
     }
 }
 
 impl Settings {
+    pub fn locale(&self)->crate::i18n::Locale {self.language.resolve()}
+
     pub fn clock_text(&self, clock: &str) -> String {
         use chrono::Timelike;
         let Ok(time) = chrono::NaiveTime::parse_from_str(clock.get(..5).unwrap_or(""), "%H:%M") else { return "--:--".into(); };
@@ -145,7 +148,9 @@ impl Settings {
             2=>match time.hour() {0..=5=>"凌晨",6..=10=>"上午",11..=12=>"中午",13..=16=>"下午",17..=18=>"傍晚",_=>"晚上"},
             _=>return digits,
         };
-        format!("{period} {digits}")
+        let locale=self.locale();
+        let period=if locale.is_english() && self.clock_period==2 {match period {"上午"=>"Morning","下午"=>"Afternoon",_=>locale.text(period)}}else{locale.text(period)};
+        if locale.is_english(){format!("{digits} {period}")}else{format!("{period} {digits}")}
     }
 
     pub fn load() -> Self {
@@ -153,6 +158,7 @@ impl Settings {
         for (k, v) in read_kv(&config_dir().join("settings.txt")) {
             match k.as_str() {
                 "settings_theme" => s.settings_theme=crate::settings_theme::SettingsTheme::parse(&v),
+                "language" => s.language=crate::i18n::Language::parse(&v),
                 "display_id" => s.display_id = v,
                 "pet" => s.pet = v == "1" || v.eq_ignore_ascii_case("true"),
                 "minimal" => s.minimal = v == "1" || v.eq_ignore_ascii_case("true"),
@@ -220,6 +226,7 @@ impl Settings {
             &[
                 ("display_id".into(),self.display_id.clone()),
                 ("settings_theme".into(),self.settings_theme.key().into()),
+                ("language".into(),self.language.key().into()),
                 ("pet".into(), if self.pet { "1".to_string() } else { "0".to_string() }),
                 ("minimal".into(), if self.minimal { "1".to_string() } else { "0".to_string() }),
                 ("browser_minimal".into(), (self.browser_minimal as u8).to_string()),

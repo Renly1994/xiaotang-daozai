@@ -6,6 +6,87 @@ use std::sync::Mutex;
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn english_world_clock_has_no_chinese_ui_and_keeps_all_controls_inside_the_island() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.language=crate::i18n::Language::English;h.app.settings.clock_12h=true;
+    h.app.open_world_clock_island();h.hover(H::local(200.0,30.0),1.0);
+    for shape in &h.shapes {
+        if let egui::Shape::Text(text)=&shape.shape {
+            assert!(!text.galley.text().chars().any(|ch|('\u{4e00}'..='\u{9fff}').contains(&ch)),"英文世界时钟不能混入中文界面文案：{}",text.galley.text());
+        }
+    }
+    for id in ["world-now","world-view","world-expand"] {
+        let response=h.ctx.read_response(egui::Id::new(("card",true,id))).unwrap();
+        assert!(h.hit.contains_rect(response.rect),"英文控件必须完整可点击：{id}");
+    }
+}
+
+#[test]
+fn english_general_settings_reflow_at_minimum_width_in_both_themes() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for width in [600.0,690.0] {for dark in [false,true] {
+        let mut h=H::new();h.app.settings.language=crate::i18n::Language::English;
+        h.app.settings.browser_minimal=true;h.app.settings_tab=0;h.app.open_settings();h.ctx.set_embed_viewports(false);
+        h.app.settings.settings_theme=if dark{crate::settings_theme::SettingsTheme::Dark}else{crate::settings_theme::SettingsTheme::Light};
+        let output=std::sync::Arc::new(Mutex::new(None));let capture=output.clone();
+        egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
+            let id=viewport.ids.this;
+            let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(width,1600.0))),viewports:std::iter::once((id,egui::ViewportInfo::default())).collect(),..Default::default()};
+            *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
+        });
+        for _ in 0..3{let _=h.ctx.run(Default::default(),|ctx|h.app.settings_ui(ctx,false));}
+        let out=output.lock().unwrap().take().unwrap();
+        let mut saw_periods=false;let mut saw_avoidance=false;let mut cards=0;
+        for shape in out.shapes {match shape.shape {
+        egui::Shape::Rect(rect) if rect.rect.left()>180.0 && rect.fill==if dark{egui::Color32::from_rgb(35,35,38)}else{egui::Color32::WHITE}=>{
+            cards+=1;
+            assert!(rect.rect.right()<=width-21.0,"英文设置卡片必须保留窗口右边距：{:?}",rect.rect);
+        },
+        egui::Shape::Text(text)=>{
+            let label=text.galley.text();
+            assert!(!label.chars().any(|ch|('\u{4e00}'..='\u{9fff}').contains(&ch)),"常规设置仍有未翻译文案：{label}");
+            assert!(text.visual_bounding_rect().right()<=width-10.0,"英文设置不能越过窗口右边距：{label}");
+            saw_periods|=label=="Day periods";saw_avoidance|=label=="Auto-hide for apps";
+        },_=>{}}}
+        assert!(saw_periods && saw_avoidance && cards>=6,"必须检查完整常规设置，包含时段和自动避让");
+    }}
+}
+
+#[test]
+fn language_setting_switches_world_clock_immediately_and_survives_restart() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings_tab=0;h.app.open_settings();h.ctx.set_embed_viewports(false);
+    let cities=h.app.settings.world_clock_cities.clone();
+    fn draw(h:&mut H,events:Vec<egui::Event>) {
+        let output=std::sync::Arc::new(Mutex::new(None));let capture=output.clone();
+        egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
+            let id=viewport.ids.this;
+            let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(690.0,900.0))),events:events.clone(),viewports:std::iter::once((id,egui::ViewportInfo::default())).collect(),..Default::default()};
+            *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
+        });
+        let _=h.ctx.run(Default::default(),|ctx|h.app.settings_ui(ctx,false));
+        h.shapes=output.lock().unwrap().take().unwrap().shapes;
+    }
+    fn click(h:&mut H,label:&str) {
+        let pos=h.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t) if t.galley.text()==label=>Some(t.visual_bounding_rect().center()),_=>None}).unwrap_or_else(||panic!("找不到语言设置选项：{label}"));
+        draw(h,vec![egui::Event::PointerMoved(pos)]);
+        for pressed in [true,false]{draw(h,vec![egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()}]);}
+        draw(h,vec![]);
+    }
+    for _ in 0..3{draw(&mut h,vec![]);}
+    click(&mut h,"简体中文");click(&mut h,"English");
+    assert_eq!(h.app.settings.language,crate::i18n::Language::English);
+    assert_eq!(crate::model::Settings::load().language,crate::i18n::Language::English);
+    click(&mut h,"World clock");assert_eq!(h.app.settings_tab,12);
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="Open world clock")));
+    h.app.world_clock.search="东京".into();draw(&mut h,vec![]);
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="+ Tokyo")),"切到英文后仍应支持中文城市搜索");
+    assert_eq!(h.app.world_clock.search,"东京");assert_eq!(h.app.settings.world_clock_cities,cities);
+    let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
+    assert_eq!(restarted.settings.language,crate::i18n::Language::English);
+}
+
+#[test]
 fn world_clock_upgrade_preserves_navigation_and_validates_saved_cities() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let _h=H::new();
     let path=crate::model::config_dir().join("settings.txt");
@@ -89,8 +170,9 @@ fn world_clock_preview_gallery() {
         image::save_buffer(dest.join(name),&rgba,raster.w as u32,raster.h as u32,image::ColorType::Rgba8).unwrap();
         raster.free_textures(&out.textures_delta);
     }
+    let language=if std::env::var("DAOZAI_UI_PREVIEW_LANGUAGE").as_deref()==Ok("en"){crate::i18n::Language::English}else{crate::i18n::Language::Chinese};
     for twelve in [false,true] {
-        let mut h=H::new();h.app.settings.clock_12h=twelve;h.app.settings.pet=false;
+        let mut h=H::new();h.app.settings.language=language;h.app.settings.clock_12h=twelve;h.app.settings.pet=false;
         h.app.show_page(crate::app::WORLD_CLOCK_PAGE);h.hover(H::local(200.0,30.0),1.0);
         let ppp=2.0;h.ctx.set_pixels_per_point(ppp);
         let height=h.app.canvas_height();
@@ -105,7 +187,7 @@ fn world_clock_preview_gallery() {
         }
     }
     for globe in [false,true] {for width in [420.0,460.0] {
-        let mut h=H::new();h.app.settings.pet=false;h.app.world_clock.globe_view=globe;
+        let mut h=H::new();h.app.settings.language=language;h.app.settings.pet=false;h.app.world_clock.globe_view=globe;
         h.app.settings.world_clock_cities=["America/Los_Angeles","America/New_York","Europe/London","Asia/Shanghai","Asia/Tokyo","Australia/Sydney"].map(str::to_owned).to_vec();
         h.app.open_world_clock();
         let ppp=1.5;h.ctx.set_pixels_per_point(ppp);
@@ -119,23 +201,26 @@ fn world_clock_preview_gallery() {
             else {raster.update_textures(&out.textures_delta);raster.free_textures(&out.textures_delta);}
         }
     }}
+    for tab in [0,12] {
     for dark in [false,true] {for width in [600.0,690.0] {
-        let mut h=H::new();h.app.settings_tab=12;h.app.open_settings();h.ctx.set_embed_viewports(false);
+        let mut h=H::new();h.app.settings.language=language;h.app.settings_tab=tab;h.app.open_settings();h.ctx.set_embed_viewports(false);
         h.app.settings.settings_theme=if dark{crate::settings_theme::SettingsTheme::Dark}else{crate::settings_theme::SettingsTheme::Light};
-        let output=std::sync::Arc::new(Mutex::new(None));let capture=output.clone();let size=egui::vec2(width,560.0);
+        let output=std::sync::Arc::new(Mutex::new(None));let capture=output.clone();let size=egui::vec2(width,if tab==0{1400.0}else{560.0});
         egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
             let id=viewport.ids.this;let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,size)),viewports:std::iter::once((id,egui::ViewportInfo::default())).collect(),..Default::default()};
             *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
         });
-        let mut raster=crate::preview_raster::Raster::new(width as usize,560);
+        let mut raster=crate::preview_raster::Raster::new(width as usize,size.y as usize);
         for f in 0..4 {
             let root=h.ctx.run(Default::default(),|ctx|h.app.settings_ui(ctx,false));raster.update_textures(&root.textures_delta);
             let child=output.lock().unwrap().take().unwrap();
-            if f==3 {save(&dest,&format!("world-settings-{}-{}.png",if dark{"dark"}else{"light"},width as u32),&h.ctx,child,&mut raster);}
+            if f==3 {save(&dest,&format!("{}-{}-{}.png",if tab==0{"language-settings"}else{"world-settings"},if dark{"dark"}else{"light"},width as u32),&h.ctx,child,&mut raster);}
             else {raster.update_textures(&child.textures_delta);raster.free_textures(&child.textures_delta);}
             raster.free_textures(&root.textures_delta);
         }
     }}
+
+    }
 }
 
 #[test]

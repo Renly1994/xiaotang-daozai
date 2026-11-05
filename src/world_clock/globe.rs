@@ -52,10 +52,10 @@ impl Globe {
         if let Some((lon,lat))=coordinates(zone){self.longitude=lon;self.latitude=lat;}
     }
 
-    pub fn draw(&mut self,c:&Card,area:Rect,now:DateTime<Utc>,cities:&[String],selected:usize,labels:bool)->Option<usize> {
+    pub fn draw(&mut self,c:&Card,area:Rect,now:DateTime<Utc>,cities:&[String],selected:usize,labels:bool,locale:crate::i18n::Locale)->Option<usize> {
         let center=area.center();let radius=area.width().min(area.height())/2.0;
         let response=c.hit_drag(area.left(),area.top(),area.width(),area.height(),("world-globe",labels))
-            .on_hover_cursor(egui::CursorIcon::Grab).on_hover_text("拖动旋转地球，点击城市定位");
+            .on_hover_cursor(egui::CursorIcon::Grab).on_hover_text(locale.text("拖动旋转地球，点击城市定位"));
         if response.dragged() {
             let delta=c.ui.ctx().input(|i|i.pointer.delta())/c.s;
             self.longitude=(self.longitude-delta.x*0.65).rem_euclid(360.0);
@@ -93,7 +93,7 @@ impl Globe {
             if active {c.circle(p.x,p.y,6.0,color.gamma_multiply(0.2));c.ring(p.x,p.y,4.0,1.0,color);}
             c.circle(p.x,p.y,if active{2.2}else{1.8},color);
             if labels || active {
-                let name=super::city_name(zone);let size=if active{11.0}else{9.5};
+                let name=super::city_name(zone,locale);let size=if active{11.0}else{9.5};
                 let width=c.text_w(&name,size,W::Semibold);let left=p.x<center.x;
                 let x=if left{p.x+8.0}else{p.x-8.0};let h=if left{H::Left}else{H::Right};
                 let rect=Rect::from_min_size(Pos2::new(if left{x}else{x-width},p.y-7.0),egui::vec2(width,14.0));
@@ -102,7 +102,7 @@ impl Globe {
                     c.centered_text(x,p.y,&name,size,W::Semibold,if active{theme::WHITE}else{theme::GRAY},h);occupied.push(rect);
                 }
             }
-            if c.hit(p.x-8.0,p.y-8.0,16.0,16.0,("world-globe-city",labels,index)).on_hover_text(super::city_name(zone)).clicked(){clicked=Some(index);}
+            if c.hit(p.x-8.0,p.y-8.0,16.0,16.0,("world-globe-city",labels,index)).on_hover_text(super::city_name(zone,locale)).clicked(){clicked=Some(index);}
         }
         clicked
     }

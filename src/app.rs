@@ -1567,9 +1567,10 @@ impl App {
         let m = anim::ease_in_out(smoothstep(0.0, 0.85, p));
         let clock = self.settings.clock_text(&env.clock);
         let show_battery=self.settings.show_battery && env.battery.is_some();
+        let date=if self.settings.locale().is_english(){chrono::NaiveDate::parse_from_str(&env.today,"%Y-%m-%d").map(|day|day.format("%b %d %a").to_string()).unwrap_or_else(|_|env.date.clone())}else{env.date.clone()};
 
         // 顶栏终点布局：[电池][日期][时钟] 作为一组整体居中
-        let date_w = base.text_w(&env.date, size::DATE, W::Regular);
+        let date_w = base.text_w(&date, size::DATE, W::Regular);
         let clock_w = paint::clock_width(base,&clock,size::CLOCK);
         let battery_space=if show_battery {24.0}else{0.0};
         let group = battery_space + date_w + 8.0 + clock_w;
@@ -1601,7 +1602,7 @@ impl App {
         }
         // 日期随内容淡入，从药丸方向轻轻滑出
         if reveal > 0.0 {
-            base.faded(reveal).text(hd + (1.0 - reveal) * 10.0, 22.5, &env.date, size::DATE, W::Regular, Color32::from_rgb(210, 210, 214), H::Left);
+            base.faded(reveal).text(hd + (1.0 - reveal) * 10.0, 22.5, &date, size::DATE, W::Regular, Color32::from_rgb(210, 210, 214), H::Left);
         }
         if has_music && (p>0.1 || layout.x[bar::MUSIC].is_some()) {
             paint::playback_bars(base,lerp(local_cx+layout.x[bar::MUSIC].unwrap_or(0.0),367.0,m),lerp(15.0,18.0,m),self.t,self.media.playing,theme::WHITE);
@@ -1650,7 +1651,8 @@ impl App {
     // 面板主体：页标题 + 页面（带切页过渡）+ 翻页箭头 + 页码豆
     // ---------------------------------------------------------------
     fn panel_body(&mut self, c: &Card, env: &Env, cmds: &mut Vec<Cmd>) {
-        let settings=c.hit(380.0,4.0,28.0,28.0,"page-settings").on_hover_text(format!("打开{}设置窗口",PAGE_NAMES[self.page]));
+        let locale=self.settings.locale();
+        let settings=c.hit(380.0,4.0,28.0,28.0,"page-settings").on_hover_text(if locale.is_english(){format!("Open {} settings",locale.text(PAGE_NAMES[self.page]))}else{format!("打开{}设置窗口",PAGE_NAMES[self.page])});
         let (hover,press)=c.hover_t(&settings);
         c.circle(394.0,18.0,13.0,Color32::from_white_alpha((hover*24.0) as u8));
         paint::gear(&c.scaled(394.0,18.0,0.8*(1.0-press*0.08)),394.0,18.0,paint::mix(theme::GRAY,theme::WHITE,hover));
@@ -1697,9 +1699,10 @@ impl App {
             6 => ("AI", "额度", theme::SOFT_GREEN),
             _ => ("岛仔", "设置", theme::WHITE),
         };
-        let wa = c.text(15.0, base, a, size::TITLE, W::Bold, theme::WHITE, H::Left);
+        let locale=self.settings.locale();
+        let wa = c.text(15.0, base, locale.text(a), size::TITLE, W::Bold, theme::WHITE, H::Left);
         if !b.is_empty() {
-            c.text(15.0 + wa + 1.5, base, b, size::TITLE, W::Bold, col, H::Left);
+            c.text(15.0 + wa + if locale.is_english(){4.0}else{1.5}, base, locale.text(b), size::TITLE, W::Bold, col, H::Left);
         }
     }
 
@@ -1727,7 +1730,7 @@ impl App {
             if i==WORLD_CLOCK_PAGE {crate::world_clock::page_marker(c,x+w/2.0,dot_y,5.5,i==self.page);}
             else {c.fill(x, dot_y - 2.0, w, 4.0, 2.0, col);}
             let hr = c.hit(x - 2.0, dot_y - 7.0, w + 4.0, 14.0, ("dot", i));
-            hr.clone().on_hover_text(PAGE_NAMES[i]);
+            hr.clone().on_hover_text(self.settings.locale().text(PAGE_NAMES[i]));
             if hr.hovered() && i != self.page && i!=WORLD_CLOCK_PAGE {
                 c.fill(x - 1.0, dot_y - 3.0, w + 2.0, 6.0, 3.0, Color32::from_white_alpha(28));
             }
