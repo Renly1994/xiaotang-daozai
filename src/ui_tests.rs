@@ -2813,6 +2813,8 @@ fn calendar_dates_are_readable_and_source_labels_do_not_take_a_second_line() {
     assert!(eleven.left()-ten.right()>=6.0,"相邻日期需要横向留白：{ten:?} {eleven:?}");
     assert!(seventeen.top()-ten.bottom()>=5.0,"相邻周需要纵向留白：{ten:?} {seventeen:?}");
     assert!(!h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="飞书" || t.galley.text().starts_with("邮件 · "))),"来源应使用标题前的 Logo，详细文字保留在悬停提示中");
+    h.app.select_calendar_day(chrono::NaiveDate::from_ymd_opt(2026,10,28).unwrap());h.frame(vec![]);
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="今天 · 10月28日 星期三")),"右侧标题应显示今天日期和星期");
 }
 
 #[test]

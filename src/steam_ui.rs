@@ -6,6 +6,20 @@ use crate::{
 };
 use eframe::egui::{self, Color32};
 
+fn recent_achievement_icons(history:&std::collections::VecDeque<crate::extras::Alert>,account:&str,app_id:u32)->Vec<(String,String)> {
+    let prefix=format!("{app_id}:");
+    let mut seen=std::collections::HashSet::new();
+    let mut recent=Vec::with_capacity(4);
+    for alert in history {
+        let crate::extras::AlertSource::Steam(owner,key)=&alert.source else{continue;};
+        if owner!=account || !key.starts_with(&prefix) || !seen.insert(key.clone()){continue;}
+        let Some(notice)=alert.steam.as_ref() else{continue;};
+        if let Some(url)=&notice.icon_url {recent.push((url.clone(),notice.achievement.clone()));}
+        if recent.len()==4 {break;}
+    }
+    recent
+}
+
 pub(crate) struct State {
     pub config: Option<Config>,
     pub snapshot: Snapshot,
@@ -58,6 +72,7 @@ impl State {
         None
     }
 }
+
 impl App {
     pub fn open_steam_settings(&mut self) {
         self.settings_tab = 12;
@@ -536,11 +551,13 @@ impl App {
             .badge()
             .map(|(label, game)| (label, game.clone()))
         {
+            let account=self.steam.config.as_ref().map(|config|config.steamid.as_str()).unwrap_or_default();
+            let recent=recent_achievement_icons(&self.history,account,game.id);
             let icon = self
                 .steam_images
                 .get(c.ui.ctx(), game.icon.as_deref(), None);
             if let Some(texture) = icon {
-                let rect = c.rect(106.0, 58.0, 42.0, 42.0);
+                let rect = c.rect(38.0, 58.0, 42.0, 42.0);
                 c.painter.image(
                     texture,
                     rect,
@@ -548,12 +565,12 @@ impl App {
                     Color32::WHITE,
                 );
             } else {
-                crate::extras::device_icon(c, crate::bt::DeviceKind::Gamepad, 127.0, 79.0, 32.0);
+                crate::extras::device_icon(c, crate::bt::DeviceKind::Gamepad, 59.0, 79.0, 32.0);
             }
             c.text(
-                160.0,
+                88.0,
                 76.0,
-                &c.fit(&game.name, 15.0, W::Semibold, 220.0),
+                &c.fit(&game.name, 15.0, W::Semibold, 145.0),
                 15.0,
                 W::Semibold,
                 theme::WHITE,
@@ -561,7 +578,7 @@ impl App {
             );
             if self.steam.snapshot.total > 0 {
                 c.text(
-                    160.0,
+                    88.0,
                     98.0,
                     &format!(
                         "已解锁 {} / {} 项成就",
@@ -573,10 +590,18 @@ impl App {
                     H::Left,
                 );
             }
+            for (index,(url,name)) in recent.iter().enumerate() {
+                let x=248.0+34.0*index as f32;
+                c.fill(x,66.0,30.0,30.0,5.0,Color32::from_gray(24));
+                if let Some(texture)=self.steam_images.get(c.ui.ctx(),None,Some(url)) {
+                    c.painter.image(texture,c.rect(x,66.0,30.0,30.0),egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)),Color32::WHITE);
+                }
+                c.hit(x,64.0,30.0,34.0,("steam-recent-achievement",index)).on_hover_text(name);
+            }
         } else if self.steam.config.is_some() {
-            crate::extras::device_icon(c, crate::bt::DeviceKind::Gamepad, 127.0, 79.0, 32.0);
+            crate::extras::device_icon(c, crate::bt::DeviceKind::Gamepad, 59.0, 79.0, 32.0);
             c.text(
-                160.0,
+                88.0,
                 70.0,
                 "等待 Steam 游戏状态",
                 13.0,
@@ -585,7 +610,7 @@ impl App {
                 H::Left,
             );
             c.text(
-                160.0,
+                88.0,
                 89.0,
                 &c.fit(&self.steam.snapshot.note, 11.0, W::Regular, 280.0),
                 10.0,
@@ -595,7 +620,7 @@ impl App {
             );
             if !self.steam.note.is_empty() {
                 c.text(
-                    160.0,
+                    88.0,
                     106.0,
                     &c.fit(&self.steam.note, 9.5, W::Regular, 220.0),
                     9.5,
@@ -605,9 +630,9 @@ impl App {
                 );
             }
         } else {
-            crate::extras::device_icon(c, crate::bt::DeviceKind::Gamepad, 127.0, 79.0, 32.0);
+            crate::extras::device_icon(c, crate::bt::DeviceKind::Gamepad, 59.0, 79.0, 32.0);
             c.text(
-                160.0,
+                88.0,
                 70.0,
                 "连接 Steam 查看游戏与成就",
                 13.0,
@@ -616,7 +641,7 @@ impl App {
                 H::Left,
             );
             c.text(
-                160.0,
+                88.0,
                 89.0,
                 "也可以点击右上角齿轮连接账号",
                 10.0,
@@ -626,7 +651,7 @@ impl App {
             );
             let (response, button) = crate::paint::capsule(
                 c,
-                160.0,
+                88.0,
                 101.0,
                 96.0,
                 24.0,
@@ -635,7 +660,7 @@ impl App {
                 Color32::from_gray(48),
             );
             button.centered_text(
-                208.0,
+                136.0,
                 113.0,
                 "Steam 设置",
                 10.5,
