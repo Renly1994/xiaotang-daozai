@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
 使用系统 Rust 或本项目 target/dev-tools 内的 Rust 构建、测试和运行岛仔。
 .EXAMPLE
