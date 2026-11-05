@@ -1,3 +1,9 @@
+世界时钟地图
+Natural Earth 1:110m land geometry，公有领域。
+时区代表城市坐标来自 IANA Time Zone Database zone.tab，公有领域。
+来源与加工说明：assets/world-clock/LICENSE.txt
+https://www.naturalearthdata.com/about/terms-of-use/
+
 日程来源标识
 飞书：https://lf-package-cn.feishucdn.com/obj/feishu-static/lark/open/website/favicon-logo.svg
 钉钉：https://gw.alicdn.com/imgextra/i3/O1CN014ZbI6ZTEhdC0ttN2_!!6000000003783-2-tps-444-444.png（官网高清图标）

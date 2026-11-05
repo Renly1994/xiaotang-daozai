@@ -41,6 +41,7 @@ pub mod smtc;
 pub mod theme;
 pub mod settings_theme;
 mod updates;
+mod world_clock;
 
 #[cfg(windows)]
 pub mod native;

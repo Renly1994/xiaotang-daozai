@@ -435,6 +435,7 @@ fn main() {
         let total = 14 * 3600 + 20 * 60 + t as u64;
         let env = Env {
             t,
+            unix_time: Some(chrono::NaiveDate::from_ymd_opt(2026,10,28).unwrap().and_hms_opt(6,20,0).unwrap().and_utc().timestamp()+t as i64),
             clock: format!("{:02}:{:02}", total / 3600, total / 60 % 60),
             today: "2026-10-28".into(),
             date: "10月28日 周三".into(),
