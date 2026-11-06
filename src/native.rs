@@ -82,9 +82,12 @@ impl DragCapture {
             *self=Self::default();
             return false;
         };
+        let inside=|(x,y):(i32,i32)|zone.is_some_and(|(l,t,r,b)|x>=l && x<r && y>=t && y<b);
         let origin=*self.origin.get_or_insert(cursor);
         self.moved|=(cursor.0-origin.0).abs()>threshold.0 || (cursor.1-origin.1).abs()>threshold.1;
-        self.moved && zone.is_some_and(|(l,t,r,b)|cursor.0>=l && cursor.0<r && cursor.1>=t && cursor.1<b)
+        // 只接收从感应区外拖进来的文件：在岛下方的标签栏里按下（含连续点击、拖标签、选文字）
+        // 不能扩大窗口区域，否则 HTTRANSPARENT 拦不住跨进程点击，下层窗口会点不动。
+        self.moved && !inside(origin) && inside(cursor)
     }
 }
 
@@ -94,12 +97,17 @@ impl DragCapture {
 /// 才请求重绘，让感应区及时生效；平时不触发任何绘制。
 fn watch_drag(hwnd:HWND,ctx:eframe::egui::Context){
     let raw=hwnd.0 as isize;
+    let mut was_down=false;
     let _=std::thread::Builder::new().name("daozai-drag-watch".into()).spawn(move||loop{
         std::thread::sleep(std::time::Duration::from_millis(80));
         unsafe {
             let hwnd=HWND(raw as *mut _);
             if !IsWindow(hwnd).as_bool(){return;}
-            if !(GetAsyncKeyState(VK_LBUTTON.0 as i32)<0 || GetAsyncKeyState(VK_RBUTTON.0 as i32)<0){continue;}
+            let down=GetAsyncKeyState(VK_LBUTTON.0 as i32)<0 || GetAsyncKeyState(VK_RBUTTON.0 as i32)<0;
+            // 松开后补一帧，让拖放状态及时复位；否则静止时一秒才画一帧，连续点击会沿用上次的按下位置。
+            if was_down && !down {ctx.request_repaint();}
+            was_down=down;
+            if !down {continue;}
             let mut cursor=POINT::default();let mut rect=RECT::default();
             if GetCursorPos(&mut cursor).is_err() || GetWindowRect(hwnd,&mut rect).is_err(){continue;}
             if cursor.x>=rect.left && cursor.x<rect.right && cursor.y>=rect.top && cursor.y<rect.bottom {ctx.request_repaint();}
@@ -581,6 +589,15 @@ mod tests {
         assert!(!capture.update(true,Some((300,60)),zone,(4,4)),"感应区内按下不能直接扩大窗口");
         assert!(!capture.update(true,Some((302,61)),zone,(4,4)),"点击时的小幅抖动不算拖动");
         assert!(!capture.update(false,Some((302,61)),zone,(4,4)));
+    }
+
+    #[test]
+    fn drag_capture_ignores_repeated_clicks_below_the_island_without_an_observed_release() {
+        // 极简模式一秒才画一帧：两次点击之间可能没有一帧看到松开。
+        let mut capture=DragCapture::default();let zone=Some((110,0,530,120));
+        assert!(!capture.update(true,Some((200,60)),zone,(4,4)));
+        assert!(!capture.update(true,Some((380,60)),zone,(4,4)),"在岛下方连续点击不同标签不能被当成拖文件");
+        assert!(!capture.update(true,Some((300,30)),zone,(4,4)),"在感应区内拖动标签或选文字也不能扩大窗口");
     }
 
     #[test]

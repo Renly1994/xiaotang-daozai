@@ -106,10 +106,15 @@ fn window_pid(hwnd:HWND)->u32{
 /// 前台是该客户端的主窗口时返回它所在的进程（多开时每个账号一个进程）。
 unsafe fn foreground_main_pid(source:crate::app::Messenger,paths:&[String])->Option<u32>{
     let hwnd=GetForegroundWindow();
-    if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() || GetWindow(hwnd,GW_OWNER).is_ok() || !matches(hwnd,paths){return None;}
+    if IsIconic(hwnd).as_bool() || !visible_main_frame(hwnd,source) || !matches(hwnd,paths){return None;}
+    Some(window_pid(hwnd))
+}
+
+unsafe fn visible_main_frame(hwnd:HWND,source:crate::app::Messenger)->bool{
+    if !IsWindowVisible(hwnd).as_bool() || GetWindow(hwnd,GW_OWNER).is_ok(){return false;}
     let mut class=[0u16;128];
     let n=GetClassNameW(hwnd,&mut class).max(0) as usize;
-    client_main_frame(source,&String::from_utf16_lossy(&class[..n]),GetWindowLongW(hwnd,GWL_STYLE) as u32,GetWindowLongW(hwnd,GWL_EXSTYLE) as u32).then(||window_pid(hwnd))
+    client_main_frame(source,&String::from_utf16_lossy(&class[..n]),GetWindowLongW(hwnd,GWL_STYLE) as u32,GetWindowLongW(hwnd,GWL_EXSTYLE) as u32)
 }
 
 pub fn client_in_foreground(source:crate::app::Messenger)->bool{
@@ -121,17 +126,148 @@ pub fn foreground_client(sources:&[crate::app::Messenger])->Option<(crate::app::
     sources.iter().find_map(|&source|unsafe{foreground_main_pid(source,&client_paths(source))}.map(|pid|(source,pid)))
 }
 
-/// 跳到某条未读对应的窗口；窗口已不在时退回到打开该客户端。
+/// 跳到某条未读对应的窗口。
 pub fn open_unread(unread:crate::app::Unread)->Result<(),String>{
+    open_unread_with_paths(unread,&client_paths(unread.source))
+}
+
+fn open_unread_with_paths(unread:crate::app::Unread,paths:&[String])->Result<(),String>{
     let window=HWND(unread.window as *mut _);
+    if unread.source==crate::app::Messenger::Wechat {
+        // 微信 4 闪动的句柄常是隐藏的 Qt 辅助窗口：从外部显示它会出现白屏、拖死微信。
+        // 只切换到该账号进程里已可见的主窗口；绝不显示隐藏窗口，也不另起 Weixin.exe。
+        unsafe {
+            let target=if unread.pid==0 {None}
+                else if window_pid(window)==unread.pid && visible_main_frame(window,unread.source) && matches(window,paths) {Some(window)}
+                else {visible_main_window_of(unread.pid,unread.source,paths)};
+            if let Some(target)=target {
+                // 异步恢复：微信卡住时也不能拖住岛仔的界面线程。
+                if IsIconic(target).as_bool(){ShowWindowAsync(target,SW_RESTORE).ok().map_err(|_|"请从任务栏打开微信".to_string())?;}
+                if SetForegroundWindow(target).as_bool(){return Ok(());}
+            }
+        }
+        return Err("请从任务栏或托盘打开微信".into());
+    }
     unsafe{
-        if unread.window!=0 && IsWindow(window).as_bool() && window_pid(window)==unread.pid && matches(window,&client_paths(unread.source)){
-            if IsIconic(window).as_bool(){let _=ShowWindow(window,SW_RESTORE);}
-            else if !IsWindowVisible(window).as_bool(){let _=ShowWindow(window,SW_SHOW);}
+        if unread.window!=0 && IsWindow(window).as_bool() && window_pid(window)==unread.pid && matches(window,paths){
+            if IsIconic(window).as_bool(){let _=ShowWindowAsync(window,SW_RESTORE);}
+            else if !IsWindowVisible(window).as_bool(){let _=ShowWindowAsync(window,SW_SHOW);}
             if SetForegroundWindow(window).as_bool(){return Ok(());}
         }
     }
     open_client(unread.source)
+}
+
+/// 该账号缩在托盘：没有可见主窗口，但有自己的托盘图标。
+pub fn wechat_in_tray(unread:crate::app::Unread)->bool{
+    if unread.source!=crate::app::Messenger::Wechat || unread.pid==0 {return false;}
+    let paths=client_paths(unread.source);
+    unsafe{visible_main_window_of(unread.pid,unread.source,&paths).is_none() && tray_icon(unread.pid,&paths).is_some()}
+}
+
+/// 该账号进程自己的托盘消息窗口与唯一的图标编号。
+unsafe fn tray_icon(pid:u32,paths:&[String])->Option<(HWND,u32)>{
+    use windows::Win32::Foundation::BOOL;
+    struct Find<'a>{pid:u32,paths:&'a [String],hosts:Vec<HWND>}
+    unsafe extern "system" fn visit(hwnd:HWND,data:LPARAM)->BOOL{
+        let find=&mut *(data.0 as *mut Find);
+        if window_pid(hwnd)==find.pid {
+            let mut class=[0u16;128];
+            let n=GetClassNameW(hwnd,&mut class).max(0) as usize;
+            if String::from_utf16_lossy(&class[..n]).ends_with("TrayIconMessageWindowClass") && matches(hwnd,find.paths){find.hosts.push(hwnd);}
+        }
+        true.into()
+    }
+    let mut find=Find{pid,paths,hosts:Vec::new()};
+    let _=EnumWindows(Some(visit),LPARAM((&mut find as *mut Find) as isize));
+    let [host]=find.hosts.as_slice() else {return None};
+    let mut found=None;
+    for id in 0..=256 {
+        if tray_rect(*host,id).is_some(){ if found.is_some(){return None;} found=Some(id); }
+    }
+    found.map(|id|(*host,id))
+}
+
+unsafe fn tray_rect(host:HWND,id:u32)->Option<windows::Win32::Foundation::RECT>{
+    use windows::Win32::UI::Shell::{Shell_NotifyIconGetRect,NOTIFYICONIDENTIFIER};
+    let icon=NOTIFYICONIDENTIFIER{cbSize:std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32,hWnd:host,uID:id,..Default::default()};
+    Shell_NotifyIconGetRect(&icon).ok()
+}
+
+fn rect_center_inside(inner:windows::Win32::Foundation::RECT,outer:windows::Win32::Foundation::RECT)->bool{
+    let (x,y)=((inner.left+inner.right)/2,(inner.top+inner.bottom)/2);
+    outer.right>outer.left && outer.bottom>outer.top && x>=outer.left && x<outer.right && y>=outer.top && y<outer.bottom
+}
+
+/// 微信缩在托盘时：通过无障碍接口按下该账号自己的托盘按钮，由微信自己唤起主窗口。
+/// 不移动鼠标、不向微信发送内部消息、不注入、不读取内容；定位不到唯一按钮就放弃。
+/// 会阻塞几百毫秒，必须在后台线程调用。
+pub fn open_wechat_from_tray(unread:crate::app::Unread)->Result<(),String>{
+    use windows::{core::Interface,Win32::{System::Com::*,UI::{Accessibility::*,HiDpi::*}}};
+    const FAIL:&str="未能定位微信托盘图标，请从托盘打开微信";
+    if unread.source!=crate::app::Messenger::Wechat || unread.pid==0 {return Err(FAIL.into());}
+    let paths=client_paths(unread.source);
+    unsafe {
+        let _=SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let _=CoInitializeEx(None,COINIT_MULTITHREADED);
+        let (host,id)=tray_icon(unread.pid,&paths).ok_or(FAIL)?;
+        let ui:IUIAutomation=CoCreateInstance(&CUIAutomation8,None,CLSCTX_INPROC_SERVER).map_err(|_|FAIL)?;
+        if let Ok(timed)=ui.cast::<IUIAutomation2>(){let _=timed.SetConnectionTimeout(800);let _=timed.SetTransactionTimeout(800);}
+        let all=ui.CreateTrueCondition().map_err(|_|FAIL)?;
+        // 在某个窗口里找覆盖该图标中心、指定编号的托盘按钮。
+        let button_at=|window:HWND,icon:windows::Win32::Foundation::RECT,automation_id:&str|->Option<IUIAutomationElement>{
+            let root=ui.ElementFromHandle(window).ok()?;
+            let items=root.FindAll(TreeScope_Descendants,&all).ok()?;
+            let mut hit=None;
+            for i in 0..items.Length().ok()? {
+                let item=items.GetElement(i).ok()?;
+                if item.CurrentAutomationId().ok()?.to_string()!=automation_id {continue;}
+                if rect_center_inside(icon,item.CurrentBoundingRectangle().ok()?){ if hit.is_some(){return None;} hit=Some(item); }
+            }
+            hit
+        };
+        let invoke=|element:&IUIAutomationElement|->bool{
+            element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId).and_then(|p|p.Invoke()).is_ok()
+        };
+        let taskbar=FindWindowW(w!("Shell_TrayWnd"),PCWSTR::null()).map_err(|_|FAIL)?;
+        let icon=tray_rect(host,id).ok_or(FAIL)?;
+        // 图标固定在任务栏上：直接按下。
+        if let Some(button)=button_at(taskbar,icon,"NotifyItemIcon"){
+            return if invoke(&button){Ok(())}else{Err(FAIL.into())};
+        }
+        // 图标收在折叠区：此时系统报告的位置就是「显示隐藏的图标」按钮。
+        let chevron=button_at(taskbar,icon,"SystemTrayIcon").ok_or(FAIL)?;
+        if !invoke(&chevron){return Err(FAIL.into());}
+        let overflow_open=||FindWindowW(w!("TopLevelWindowForOverflowXamlIsland"),PCWSTR::null()).ok().filter(|h|IsWindowVisible(*h).as_bool());
+        let started=Instant::now();
+        while started.elapsed()<Duration::from_millis(1500) {
+            std::thread::sleep(Duration::from_millis(80));
+            let Some(overflow)=overflow_open() else {continue};
+            // 折叠区展开后，系统报告的才是图标在折叠区里的真实位置；多开时据此区分账号。
+            let Some(inside)=tray_rect(host,id).filter(|r|!rect_center_inside(*r,icon)) else {continue};
+            if let Some(button)=button_at(overflow,inside,"NotifyItemIcon"){
+                if invoke(&button){return Ok(());}
+                break;
+            }
+        }
+        // 没按成：把展开的折叠区收回去，不留在屏幕上。
+        if overflow_open().is_some(){let _=invoke(&chevron);}
+        Err(FAIL.into())
+    }
+}
+
+/// 某个账号进程里已可见的主窗口（多开时每个进程一个）。
+unsafe fn visible_main_window_of(pid:u32,source:crate::app::Messenger,paths:&[String])->Option<HWND>{
+    use windows::Win32::Foundation::BOOL;
+    struct Find<'a>{pid:u32,source:crate::app::Messenger,paths:&'a [String],found:Option<HWND>}
+    unsafe extern "system" fn visit(hwnd:HWND,data:LPARAM)->BOOL{
+        let find=&mut *(data.0 as *mut Find);
+        if window_pid(hwnd)==find.pid && visible_main_frame(hwnd,find.source) && matches(hwnd,find.paths){find.found=Some(hwnd);return false.into();}
+        true.into()
+    }
+    let mut find=Find{pid,source,paths,found:None};
+    let _=EnumWindows(Some(visit),LPARAM((&mut find as *mut Find) as isize));
+    find.found
 }
 
 pub fn open_client(source:crate::app::Messenger)->Result<(),String>{
@@ -160,7 +296,7 @@ pub fn open_client(source:crate::app::Messenger)->Result<(),String>{
     unsafe{
         let _=EnumWindows(Some(visit),LPARAM((&mut search as *mut Search) as isize));
         if let Some((_,window))=search.best{
-            if IsIconic(window).as_bool(){let _=ShowWindow(window,SW_RESTORE);}
+            if IsIconic(window).as_bool(){let _=ShowWindowAsync(window,SW_RESTORE);}
             if SetForegroundWindow(window).as_bool(){return Ok(());}
         }
         if let [host]=search.tray.as_slice(){
@@ -262,6 +398,99 @@ impl Drop for Listener {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clicking_wechat_flash_never_shows_hidden_helper(){unsafe{
+        let window=CreateWindowExW(WS_EX_TOOLWINDOW,w!("STATIC"),w!(""),WS_POPUP,0,0,0,0,None,None,None,None).unwrap();
+        let paths=[normalized(&std::env::current_exe().unwrap().to_string_lossy())];
+        let unread=crate::app::Unread{source:crate::app::Messenger::Wechat,pid:std::process::id(),window:window.0 as isize};
+        let result=open_unread_with_paths(unread,&paths);
+        let visible=IsWindowVisible(window).as_bool();
+        DestroyWindow(window).unwrap();
+        assert!(!visible && result.is_err(),"点击提醒不应显示隐藏的辅助窗口");
+    }}
+    #[test]
+    fn clicking_wechat_flash_never_shows_hidden_qt_frame(){unsafe{
+        // 复现 v0.6.60 白屏：微信 4 隐藏的 Qt 窗口带系统菜单 / 最小化按钮，过去会被 SW_SHOW 显示出来。
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        unsafe extern "system" fn proc(h:HWND,m:u32,w:WPARAM,l:LPARAM)->LRESULT{DefWindowProcW(h,m,w,l)}
+        let instance=GetModuleHandleW(None).unwrap().into();
+        let class=WNDCLASSW{lpfnWndProc:Some(proc),hInstance:instance,lpszClassName:w!("Qt51514QWindowIcon"),..Default::default()};
+        RegisterClassW(&class);
+        let style=WINDOW_STYLE(0xC60B0000 & !WS_CHILD.0);
+        let window=CreateWindowExW(WINDOW_EX_STYLE(0),w!("Qt51514QWindowIcon"),w!("Weixin"),style,0,0,300,200,None,None,instance,None).unwrap();
+        let paths=[normalized(&std::env::current_exe().unwrap().to_string_lossy())];
+        let pid=std::process::id();
+        let flashed=open_unread_with_paths(crate::app::Unread{source:crate::app::Messenger::Wechat,pid,window:window.0 as isize},&paths);
+        let unknown=open_unread_with_paths(crate::app::Unread{source:crate::app::Messenger::Wechat,pid:0,window:window.0 as isize},&paths);
+        let visible=IsWindowVisible(window).as_bool();
+        DestroyWindow(window).unwrap();
+        assert!(!visible,"隐藏的微信窗口不得被显示");
+        assert!(flashed.is_err() && unknown.is_err());
+    }}
+    #[test]
+    #[ignore="需要本机已启动的微信；会把微信主窗口切到前台"]
+    fn local_wechat_hidden_windows_stay_hidden_when_opened(){unsafe{
+        use windows::Win32::Foundation::BOOL;
+        unsafe extern "system" fn collect(hwnd:HWND,data:LPARAM)->BOOL{
+            let (paths,out)=&mut *(data.0 as *mut (Vec<String>,Vec<(HWND,bool)>));
+            if matches(hwnd,paths){out.push((hwnd,IsWindowVisible(hwnd).as_bool()));}
+            true.into()
+        }
+        let mut found=(installed_paths(),Vec::new());
+        let _=EnumWindows(Some(collect),LPARAM((&mut found as *mut (Vec<String>,Vec<(HWND,bool)>)) as isize));
+        assert!(!found.1.is_empty(),"本机没有微信窗口");
+        for &(hwnd,_) in &found.1 {
+            let unread=crate::app::Unread{source:crate::app::Messenger::Wechat,pid:window_pid(hwnd),window:hwnd.0 as isize};
+            let result=open_unread_with_paths(unread,&found.0);
+            std::thread::sleep(Duration::from_millis(300));
+            for &(other,was_visible) in &found.1 {
+                assert!(was_visible || !IsWindowVisible(other).as_bool(),"隐藏窗口 {other:?} 被显示（目标 {hwnd:?}，结果 {result:?}）");
+            }
+            println!("目标 {hwnd:?} 可见={} → {result:?}",found.1.iter().any(|(h,v)|*h==hwnd && *v));
+        }
+    }}
+    #[test]
+    fn tray_buttons_match_by_icon_center(){
+        use windows::Win32::Foundation::RECT;
+        let icon=RECT{left:1531,top:1017,right:1581,bottom:1067};
+        assert!(rect_center_inside(icon,RECT{left:1532,top:1018,right:1582,bottom:1068}));
+        assert!(!rect_center_inside(icon,RECT{left:1582,top:1018,right:1632,bottom:1068}),"相邻图标不得命中");
+        assert!(!rect_center_inside(icon,RECT::default()),"空矩形不得命中");
+    }
+    #[test]
+    fn tray_open_rejects_unknown_accounts(){
+        assert!(open_wechat_from_tray(crate::app::Unread::of(crate::app::Messenger::Wechat)).is_err());
+        assert!(open_wechat_from_tray(crate::app::Unread{source:crate::app::Messenger::Qq,pid:1,window:0}).is_err());
+        assert!(!wechat_in_tray(crate::app::Unread{source:crate::app::Messenger::Wechat,pid:std::process::id(),window:0}),"没有托盘图标的进程不算缩在托盘");
+    }
+    #[test]
+    #[ignore="需要本机已登录的微信；会把微信关到托盘再唤起"]
+    fn local_wechat_opens_from_tray(){unsafe{
+        let paths=installed_paths();
+        let pid=std::process::id();let _=pid;
+        let main=[0u32].into_iter().find_map(|_|{
+            use windows::Win32::Foundation::BOOL;
+            unsafe extern "system" fn visit(hwnd:HWND,data:LPARAM)->BOOL{
+                let (paths,out)=&mut *(data.0 as *mut (Vec<String>,Option<HWND>));
+                if visible_main_frame(hwnd,crate::app::Messenger::Wechat) && matches(hwnd,paths){*out=Some(hwnd);return false.into();}
+                true.into()
+            }
+            let mut found=(paths.clone(),None);
+            let _=EnumWindows(Some(visit),LPARAM((&mut found as *mut (Vec<String>,Option<HWND>)) as isize));
+            found.1
+        }).expect("先打开微信主窗口");
+        let unread=crate::app::Unread{source:crate::app::Messenger::Wechat,pid:window_pid(main),window:main.0 as isize};
+        PostMessageW(main,WM_SYSCOMMAND,WPARAM(SC_CLOSE as usize),LPARAM(0)).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        assert!(!IsWindowVisible(main).as_bool(),"微信应已缩到托盘");
+        assert!(wechat_in_tray(unread));
+        assert!(open_unread_with_paths(unread,&paths).is_err(),"缩在托盘时普通跳转不碰任何窗口");
+        let result=open_wechat_from_tray(unread);
+        std::thread::sleep(Duration::from_secs(2));
+        let overflow=FindWindowW(w!("TopLevelWindowForOverflowXamlIsland"),PCWSTR::null()).ok().is_some_and(|h|IsWindowVisible(h).as_bool());
+        println!("托盘唤起 → {result:?}；主窗口可见={}；前台={}；折叠区仍展开={overflow}",IsWindowVisible(main).as_bool(),GetForegroundWindow()==main);
+        assert!(result.is_ok() && IsWindowVisible(main).as_bool() && !IsHungAppWindow(main).as_bool() && !overflow);
+    }}
     #[test]
     fn capture_overlays_do_not_count_as_viewing_a_messenger(){
         use crate::app::Messenger;

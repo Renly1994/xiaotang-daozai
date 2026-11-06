@@ -56,6 +56,9 @@ struct Shell {
     wechat_retry: Option<Instant>,
     #[cfg(windows)]
     opening_messenger:Option<(app::Unread,Instant)>,
+    /// 后台线程正在通过托盘按钮唤起微信。
+    #[cfg(windows)]
+    tray_opening:Option<(app::Unread,std::sync::mpsc::Receiver<Result<(),String>>)>,
     #[cfg(windows)]
     hidden: bool,
     /// 毛玻璃皮肤的背景亮度采样（仅毛玻璃皮肤运行）。
@@ -208,6 +211,7 @@ impl Shell {
             #[cfg(windows)] wechat:None,
             #[cfg(windows)] wechat_retry:None,
             #[cfg(windows)] opening_messenger:None,
+            #[cfg(windows)] tray_opening:None,
             #[cfg(windows)] hidden:false,
             #[cfg(windows)] backdrop:None,
             #[cfg(windows)]
@@ -534,6 +538,15 @@ impl eframe::App for Shell {
                 let mut sources:Vec<app::Messenger>=self.app.pending_messengers.iter().map(|u|u.source).collect();sources.dedup();
                 if let Some((source,pid))=daozai::wechat::foreground_client(&sources){self.app.viewed_client(source,pid);}
             }
+            if let Some((unread,rx))=&self.tray_opening {
+                let unread=*unread;
+                match rx.try_recv(){
+                    Ok(Ok(()))=>{self.tray_opening=None;self.opening_messenger=Some((unread,Instant::now()));ctx.request_repaint_after(Duration::from_secs(4));}
+                    Ok(Err(error))=>{self.tray_opening=None;self.app.say(error);}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected)=>{self.tray_opening=None;self.app.say("未能唤起微信，请从托盘打开");}
+                    Err(std::sync::mpsc::TryRecvError::Empty)=>{}
+                }
+            }
             if let Some((unread,started))=self.opening_messenger {
                 if !self.app.pending_messengers.contains(&unread){self.opening_messenger=None;}
                 else if started.elapsed()>=Duration::from_secs(4){
@@ -626,6 +639,12 @@ impl eframe::App for Shell {
                                 None=>{self.opening_messenger=Some((unread,Instant::now()));ctx.request_repaint_after(Duration::from_secs(4));}
                             }
                         },
+                        Err(_) if self.app.settings.wechat_tray_open && self.tray_opening.is_none() && daozai::wechat::wechat_in_tray(unread)=>{
+                            // 缩在托盘：后台线程按下该账号的托盘按钮，不阻塞界面。
+                            let (tx,rx)=std::sync::mpsc::channel();let repaint=ctx.clone();
+                            std::thread::spawn(move||{let _=tx.send(daozai::wechat::open_wechat_from_tray(unread));repaint.request_repaint();});
+                            self.tray_opening=Some((unread,rx));
+                        }
                         Err(error)=>self.app.say(error),
                     }
                 }

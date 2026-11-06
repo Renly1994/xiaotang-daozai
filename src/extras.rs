@@ -1838,6 +1838,10 @@ impl App {
                         settings_label(ui,"微信提醒");
                         settings_card(ui,|ui|{
                             setting_row(ui,"微信新消息提醒","根据任务栏闪动提醒，不读取联系人或聊天正文",&mut self.settings.wechat_notifications);
+                            if self.settings.wechat_notifications {
+                                ui.separator();
+                                setting_row(ui,"托盘一键唤起微信","微信缩在托盘时，点提醒由系统按下微信托盘图标；图标收在折叠区时托盘菜单会短暂弹出",&mut self.settings.wechat_tray_open);
+                            }
                             if !self.wechat_status.is_empty(){ui.label(egui::RichText::new(&self.wechat_status).size(12.0));}
                         });
                         settings_label(ui,"QQ 与 Windows 通知");
