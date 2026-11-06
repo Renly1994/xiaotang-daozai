@@ -194,7 +194,7 @@ pub(super) struct LocalCache {
     directory: Option<PathBuf>,
     path_due: Option<Instant>,
     stamp: Option<(Stamp, Stamp)>,
-    game_icons: BTreeMap<u32, Option<PathBuf>>,
+    game_icons: BTreeMap<u32, (Instant, Option<PathBuf>)>,
 }
 
 impl LocalCache {
@@ -203,43 +203,33 @@ impl LocalCache {
     }
 
     pub(super) fn game_icon(&mut self, app_id: u32) -> Option<PathBuf> {
-        // Do not cache a miss before the install path has been discovered on the
-        // first polling cycle. The Steam directory is commonly registered under
-        // HKLM on 32-bit Steam installs.
-        let library = self
-            .directory
-            .as_ref()?
-            .parent()?
-            .join("librarycache")
-            .join(app_id.to_string());
-        self.game_icons
-            .entry(app_id)
-            .or_insert_with(|| {
-                let mut icons = fs::read_dir(&library)
-                    .ok()?
-                    .filter_map(Result::ok)
-                    .map(|entry| entry.path())
-                    .filter(|path| {
-                        path.extension()
-                            .is_some_and(|extension| extension.eq_ignore_ascii_case("jpg"))
-                            && path.file_stem().is_some_and(|stem| {
-                                let value = stem.to_string_lossy();
-                                value.len() == 40
-                                    && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-                            })
-                    })
-                    .collect::<Vec<_>>();
-                icons.sort();
-                icons.into_iter().next()
-            })
-            .clone()
+        self.refresh_directory();
+        let now = Instant::now();
+        if let Some((due, icon)) = self.game_icons.get(&app_id) {
+            if now < *due { return icon.clone(); }
+        }
+        let library = self.directory.as_ref()?.parent()?.join("librarycache");
+        let app_dir = library.join(app_id.to_string());
+        let icon = (|| {
+            fs::read_dir(&app_dir).ok()?.filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("jpg"))
+                        && path.file_stem().is_some_and(|stem| {
+                            let value = stem.to_string_lossy();
+                            value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        })
+                })
+                .min()
+        })()
+            .or_else(|| ["jpg", "png"].into_iter()
+                .map(|ext| library.join(format!("{app_id}_icon.{ext}")))
+                .find(|path| path.is_file()));
+        self.game_icons.insert(app_id, (now + Duration::from_secs(60), icon.clone()));
+        icon
     }
 
-    pub(super) fn poll(
-        &mut self,
-        account: u32,
-        game: u32,
-    ) -> (&'static str, Option<Vec<Achievement>>) {
+    fn refresh_directory(&mut self) {
         if self.path_due.map_or(true, |due| Instant::now() >= due) {
             let directory = steam_directory().map(|path| path.join("appcache").join("stats"));
             if directory != self.directory {
@@ -249,6 +239,14 @@ impl LocalCache {
             }
             self.path_due = Some(Instant::now() + Duration::from_secs(60));
         }
+    }
+
+    pub(super) fn poll(
+        &mut self,
+        account: u32,
+        game: u32,
+    ) -> (&'static str, Option<Vec<Achievement>>) {
+        self.refresh_directory();
         let Some(dir) = &self.directory else {
             return ("未找到本机 Steam 安装目录", None);
         };

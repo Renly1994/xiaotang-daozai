@@ -35,14 +35,14 @@ fn background_service_sample(){
         "media"=>{daozai::smtc::spawn_poller(media.clone(),context);},
         "bluetooth"=>bluetooth=Some(daozai::bt::spawn()),
         "system"=>system=Some(daozai::system::observe(context,Default::default(),None)),
-        "notifications"=>notifications=Some(daozai::system::connect().expect("已有通知权限")),
+        "notifications"=>notifications=Some(daozai::system::connect(context,false).expect("已有通知权限")),
         "mail"=>{
             let accounts=daozai::mail::load_accounts().into_iter().filter(|a|a.enabled).take(1).collect::<Vec<_>>();
             assert_eq!(accounts.len(),1,"需要一个已配置邮箱");
             let worker=daozai::mail::Service::start();worker.sync(&accounts,120);mail=Some(worker);
         },
         "calendar"=>{let configs=daozai::calendar::load_configs();println!("configured_accounts={}",configs.len());let worker=daozai::calendar::Service::start();worker.configure(configs,true);calendar=Some(worker);},
-        "quota"=>{let config=daozai::quota::Config::load();let accounts=config.accounts.into_iter().filter(|a|config.enabled && a.enabled).collect::<Vec<_>>();println!("configured_accounts={}",accounts.len());let worker=daozai::quota::Service::start();worker.refresh(accounts);quota=Some(worker);},
+        "quota"=>{let config=daozai::quota::Config::load();let accounts=config.accounts.iter().filter(|a|config.enabled && a.enabled).cloned().collect::<Vec<_>>();println!("configured_accounts={}",accounts.len());let worker=daozai::quota::Service::start();worker.refresh(accounts);quota=Some((worker,config));},
         "idle"=>{},_=>panic!("未知采样服务"),
     }
     let before=sample();let started=Instant::now();
@@ -52,7 +52,7 @@ fn background_service_sample(){
         if let Some(rx)=&notifications{while rx.try_recv().is_ok(){}}
         if let Some(worker)=&mail{while let Some(event)=worker.try_recv(){mail_events.push(event);}}
         if let Some(worker)=&calendar{while let Some(event)=worker.try_recv(){calendar_events.push(event);}}
-        if let Some(worker)=&quota{while let Some(event)=worker.try_recv(){if event.result.is_ok(){quota_ok+=1;}else{quota_failed+=1;}quota_events.push(event);}}
+        if let Some((worker,config))=&quota{while let Some(event)=worker.try_recv(config){if event.result.is_ok(){quota_ok+=1;}else{quota_failed+=1;}quota_events.push(event);}}
         std::thread::sleep(Duration::from_millis(100));
     }
     let after=sample();

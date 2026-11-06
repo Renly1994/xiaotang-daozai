@@ -1095,6 +1095,9 @@ fn worker(
                 }
             }
         }
+        if let Some(game) = snapshot.player.as_mut().and_then(|player| player.game.as_mut()) {
+            game.icon = local.game_icon(game.id);
+        }
         let mut watched = tracking_game(c, snapshot.player.as_ref(), local_app);
         if player_observed {
             next = now + interval(failures, watched.is_some());
@@ -1120,20 +1123,6 @@ fn worker(
         if let Some(game) = &mut watched {
             if game.icon.is_none() {
                 game.icon = local.game_icon(game.id);
-            }
-            if snapshot
-                .player
-                .as_ref()
-                .and_then(|player| player.game.as_ref())
-                .is_some_and(|playing| playing.id == game.id)
-            {
-                if let Some(playing) = snapshot
-                    .player
-                    .as_mut()
-                    .and_then(|player| player.game.as_mut())
-                {
-                    playing.icon.clone_from(&game.icon);
-                }
             }
             if let Some(account) = account.filter(|_| local_tick || target_changed) {
                 let (status, items) = local.poll(account, game.id);

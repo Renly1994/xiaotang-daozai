@@ -8,6 +8,12 @@ pub(crate) mod grok;
 pub(crate) mod gemini;
 #[path="claude_quota.rs"]
 mod claude;
+#[path="workbuddy_quota.rs"]
+pub(crate) mod workbuddy;
+#[path="deepseek_quota.rs"]
+pub(crate) mod deepseek;
+#[path="zcode_quota.rs"]
+pub(crate) mod zcode;
 #[path="native_auth.rs"]
 mod native_auth;
 
@@ -20,10 +26,11 @@ impl Discovery {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini }
+pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini, ZCode, WorkBuddy, DeepSeek }
 impl Provider {
-    pub const ALL: [Self; 5] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini];
-    pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini"} }
+    pub const ALL: [Self; 8] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini, Self::ZCode, Self::WorkBuddy, Self::DeepSeek];
+    pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini",Self::ZCode=>"ZCode",Self::WorkBuddy=>"WorkBuddy",Self::DeepSeek=>"DeepSeek"} }
+    pub fn balance(self)->bool{matches!(self,Self::WorkBuddy|Self::DeepSeek)}
     fn parse(s: &str) -> Option<Self> {if s.eq_ignore_ascii_case("grokbot"){return Some(Self::GrokBot);}Self::ALL.into_iter().find(|p|p.name().eq_ignore_ascii_case(s))}
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -58,6 +65,9 @@ impl Config {
         if let Ok(raw)=serde_json::to_vec_pretty(&self.json()){let _=crate::model::atomic_write(&dir.join("ai-quota.json"),&raw);}
     }
     pub fn add(&mut self,provider:Provider,alias:String,source:PathBuf)->Result<(),String>{
+        if provider==Provider::ZCode{return zcode::add(self,&source,&alias);}
+        if provider==Provider::WorkBuddy{return Err("请使用浏览器连接 WorkBuddy".into());}
+        if provider==Provider::DeepSeek{return Err("请使用 API Key 连接 DeepSeek".into());}
         if provider==Provider::Gemini{return Err("请使用浏览器或 Cookie 连接 Gemini 网页账号".into());}
         if provider==Provider::GrokBot{return self.import_grok(&source,&alias).map(|_|());}
         if provider==Provider::Claude&&claude::is_desktop(&source){return self.import_claude(&source,&alias).map(|_|());}
@@ -79,6 +89,13 @@ impl Config {
         let id=format!("GrokBot-{slot}");let pinned=self.pinned_indices().len()<3;
         let alias=if alias.trim().is_empty(){format!("Grok Bot · 账号 {}",self.accounts.iter().filter(|a|a.provider==Provider::GrokBot).count()+1)}else{alias};
         self.selected=id.clone();self.accounts.push(Account{id,provider:Provider::GrokBot,alias,source:PathBuf::new(),slot:Some(slot),enabled:true,pinned});
+    }
+    pub(crate) fn connect_workbuddy(&mut self,slot:String,alias:String)->String{
+        if let Some(a)=self.accounts.iter_mut().find(|a|a.provider==Provider::WorkBuddy && a.slot.as_deref()==Some(&slot)){
+            a.enabled=true;if !alias.trim().is_empty(){a.alias=alias;}self.selected=a.id.clone();return a.id.clone();
+        }
+        let id=format!("WorkBuddy-{slot}");let pinned=true;
+        self.selected=id.clone();self.accounts.push(Account{id:id.clone(),provider:Provider::WorkBuddy,alias,source:PathBuf::new(),slot:Some(slot),enabled:true,pinned});id
     }
     pub(crate) fn connect_gemini(&mut self,slot:String,alias:String)->String{
         if let Some(a)=self.accounts.iter_mut().find(|a|a.provider==Provider::Gemini && a.slot.as_deref()==Some(&slot)){
@@ -118,6 +135,7 @@ impl Config {
         candidates.extend(self.accounts.iter().filter(|a|matches!(a.provider,Provider::Codex|Provider::Kimi)||(a.provider==Provider::Claude&&a.slot.is_none())).map(|a|(a.provider,a.source.clone())));
         let before=self.accounts.len();
         let mut notes=self.discover_files(&candidates);
+        if let Some(path)=zcode::path().filter(|p|p.is_file()){if let Err(e)=zcode::add(self,&path,""){notes.push(e);}}
         if let (Some(roaming),Some(local))=(std::env::var_os("APPDATA"),std::env::var_os("LOCALAPPDATA")){
             for path in claude::paths(Path::new(&roaming),Path::new(&local)){
                 if claude::is_desktop(&path){if let Err(error)=self.import_claude(&path,""){notes.push(error);}}
@@ -140,12 +158,29 @@ impl Config {
         notes
     }
     pub fn selected_index(&self)->Option<usize>{self.accounts.iter().position(|a|a.id==self.selected && a.enabled).or_else(||self.accounts.iter().position(|a|a.enabled))}
-    pub fn pinned_indices(&self)->Vec<usize>{self.accounts.iter().enumerate().filter_map(|(i,a)|(a.enabled && a.pinned).then_some(i)).collect()}
+    pub fn move_account(&mut self,from:&str,to:&str){
+        if let (Some(source),Some(target))=(self.accounts.iter().position(|a|a.id==from),self.accounts.iter().position(|a|a.id==to)){
+            let account=self.accounts.remove(source);self.accounts.insert(target,account);
+        }
+    }
+    pub fn ordered_indices(&self,pinned:bool)->Vec<usize>{let mut indices:Vec<_>=self.accounts.iter().enumerate().filter_map(|(i,a)|(a.enabled && (!pinned||a.pinned)).then_some(i)).collect();indices.sort_by_key(|i|match self.accounts[*i].provider{Provider::WorkBuddy=>1,Provider::DeepSeek=>2,_=>0});indices}
+    pub fn pinned_indices(&self)->Vec<usize>{self.ordered_indices(true)}
+    pub fn reconnect_deepseek(&mut self,id:&str,slot:String,alias:String)->Result<String,String>{
+        if self.accounts.iter().any(|a|a.id!=id&&a.provider==Provider::DeepSeek&&a.slot.as_deref()==Some(&slot)){return Err("这把 API Key 已连接到另一个账号".into());}
+        let account=self.accounts.iter_mut().find(|a|a.id==id&&a.provider==Provider::DeepSeek).ok_or("原账号已移除，请重新添加")?;
+        account.slot=Some(slot);account.alias=alias;self.selected=id.into();Ok(id.into())
+    }
+    pub fn connect_deepseek(&mut self,slot:String,alias:String)->String{
+        if let Some(a)=self.accounts.iter_mut().find(|a|a.provider==Provider::DeepSeek&&a.slot.as_deref()==Some(&slot)){a.alias=alias;a.enabled=true;self.selected=a.id.clone();return a.id.clone();}
+        let id=format!("DeepSeek-{slot}");self.selected=id.clone();self.accounts.push(Account{id:id.clone(),provider:Provider::DeepSeek,alias,source:PathBuf::new(),slot:Some(slot),enabled:true,pinned:true});id
+    }
 }
 #[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize,serde::Deserialize)]
 pub struct Window {pub label:String,pub seconds:Option<i64>,pub remaining:f32,pub reset:Option<i64>}
 #[derive(Clone, Debug, Default)]
-pub struct Snapshot {pub plan:String,pub windows:Vec<Window>,pub extra:Vec<Window>,pub at:i64}
+#[derive(serde::Serialize,serde::Deserialize)]
+pub struct Snapshot {pub plan:String,pub windows:Vec<Window>,pub extra:Vec<Window>,pub at:i64,pub wallet:Option<deepseek::Wallet>,pub credits:Option<workbuddy::Credits>}
 impl Snapshot {
     pub fn rings(&self)->Vec<&Window>{let mut all:Vec<_>=self.windows.iter().collect();all.sort_by_key(|w|w.seconds.unwrap_or(i64::MAX));all.truncate(2);all}
 }
@@ -157,6 +192,8 @@ fn codex_window(v:&Value)->Option<Window>{
     Some(Window{label:cadence(seconds),seconds,remaining:(100.0-used).clamp(0.0,100.0) as f32,reset:reset(&v["reset_at"])})
 }
 pub fn parse(provider:Provider,v:&Value)->Result<Snapshot,String>{
+    if provider==Provider::WorkBuddy{return workbuddy::parse(v);}
+    if provider==Provider::DeepSeek{return deepseek::parse(v);}
     if provider==Provider::GrokBot{return grok::parse(v);}
     if provider==Provider::Gemini{return gemini::parse(v);}
     let mut s=Snapshot{plan:v["plan_type"].as_str().unwrap_or_default().into(),at:chrono::Utc::now().timestamp(),..Default::default()};
@@ -172,11 +209,20 @@ pub fn parse(provider:Provider,v:&Value)->Result<Snapshot,String>{
             for(key,seconds)in [("five_hour",18000),("seven_day",604800)]{if let Some(used)=number(&v[key]["utilization"]){s.windows.push(Window{label:cadence(Some(seconds)),seconds:Some(seconds),remaining:(100.0-used).clamp(0.0,100.0) as f32,reset:reset(&v[key]["resets_at"])});}}
         }
         Provider::Kimi=>{
+            if let Some(usages)=v["usages"].as_object(){
+                for (key,label,seconds) in [("limit_5h","5 小时",Some(18000)),("limit_7d","本周",Some(604800)),("limit_month_total","本月总额度",None),("limit_month_code","本月编程",None)]{
+                    let Some(entry)=usages.get(key) else{continue;};
+                    let Some(used)=number(&entry["used_ratio"]).filter(|n|(0.0..=1.0).contains(n)) else{continue;};
+                    s.windows.push(Window{label:label.into(),seconds,remaining:((1.0-used)*100.0) as f32,reset:reset(&entry["reset_time"])});
+                }
+                if !s.windows.is_empty(){return Ok(s);}
+            }
+            if v.as_object().is_some_and(|o|o.is_empty()){return Err("Kimi 已登录，官网暂未返回周期额度".into());}
             let section=|v:&Value,seconds:Option<i64>|->Option<Window>{let limit=number(&v["limit"])?;if limit<=0.0{return None;}let remaining=number(&v["remaining"]).or_else(||Some(limit-number(&v["used"])?))?;Some(Window{label:cadence(seconds),seconds,remaining:(remaining/limit*100.0).clamp(0.0,100.0) as f32,reset:reset(&v["resetTime"])})};
             if let Some(w)=section(&v["usage"],Some(604800)){s.windows.push(w);}
             for limit in v["limits"].as_array().into_iter().flatten(){let duration=limit["window"]["duration"].as_i64();let unit=limit["window"]["timeUnit"].as_str().unwrap_or_default();let factor=match unit{"TIME_UNIT_MINUTE"=>Some(60),"TIME_UNIT_HOUR"=>Some(3600),"TIME_UNIT_DAY"=>Some(86400),"TIME_UNIT_SECOND"=>Some(1),_=>None};let seconds=duration.zip(factor).and_then(|(d,f)|d.checked_mul(f));if let Some(w)=section(&limit["detail"],seconds){if !s.windows.iter().any(|old|old.seconds==w.seconds){s.windows.push(w);}}}
         }
-        Provider::GrokBot|Provider::Gemini=>unreachable!(),
+        Provider::ZCode|Provider::GrokBot|Provider::Gemini|Provider::WorkBuddy|Provider::DeepSeek=>unreachable!(),
     }
     if s.windows.is_empty(){return Err("服务未提供周期额度，暂不绘制进度".into());}
     s.windows.sort_by_key(|w|w.seconds.unwrap_or(i64::MAX));Ok(s)
@@ -194,7 +240,7 @@ fn account_credentials(account:&Account)->Result<Credential,String>{
 fn credentials(provider:Provider,path:&Path)->Result<Credential,String>{
     let root=login_json(path)?;
     let v=if provider==Provider::Codex{root.get("auth_json").unwrap_or(&root)}else{&root};
-    let token=match provider{Provider::Codex=>v.pointer("/tokens/access_token").or_else(||v.get("access_token")),Provider::Claude=>v.pointer("/claudeAiOauth/accessToken"),Provider::Kimi=>v.get("access_token"),Provider::GrokBot|Provider::Gemini=>None}.and_then(Value::as_str).filter(|s|!s.trim().is_empty()).ok_or("未找到订阅账号的登录凭据，请选择对应工具的登录文件")?.to_owned();
+    let token=match provider{Provider::Codex=>v.pointer("/tokens/access_token").or_else(||v.get("access_token")),Provider::Claude=>v.pointer("/claudeAiOauth/accessToken"),Provider::Kimi=>v.get("access_token"),Provider::ZCode|Provider::GrokBot|Provider::Gemini|Provider::WorkBuddy|Provider::DeepSeek=>None}.and_then(Value::as_str).filter(|s|!s.trim().is_empty()).ok_or("未找到订阅账号的登录凭据，请选择对应工具的登录文件")?.to_owned();
     let claims=token.split('.').nth(1).and_then(|b|base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(b).ok()).and_then(|b|serde_json::from_slice::<Value>(&b).ok()).unwrap_or(Value::Null);
     let account_id=v.pointer("/tokens/account_id").or_else(||v.get("account_id")).and_then(Value::as_str).or_else(||claims.pointer("/https:~1~1api.openai.com~1auth/chatgpt_account_id").and_then(Value::as_str)).filter(|s|!s.is_empty()).map(str::to_owned);
     let identity=match provider{
@@ -205,22 +251,59 @@ fn credentials(provider:Provider,path:&Path)->Result<Credential,String>{
     Ok(Credential{token,account_id,identity,stamp:fs::metadata(path).and_then(|m|m.modified()).ok()})
 }
 pub struct Event {pub id:String,pub result:Result<Snapshot,String>}
-pub struct Service {tx:mpsc::SyncSender<Vec<Account>>,rx:mpsc::Receiver<Event>}
+pub struct Service {
+    tx:mpsc::SyncSender<Vec<Account>>,
+    rx:mpsc::Receiver<(Account,Result<Snapshot,String>)>,
+}
 impl Service {
     pub fn start()->Self{
-        let(tx,requests)=mpsc::sync_channel::<Vec<Account>>(1);let(results,rx)=mpsc::channel();
+        let(tx,requests)=mpsc::sync_channel::<Vec<Account>>(1);
+        let(results,rx)=mpsc::channel();
         std::thread::spawn(move||{
-            let agent=http_agent();
-            let mut backoff:HashMap<String,(Instant,String)>=HashMap::new();
-            while let Ok(accounts)=requests.recv(){for account in accounts.into_iter().filter(|a|a.enabled){
-                if let Some((until,message))=backoff.get(&account.id){if *until>Instant::now(){let _=results.send(Event{id:account.id,result:Err(message.clone())});continue;}}
-                let result=fetch(&agent,&account);if let Err((message,wait))=&result{if *wait>0{backoff.insert(account.id.clone(),(Instant::now()+Duration::from_secs(*wait),message.clone()));}}
-                if results.send(Event{id:account.id,result:result.map_err(|e|e.0)}).is_err(){return;}
-            }}
+            let mut cooldowns:HashMap<_,(Instant,String)>=HashMap::new();
+            while let Ok(accounts)=requests.recv(){
+                let agent=http_agent();
+                let mut groups=[Vec::new(),Vec::new(),Vec::new()];
+                for a in accounts.into_iter().filter(|a|a.enabled){
+                    let key=(a.id.clone(),a.slot.clone(),a.source.clone());
+                    if let Some((until,message))=cooldowns.get(&key){
+                        if *until>Instant::now(){let _=results.send((a,Err(message.clone())));continue;}
+                    }
+                    let group=match a.provider{Provider::DeepSeek=>1,Provider::WorkBuddy=>2,_=>0};
+                    groups[group].push((key,a));
+                }
+                cooldowns.retain(|_,(until,_)|*until>Instant::now());
+                // 同一浏览器会话内串行查询，两个余额服务各自独立完成。
+                std::thread::scope(|scope|{
+                    let mut workers=Vec::new();
+                    for group in groups.into_iter().filter(|g|!g.is_empty()){
+                        let agent=&agent;let results=&results;
+                        workers.push(scope.spawn(move||{
+                            let mut waits=Vec::new();
+                            for (key,a) in group{
+                                let result=fetch(agent,&a);
+                                if let Err((message,wait))=&result{
+                                    if *wait>0 {waits.push((key,(Instant::now()+Duration::from_secs(*wait),message.clone())));}
+                                }
+                                let _=results.send((a,result.map_err(|e|e.0)));
+                            }
+                            waits
+                        }));
+                    }
+                    for worker in workers{if let Ok(waits)=worker.join(){cooldowns.extend(waits);}}
+                });
+            }
         });Self{tx,rx}
     }
     pub fn refresh(&self,accounts:Vec<Account>)->bool{self.tx.try_send(accounts).is_ok()}
-    pub fn try_recv(&self)->Option<Event>{self.rx.try_recv().ok()}
+    pub fn try_recv(&self,config:&Config)->Option<Event>{
+        while let Ok((source,result))=self.rx.try_recv(){
+            if config.enabled && config.accounts.iter().any(|a|a.enabled&&a.id==source.id&&a.provider==source.provider&&a.source==source.source&&a.slot==source.slot){
+                return Some(Event{id:source.id,result});
+            }
+        }
+        None
+    }
 }
 fn http_agent()->ureq::Agent{
     let mut builder=ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).redirects(0);
@@ -240,10 +323,13 @@ fn http_agent()->ureq::Agent{
     if server.is_empty(){None}else if server.contains("://"){Some(server.into())}else{Some(format!("http://{server}"))}
 }
 fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
+    if account.provider==Provider::ZCode{return zcode::fetch(agent,account).map_err(|e|(e,60));}
+    if account.provider==Provider::WorkBuddy{return workbuddy::fetch(agent,account);}
+    if account.provider==Provider::DeepSeek{return deepseek::fetch(agent,account);}
     if account.provider==Provider::GrokBot{return grok::fetch(agent,account);}
     if account.provider==Provider::Gemini{return gemini::fetch(agent,account);}
     let auth=account_credentials(account).map_err(|e|(e,0))?;
-    let url=match account.provider{Provider::Codex=>"https://chatgpt.com/backend-api/wham/usage",Provider::Claude=>"https://api.anthropic.com/api/oauth/usage",Provider::Kimi=>"https://api.kimi.com/coding/v1/usages",Provider::GrokBot|Provider::Gemini=>unreachable!()};
+    let url=match account.provider{Provider::Codex=>"https://chatgpt.com/backend-api/wham/usage",Provider::Claude=>"https://api.anthropic.com/api/oauth/usage",Provider::Kimi=>"https://api.kimi.com/coding/v1/usages",Provider::ZCode|Provider::GrokBot|Provider::Gemini|Provider::WorkBuddy|Provider::DeepSeek=>unreachable!()};
     let mut req=agent.get(url).set("Authorization",&format!("Bearer {}",auth.token)).set("Accept","application/json").set("User-Agent","codex-cli/Daozai");
     if account.provider==Provider::Codex{if let Some(id)=&auth.account_id{req=req.set("ChatGPT-Account-Id",id);}}
     if account.provider==Provider::Claude{req=req.set("anthropic-beta","oauth-2025-04-20");}
@@ -256,6 +342,25 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
 
 #[cfg(test)] mod tests {
     use super::*;
+    #[test] #[ignore="连接本机 ZCode 并只读核验套餐"]
+    fn zcode_connect_local(){
+        let mut config=Config::load();let path=zcode::path().unwrap();
+        zcode::add(&mut config,&path,"").unwrap();config.save();
+        let a=config.accounts.iter().find(|a|a.provider==Provider::ZCode).unwrap();
+        match zcode::fetch(&http_agent(),a){Ok(s)=>println!("ZCode 返回 {} 个周期",s.windows.len()),Err(msg)=>println!("ZCode 查询状态：{msg}")}
+    }
+    #[test]
+    #[ignore="只读验证本机开启的 AI 账号"]
+    fn enabled_account_probe(){
+        let config=Config::load();
+        let agent=http_agent();
+        for a in config.accounts.iter().filter(|a|a.enabled){
+            match fetch(&agent,a){
+                Ok(s)=>println!("{} 查询成功，{} 个周期",a.provider.name(),s.windows.len()),
+                Err((reason,_))=>println!("{} 查询失败：{}",a.provider.name(),reason),
+            }
+        }
+    }
     #[test]
     fn native_discovery_keeps_distinct_accounts_and_does_not_change_their_files(){
         let dir=std::env::temp_dir().join(format!("daozai-discovery-{}",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
@@ -331,10 +436,27 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
         let restored=Config::from_json(&c.json());assert_eq!(restored,c);assert_eq!(restored.accounts,accounts);assert_eq!(restored.selected,"personal");
         c.colors.remove("personal");let restored=Config::from_json(&c.json());assert!(!restored.colors.contains_key("personal"));assert_eq!(restored.colors["work"],Accent::Orange);
     }
+    #[test] fn deepseek_reconnect_preserves_account_preferences(){
+        let mut c=Config::default();let id=c.connect_deepseek("old".into(),"工作".into());c.accounts[0].pinned=false;c.accounts[0].enabled=false;c.colors.insert(id.clone(),Accent::Gold);
+        assert_eq!(c.reconnect_deepseek(&id,"new".into(),"工作".into()).unwrap(),id);assert_eq!(c.accounts.len(),1);assert_eq!(c.accounts[0].slot.as_deref(),Some("new"));assert!(!c.accounts[0].pinned);assert!(!c.accounts[0].enabled);assert_eq!(c.colors[&id],Accent::Gold);
+        c.connect_deepseek("other".into(),"个人".into());assert!(c.reconnect_deepseek(&id,"other".into(),"工作".into()).is_err());assert_eq!(c.accounts[0].slot.as_deref(),Some("new"));
+    }
+    #[test] fn deepseek_stays_last_and_visible_with_overflow(){
+        let mut c=Config::default();c.connect_deepseek("key-reference".into(),"余额".into());
+        for n in 0..5{c.accounts.push(Account{id:format!("c{n}"),provider:Provider::Codex,alias:String::new(),source:PathBuf::new(),slot:None,enabled:true,pinned:true});}
+        assert_eq!(c.pinned_indices(),vec![1,2,3,4,5,0]);
+        c.accounts[0].enabled=false;assert_eq!(c.pinned_indices(),vec![1,2,3,4,5]);
+        assert!(!c.json().to_string().contains("api_key"));
+    }
     #[test] fn codex_week_only_is_a_single_real_window(){let s=parse(Provider::Codex,&json!({"plan_type":"pro","rate_limit":{"primary_window":null,"secondary_window":{"used_percent":43,"limit_window_seconds":604800,"reset_at":1900000000}}})).unwrap();assert_eq!(s.rings().len(),1);assert_eq!(s.rings()[0].label,"本周");assert_eq!(s.rings()[0].remaining,57.0);}
     #[test] fn pro_plan_does_not_hide_an_existing_five_hour_window(){let s=parse(Provider::Codex,&json!({"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000},"secondary_window":{"used_percent":25,"limit_window_seconds":604800}}})).unwrap();assert_eq!(s.rings().len(),2);assert_eq!(s.rings()[0].remaining,100.0);}
     #[test] fn primary_can_be_weekly_and_missing_is_not_unlimited(){let s=parse(Provider::Codex,&json!({"rate_limit":{"primary_window":{"used_percent":100,"limit_window_seconds":604800}}})).unwrap();assert_eq!(s.rings()[0].label,"本周");assert_eq!(s.rings()[0].remaining,0.0);assert!(parse(Provider::Codex,&json!({"rate_limit":{}})).is_err());assert!(parse(Provider::Codex,&json!({"rate_limit":{"primary_window":{"reset_at":1900000000}}})).is_err());}
     #[test] fn extra_codex_buckets_do_not_replace_main_windows(){let s=parse(Provider::Codex,&json!({"rate_limit":{"secondary_window":{"used_percent":20,"limit_window_seconds":604800}},"additional_rate_limits":[{"limit_name":"reserve","rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":604800}}}]})).unwrap();assert_eq!(s.windows.len(),1);assert_eq!(s.extra[0].remaining,20.0);assert_eq!(s.windows[0].remaining,80.0);}
+    #[test] fn kimi_current_usage_and_empty_account(){
+        let s=parse(Provider::Kimi,&json!({"usages":{"limit_5h":{"used_ratio":"0.25"},"limit_month_code":{"used_ratio":0}}})).unwrap();
+        assert_eq!(s.windows[0].remaining,75.0);assert_eq!(s.windows[1].remaining,100.0);
+        assert!(parse(Provider::Kimi,&json!({})).unwrap_err().contains("已登录"));
+    }
     #[test] fn claude_null_window_and_kimi_string_numbers(){let c=parse(Provider::Claude,&json!({"five_hour":null,"seven_day":{"utilization":60,"resets_at":"2030-01-01T12:00:00Z"}})).unwrap();assert_eq!(c.rings().len(),1);assert!(c.windows[0].reset.is_some());let k=parse(Provider::Kimi,&json!({"usage":{"limit":"100","remaining":"70"},"limits":[{"window":{"duration":300,"timeUnit":"TIME_UNIT_MINUTE"},"detail":{"limit":"20","used":"5"}}]})).unwrap();assert_eq!(k.rings().len(),2);assert_eq!(k.rings()[0].remaining,75.0);}
     #[test] fn multi_account_config_keeps_sources_and_selection_separate(){let mut c=Config::default();for n in 1..=2{c.accounts.push(Account{id:n.to_string(),provider:Provider::Codex,alias:format!("账号 {n}"),source:PathBuf::from(format!("profile-{n}/auth.json")),slot:None,enabled:true,pinned:true});}c.selected="2".into();let raw=c.json();assert_eq!(Config::from_json(&raw),c);assert_eq!(c.selected_index(),Some(1));assert_eq!(c.pinned_indices(),vec![0,1]);assert!(!raw.to_string().contains("access_token"));}
 }

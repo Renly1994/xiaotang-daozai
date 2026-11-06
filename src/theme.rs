@@ -1,7 +1,7 @@
 //! 配色、字体与字号。
 //!
 //! 字体：拉丁/数字用 Segoe UI（Windows 原生 UI 字体，与原版 DirectWrite 渲染同源），
-//! 中文回退到微软雅黑 UI。三档字重：常规 / 半粗 / 粗。
+//! 中文回退到微软雅黑 UI，韩文回退到 Malgun Gothic。三档字重：常规 / 半粗 / 粗。
 //! 非 Windows（开发机、录屏）按 `DAOZAI_FONT_DIR` → 常见系统路径依次查找
 //! 度量兼容的 Selawik 与 Noto Sans SC。
 
@@ -107,7 +107,7 @@ fn font_dirs() -> Vec<PathBuf> {
     v
 }
 
-/// 装载三档字重。每档 = 拉丁字体 + 中文回退；缺哪个就跳过，最后兜底 egui 内置字体。
+/// 装载三档字重。每档 = 拉丁字体 + 中文回退 + 韩文回退；缺哪个就跳过，最后兜底 egui 内置字体。
 pub fn load_fonts(ctx: &egui::Context) {
     ctx.set_fonts(shared_fonts().clone());
 }
@@ -156,6 +156,11 @@ fn build_fonts()->FontDefinitions {
         find(&[("msyhbd.ttc", 1), ("NotoSansSC-Bold.otf", 0), ("NotoSansCJK-Bold.ttc", 2)], &dirs),
     ];
 
+    let korean = [
+        find(&[("malgun.ttf", 0), ("NotoSansKR-Regular.otf", 0), ("NotoSansCJK-Regular.ttc", 1)], &dirs),
+        find(&[("malgunbd.ttf", 0), ("malgun.ttf", 0), ("NotoSansKR-Bold.otf", 0), ("NotoSansCJK-Bold.ttc", 1)], &dirs),
+    ];
+
     let mut fonts = FontDefinitions::default();
     let mut cache: Vec<(PathBuf, u32, String)> = Vec::new();
     let mut add = |fonts: &mut FontDefinitions, face: &Option<Face>, key: String| -> Option<String> {
@@ -184,6 +189,9 @@ fn build_fonts()->FontDefinitions {
         if let Some(k) = add(&mut fonts, &cjk[i], format!("cjk{i}")) {
             list.push(k);
         }
+        if let Some(k) = add(&mut fonts, &korean[usize::from(i > 0)], format!("korean{i}")) {
+            list.push(k);
+        }
         list.extend(builtin.iter().cloned());
         fonts.families.insert(fam.clone(), list);
     }
@@ -201,6 +209,21 @@ pub fn app_icon()->std::sync::Arc<eframe::egui::IconData>{
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn korean_titles_and_lyrics_have_glyphs_in_all_weights(){
+        let ctx=eframe::egui::Context::default();
+        super::load_fonts(&ctx);
+        let _=ctx.run(Default::default(),|ctx|{
+            for weight in [super::W::Regular,super::W::Semibold,super::W::Bold]{
+                let font=super::font(14.0,weight);
+                for ch in "눈, 코, 입 향기로운 숨을 담은 너의 코 사랑해 眼鼻嘴 TAEYANG ㄱㄴㅏ".chars().filter(|c|!c.is_whitespace()){
+                    assert!(ctx.fonts(|f|f.has_glyph(&font,ch)),"缺少字形：{ch}，字体：{font:?}");
+                }
+            }
+        });
+    }
+
     #[cfg(windows)]
     #[test]
     fn mapped_fonts_prevent_in_place_writes_and_keep_shared_reads(){

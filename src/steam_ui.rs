@@ -515,7 +515,24 @@ impl App {
         self.steam.error = false;
     }
 
-    pub(crate) fn page_steam(&mut self, c: &Card<'_>) {
+    pub(crate) fn draw_steam_shortcut(&mut self, c: &Card<'_>, x: f32, y: f32) {
+        let badge = self.steam.badge();
+        let icon = badge.and_then(|(_, game)| game.icon.as_deref());
+        if let Some(texture) = self.steam_images.get(c.ui.ctx(), icon, None) {
+            c.painter.image(texture, c.rect(x-9.0,y-9.0,18.0,18.0),
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
+        } else {
+            crate::extras::device_icon(c, crate::bt::DeviceKind::Gamepad, x-9.0, y-9.0, 18.0);
+        }
+        let (id, tip) = match badge {
+            Some((label, game)) if !label.is_empty() => ("steam-current-game", format!("{label} · {}", game.name)),
+            Some((_, game)) => ("steam-current-game", game.name.clone()),
+            None => ("steam-shortcut", "打开 Steam 页面".to_owned()),
+        };
+        if c.hit(x-13.0,y-13.0,26.0,26.0,id).on_hover_text(tip).clicked() { self.show_page(8); }
+    }
+
+    pub(crate) fn draw_steam_avatar(&mut self, c: &Card<'_>) {
         if let Some(url) = self
             .steam
             .snapshot
@@ -532,6 +549,11 @@ impl App {
                 );
             }
         }
+    }
+
+    pub(crate) fn page_steam(&mut self, c: &Card<'_>) {
+        let side = self.side();
+        if !side { self.draw_steam_avatar(c); }
         if let Some((_, game)) = self
             .steam
             .badge()
@@ -540,8 +562,9 @@ impl App {
             let icon = self
                 .steam_images
                 .get(c.ui.ctx(), game.icon.as_deref(), None);
+            let (icon_x, icon_y) = if side { (57.0, 12.0) } else { (38.0, 58.0) };
             if let Some(texture) = icon {
-                let rect = c.rect(38.0, 58.0, 42.0, 42.0);
+                let rect = c.rect(icon_x, icon_y, 42.0, 42.0);
                 c.painter.image(
                     texture,
                     rect,
@@ -549,21 +572,29 @@ impl App {
                     Color32::WHITE,
                 );
             } else {
-                crate::extras::device_icon(c, crate::bt::DeviceKind::Gamepad, 59.0, 79.0, 32.0);
+                crate::extras::device_icon(c, crate::bt::DeviceKind::Gamepad, icon_x+5.0, icon_y+5.0, 32.0);
             }
-            c.text(
-                88.0,
-                76.0,
-                &c.fit(&game.name, 15.0, W::Semibold, 145.0),
-                15.0,
-                W::Semibold,
-                theme::WHITE,
-                H::Left,
-            );
+            if side && self.steam.game().is_some() {
+                c.centered_text(78.0, 66.0, "正在玩", 10.5, W::Regular, theme::GRAY, H::Center);
+            }
+            let (title_x, align) = if side {
+                c.scrolling_title((12.0, 85.0, 132.0), &game.name, 15.0, self.t, "side-steam-title");
+                (78.0, H::Center)
+            } else {
+                c.text(88.0, 76.0, &c.fit(&game.name, 15.0, W::Semibold, 150.0), 15.0, W::Semibold, theme::WHITE, H::Left);
+                (88.0, H::Left)
+            };
+            let tracked = self.steam.snapshot.achievement_game.as_ref().filter(|tracked| tracked.id != game.id);
             if self.steam.snapshot.total > 0 {
+                let (x, y, align) = match (side, tracked.is_some()) {
+                    (true, true) => (78.0, 135.0, H::Center),
+                    (false, true) => (248.0, 113.0, H::Left),
+                    (true, false) => (title_x, 111.0, align),
+                    (false, false) => (title_x, 98.0, align),
+                };
                 c.text(
-                    88.0,
-                    98.0,
+                    x,
+                    y,
                     &format!(
                         "已解锁 {} / {} 项成就",
                         self.steam.snapshot.unlocked, self.steam.snapshot.total
@@ -571,20 +602,42 @@ impl App {
                     11.5,
                     W::Regular,
                     Color32::from_gray(190),
-                    H::Left,
+                    align,
                 );
+            }
+            if let Some(tracked) = tracked {
+                let label = format!("成就 · {}", tracked.name);
+                let (x, y, align) = if side { (78.0, 117.0, H::Center) } else { (248.0, 59.0, H::Left) };
+                c.text(x, y, &c.fit(&label, 9.5, W::Regular, 132.0), 9.5, W::Regular, theme::GRAY, align);
+            } else if side && !self.steam.snapshot.recent_achievements.is_empty() {
+                c.text(78.0, 135.0, "近期解锁", 11.0, W::Semibold, theme::WHITE, H::Center);
             }
             for (index,achievement) in self.steam.snapshot.recent_achievements.iter().filter(|achievement|achievement.icon.is_some()).take(4).enumerate() {
                 let url=achievement.icon.as_deref().unwrap();
-                let x=248.0+34.0*index as f32;
-                c.fill(x,66.0,30.0,30.0,5.0,Color32::from_gray(24));
+                let (x,y) = if side { (63.0, 145.0+34.0*index as f32) } else { (248.0+34.0*index as f32, 66.0) };
+                c.fill(x,y,30.0,30.0,5.0,Color32::from_gray(24));
                 if let Some(texture)=self.steam_images.get(c.ui.ctx(),None,Some(url)) {
-                    c.painter.image(texture,c.rect(x,66.0,30.0,30.0),egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)),Color32::WHITE);
+                    c.painter.image(texture,c.rect(x,y,30.0,30.0),egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)),Color32::WHITE);
                 }
-                c.hit(x,64.0,30.0,34.0,("steam-recent-achievement",index)).on_hover_text(&achievement.name);
+                c.hit(x,y-2.0,30.0,34.0,("steam-recent-achievement",index)).on_hover_text(&achievement.name);
             }
+        } else if side {
+            crate::extras::device_icon(c, crate::bt::DeviceKind::Gamepad, 62.0, 22.0, 32.0);
+            let connected = self.steam.config.is_some();
+            let heading = if connected { "等待游戏状态" } else { "连接 Steam" };
+            c.centered_text(78.0, 73.0, heading, 13.0, W::Semibold, theme::WHITE, H::Center);
+            let note = if !connected { "连接账号后查看游戏与成就" }
+                else if self.steam.note.is_empty() { &self.steam.snapshot.note } else { &self.steam.note };
+            let lines = c.wrap(note, 10.0, W::Regular, 130.0, 4);
+            for (index, line) in lines.iter().enumerate() {
+                c.centered_text(78.0, 94.0 + index as f32 * 15.0, line, 10.0, W::Regular, theme::GRAY, H::Center);
+            }
+            let y = 94.0 + lines.len() as f32 * 15.0;
+            let (response, button) = crate::paint::capsule(c, 30.0, y, 96.0, 24.0, "steam-side-settings", theme::BTN, theme::BTN_HOVER);
+            button.centered_text(78.0, y + 12.0, "Steam 设置", 11.0, W::Semibold, theme::WHITE, H::Center);
+            if response.clicked() { self.open_steam_settings(); }
         } else if self.steam.config.is_some() {
-            crate::extras::device_icon(c, crate::bt::DeviceKind::Gamepad, 59.0, 79.0, 32.0);
+            crate::extras::device_icon(c, crate::bt::DeviceKind::Gamepad, 43.0, 63.0, 32.0);
             c.text(
                 88.0,
                 70.0,
@@ -615,7 +668,7 @@ impl App {
                 );
             }
         } else {
-            crate::extras::device_icon(c, crate::bt::DeviceKind::Gamepad, 59.0, 79.0, 32.0);
+            crate::extras::device_icon(c, crate::bt::DeviceKind::Gamepad, 43.0, 63.0, 32.0);
             c.text(
                 88.0,
                 70.0,

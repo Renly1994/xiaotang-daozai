@@ -72,11 +72,11 @@ API Key 进入 Windows 凭据管理器，账号和成就去重记录留在本机
 
 ## 安装与更新
 
-1. 前往 [Releases](https://github.com/Renly1994/xiaotang-daozai/releases/latest)，下载安装版 `Daozai-Setup-v0.6.50-x64.exe`。
+1. 前往 [Releases](https://github.com/Renly1994/xiaotang-daozai/releases/latest)，下载安装版 `Daozai-Setup-v0.6.60-x64.exe`。
 2. 双击安装器，可修改安装位置、选择是否创建桌面快捷方式和开机自启，再点击「一键安装」。桌面快捷方式默认勾选，首次安装默认不开机自启；无需解压。
 3. 安装完成后打开「岛仔」，也可从桌面快捷方式启动。在托盘菜单打开设置，选择需要的功能。
 
-需要免安装使用时，下载 `Daozai-v0.6.50-windows-x64.zip` 并完整解压，运行其中的 `daozai.exe`。程序仍默认使用当前用户的应用数据目录。
+需要免安装使用时，下载 `Daozai-v0.6.60-windows-x64.zip` 并完整解压，运行其中的 `daozai.exe`。程序仍默认使用当前用户的应用数据目录。
 
 在「设置 → 关于」点击「检查更新」，可查看最新正式版及更新说明，选择「下载并安装」「浏览器下载」或「稍后」。应用内下载通过校验后会重启更新；也可在发布页下载后再次安装，原设置和记录会保留。卸载可通过 Windows「已安装的应用」完成；卸载同样保留用户数据。详细操作见 [使用指南](docs/USAGE.md)。
 
@@ -128,5 +128,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package.ps1
 ## 开源与致谢
 
 岛仔原创代码采用 [MIT License](LICENSE)。Rust 依赖、vendored 代码、第三方图标及品牌标识沿用各自的许可或权利声明；MIT 不授予这些服务的商标使用权，也不代表官方合作或认证。详见 [第三方声明](THIRD_PARTY_NOTICES.txt) 和 [依赖说明](docs/DEPENDENCIES.md)。
+
+「悬浮云」皮肤作者：啵（[@hanhb123](https://github.com/hanhb123)）。
 
 感谢 egui／eframe、Rust 社区，以及提供参考与素材的开源项目。

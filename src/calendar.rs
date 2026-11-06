@@ -1,4 +1,4 @@
-//! 日历：飞书 / 钉钉 CalDAV 与企业微信 Exchange ActiveSync 只读接入。
+//! 日历：飞书 / 钉钉 / iCloud / 自定义 CalDAV 与企业微信 Exchange ActiveSync 只读接入。
 //!
 //! `PROPFIND` 找日历（uuid），`REPORT calendar-query` 分别查询提醒窗口与所选月份，
 //! 企业微信使用 FolderSync / Sync；复用 VEVENT 解析与重复日程展开。认证使用 Basic Auth，
@@ -27,16 +27,25 @@ pub enum Provider {
     Feishu,
     DingTalk,
     WeCom,
+    /// 苹果 iCloud 日历：Apple ID + App 专用密码。
+    ICloud,
+    /// 任意 CalDAV 服务（Nextcloud、群晖、Fastmail、Radicale 等），地址由用户填写。
+    Custom,
+    /// 自建或第三方 Exchange（ActiveSync），地址由用户填写；与企业微信共用同一套只读客户端。
+    Exchange,
 }
 
 impl Provider {
-    pub const ALL: [Provider; 3] = [Provider::Feishu, Provider::DingTalk, Provider::WeCom];
+    pub const ALL: [Provider; 6] = [Provider::Feishu, Provider::DingTalk, Provider::WeCom, Provider::ICloud, Provider::Custom, Provider::Exchange];
 
     pub fn key(self) -> &'static str {
         match self {
             Provider::Feishu => "feishu",
             Provider::DingTalk => "dingtalk",
             Provider::WeCom => "wecom",
+            Provider::ICloud => "icloud",
+            Provider::Custom => "custom",
+            Provider::Exchange => "exchange",
         }
     }
 
@@ -45,6 +54,9 @@ impl Provider {
             Provider::Feishu => "飞书",
             Provider::DingTalk => "钉钉",
             Provider::WeCom => "企业微信",
+            Provider::ICloud => "iCloud",
+            Provider::Custom => "CalDAV",
+            Provider::Exchange => "Exchange",
         }
     }
 
@@ -54,8 +66,24 @@ impl Provider {
             Provider::Feishu => "https://caldav.feishu.cn/calendars/",
             Provider::DingTalk => "https://calendar.dingtalk.com",
             Provider::WeCom => "https://wecom.work",
+            Provider::ICloud => "https://caldav.icloud.com/",
+            Provider::Custom | Provider::Exchange => "",
         }
     }
+
+    /// 自定义 CalDAV、Exchange 需要用户填写服务器地址。
+    pub fn custom_server(self) -> bool { matches!(self, Provider::Custom | Provider::Exchange) }
+
+    /// 走 Exchange ActiveSync 协议，而不是 CalDAV。
+    pub fn exchange(self) -> bool { matches!(self, Provider::WeCom | Provider::Exchange) }
+
+    /// 服务器地址输入框的示例。
+    pub fn server_hint(self) -> &'static str {
+        if self == Provider::Exchange { "mail.example.com" } else { "https://example.com/remote.php/dav" }
+    }
+
+    /// 一个账号下有多个日历（iCloud 的「家庭」「工作」等）时全部同步。
+    pub fn all_calendars(self) -> bool { matches!(self, Provider::ICloud | Provider::Custom) }
 
     /// 「在哪拿？」三步引导，直接对应客户端菜单。
     pub fn guide(self) -> [&'static str; 3] {
@@ -75,6 +103,21 @@ impl Provider {
                 "右上角「三」→ 日程设置",
                 "同步至其他日历（Exchange）→ 复制完整用户名及生成的密码",
             ],
+            Provider::ICloud => [
+                "用浏览器打开 account.apple.com，登录 Apple 账户",
+                "登录与安全 → App 专用密码 → 生成一个（名称可填「岛仔」）",
+                "用户名填 Apple ID 邮箱，密码填刚生成的 App 专用密码",
+            ],
+            Provider::Custom => [
+                "服务器填日历服务的 CalDAV 地址，例如 https://example.com/remote.php/dav",
+                "用户名和密码用该服务的账号；支持「应用密码」的建议单独生成一个",
+                "只读同步；岛仔会自动发现账号下所有日历",
+            ],
+            Provider::Exchange => [
+                "服务器填 Exchange 邮件服务器地址，例如 mail.example.com，可向公司 IT 获取",
+                "用户名一般是邮箱，也可能是「域\\用户名」；密码用邮箱密码",
+                "只读同步日历；Microsoft 365 / Outlook.com 已不支持密码登录，暂不能连接",
+            ],
         }
     }
 
@@ -82,6 +125,9 @@ impl Provider {
         match key {
             "dingtalk" => Provider::DingTalk,
             "wecom" => Provider::WeCom,
+            "icloud" => Provider::ICloud,
+            "custom" => Provider::Custom,
+            "exchange" => Provider::Exchange,
             _ => Provider::Feishu,
         }
     }
@@ -103,6 +149,19 @@ impl Config {
     pub fn base(&self) -> String {
         self.server.clone().unwrap_or_else(|| self.provider.server().to_string())
     }
+}
+
+/// 自定义 CalDAV 地址：去掉空白，补全 https://；只接受 https（本机回环地址允许 http）。
+pub fn normalize_server(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() { return None; }
+    let raw = if raw.contains("://") { raw.to_string() } else { format!("https://{raw}") };
+    let raw = raw.replacen("webcal://", "https://", 1).replacen("caldav://", "https://", 1).replacen("caldavs://", "https://", 1);
+    let url = url::Url::parse(&raw).ok()?;
+    let local = url.host_str().is_some_and(|host| host == "localhost" || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()));
+    if url.host_str().is_none_or(str::is_empty) || !url.username().is_empty() || url.password().is_some() { return None; }
+    if !(url.scheme() == "https" || url.scheme() == "http" && local) { return None; }
+    Some(url.to_string())
 }
 
 fn config_path() -> std::path::PathBuf {
@@ -342,6 +401,7 @@ pub struct Failure {
 impl Failure {
     fn status(provider: Provider, code: u16) -> Self {
         let message = match code {
+            401 if provider.custom_server() => "用户名或密码不对，请核对账号和密码".to_string(),
             401 => format!("用户名或密码不对，请回{}重新生成一次", provider.label()),
             403 => "日历服务器拒绝访问（403），请核对同步地址、专用密码及日历授权".to_string(),
             404 => "服务器地址不对（404）".to_string(),
@@ -401,7 +461,7 @@ fn dav_response(
     let mut target=url::Url::parse(url).map_err(|_|Failure::text("日历地址无效"))?;
     for attempt in 0..4 {
         let local=base.host_str().is_some_and(|host|host.parse::<std::net::IpAddr>().is_ok_and(|ip|ip.is_loopback()));
-        if target.origin()!=base.origin() || !target.username().is_empty() || target.password().is_some()
+        if !same_service(cfg.provider,&target,&base) || !target.username().is_empty() || target.password().is_some()
             || !(target.scheme()=="https" || target.scheme()=="http" && local) {
             return Err(Failure::text("日历返回了不可信地址，请重新连接"));
         }
@@ -425,9 +485,17 @@ fn dav_response(
     Err(Failure::text("日历重定向次数过多"))
 }
 
+/// iCloud 的日历实际放在 `pNN-caldav.icloud.com` 上，发现过程会从入口跳过去；
+/// 其他平台只信任同源地址。
+fn same_service(provider:Provider,target:&url::Url,base:&url::Url)->bool {
+    if target.origin()==base.origin() {return true;}
+    provider==Provider::ICloud && target.scheme()=="https" && target.port().is_none()
+        && target.host_str().is_some_and(|host|host.ends_with(".icloud.com"))
+}
+
 const PROPFIND_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
-  <d:prop><d:resourcetype/><d:displayname/><d:current-user-principal/><c:calendar-home-set/></d:prop>
+  <d:prop><d:resourcetype/><d:displayname/><d:current-user-principal/><c:calendar-home-set/><c:supported-calendar-component-set/></d:prop>
 </d:propfind>"#;
 
 fn calendar_data_request(_provider: Provider, start: &str, end: &str) -> String {
@@ -477,12 +545,29 @@ pub fn fetch_month(cfg: &Config, password: &str, month: NaiveDate) -> Result<Fet
 }
 
 fn fetch_range(cfg: &Config, password: &str, lo: chrono::DateTime<chrono::Utc>, hi: chrono::DateTime<chrono::Utc>) -> Result<Fetched, Failure> {
-    if cfg.provider == Provider::WeCom { return exchange::fetch(cfg, password, lo, hi); }
+    if cfg.provider.exchange() { return exchange::fetch(cfg, password, lo, hi); }
     let agent = agent();
-    let href = match &cfg.href {
-        Some(h) => h.clone(),
-        None => discover(&agent, cfg, password)?,
-    };
+    // 每次都发现全部日历：已保存的地址可能指向空日历，会遮蔽同一账号下的其他日历。
+    // 逐个查询，单个日历失败不影响其他日历，全部失败才报错。
+    let calendars=discover_calendars(&agent,cfg,password)?;
+    let href=calendars.first().cloned().ok_or_else(||Failure::text("没有找到可读取的日历"))?;
+    let mut events=Vec::new();
+    let mut first_error=None;
+    let mut ok=false;
+    for collection in &calendars {
+        match fetch_collection(&agent,cfg,password,collection,lo,hi) {
+            Ok(found)=>{ok=true;events.extend(found.events);}
+            Err(error)=>{first_error.get_or_insert(error);}
+        }
+    }
+    if !ok {return Err(first_error.unwrap_or_else(||Failure::text("没有找到日历")));}
+    events.sort_by_key(|m|m.start);
+    let mut seen=std::collections::HashSet::new();events.retain(|m|seen.insert(dedupe_key(m)));
+    Ok(Fetched{href,events})
+}
+
+fn fetch_collection(agent:&ureq::Agent,cfg:&Config,password:&str,href:&str,lo:chrono::DateTime<chrono::Utc>,hi:chrono::DateTime<chrono::Utc>)->Result<Fetched,Failure>{
+    let href=href.to_owned();
     let start = lo.format("%Y%m%dT%H%M%SZ").to_string();
     let end = hi.format("%Y%m%dT%H%M%SZ").to_string();
     let mut xml = dav(&agent, "REPORT", &href, "1", &report_body(cfg.provider, &start, &end), cfg, password)?;
@@ -526,7 +611,7 @@ fn report_resource_refs(xml:&str,href:&str)->Result<String,Failure> {
     Ok(refs)
 }
 
-fn discover(agent: &ureq::Agent, cfg: &Config, password: &str) -> Result<String, Failure> {
+fn discover_calendars(agent: &ureq::Agent, cfg: &Config, password: &str) -> Result<Vec<String>, Failure> {
     let base = ensure_slash(cfg.base().trim());
     let root=path_of(&base)=="/";
     match discover_at(agent,cfg,password,&base,"1") {
@@ -551,14 +636,15 @@ fn discover(agent: &ureq::Agent, cfg: &Config, password: &str) -> Result<String,
     Err(Failure::text("没有找到日历，请确认这个账号能在客户端里同步日程"))
 }
 
-fn discover_at(agent:&ureq::Agent,cfg:&Config,password:&str,start:&str,depth:&str)->Result<Option<String>,Failure>{
+fn discover_at(agent:&ureq::Agent,cfg:&Config,password:&str,start:&str,depth:&str)->Result<Option<Vec<String>>,Failure>{
     let mut next=start.to_owned();let mut depth=depth;
     let mut visited=std::collections::HashSet::new();
     for _ in 0..8 {
         if !visited.insert(next.clone()){return Err(Failure::text("日历服务器返回了循环的发现地址"));}
         let (xml,base)=dav_response(agent,"PROPFIND",&next,depth,PROPFIND_BODY,cfg,password)?;
         visited.insert(base.clone());
-        if let Some(calendar)=pick_calendar(&xml,&base){return Ok(Some(calendar));}
+        let calendars=calendar_collections(&xml,&base);
+        if !calendars.is_empty(){return Ok(Some(calendars));}
         if let Some(home)=calendar_home(&xml,&base).filter(|url|!visited.contains(url)) {
             next=home;depth="1";
         } else if let Some(principal)=property_href(&xml,"current-user-principal",&base).filter(|url|!visited.contains(url)) {
@@ -610,6 +696,18 @@ fn property_href(xml:&str,property:&str,base:&str)->Option<String>{
     url::Url::parse(base).ok()?.join(&unescape_xml(href)).ok().map(|url|url.to_string())
 }
 
+fn calendar_collections(xml:&str,base:&str)->Vec<String>{
+    // 只取能放日程（VEVENT）的日历集合，跳过只放提醒事项的列表，最多 12 个。
+    let mut calendars=event_calendars(xml,base);
+    if calendars.is_empty(){if let Some(url)=pick_calendar(xml,base){calendars.push(url);}}
+    calendars
+}
+
+#[cfg(test)]
+fn discover(agent:&ureq::Agent,cfg:&Config,password:&str)->Result<String,Failure>{
+    discover_calendars(agent,cfg,password)?.into_iter().next().ok_or_else(||Failure::text("没有找到日历"))
+}
+
 /// 只选择日历集合或已有的 UUID 兼容路径，不能把主目录/收件箱当成日历。
 fn pick_calendar(xml: &str, base: &str) -> Option<String> {
     let want = path_of(base).trim_end_matches('/').to_string();
@@ -629,6 +727,37 @@ fn pick_calendar(xml: &str, base: &str) -> Option<String> {
         }
     }
     best.map(|(_, url)| url)
+}
+
+/// 账号下所有能放日程（VEVENT）的日历集合；只放提醒事项（VTODO）的跳过。最多 12 个。
+fn event_calendars(xml: &str, base: &str) -> Vec<String> {
+    let Ok(block) = regex::Regex::new(r"(?is)<(?:[a-z0-9]+:)?response\b[^>]*>(.*?)</(?:[a-z0-9]+:)?response>") else { return Vec::new(); };
+    let set = regex::Regex::new(r"(?is)<(?:[a-z0-9]+:)?supported-calendar-component-set\b[^>]*>(.*?)</(?:[a-z0-9]+:)?supported-calendar-component-set>").unwrap();
+    let vevent = regex::Regex::new(r#"(?is)name\s*=\s*["']VEVENT["']"#).unwrap();
+    let Ok(base_url) = url::Url::parse(base) else { return Vec::new(); };
+    let mut out = Vec::new();
+    for cap in block.captures_iter(xml) {
+        let inner = &cap[1];
+        // 复用 `responses` 的判定：单独解析这一段。
+        let Some((href, is_calendar, _)) = responses(&cap[0]).into_iter().next() else { continue; };
+        if !is_calendar { continue; }
+        if let Some(components) = set.captures(inner) {
+            if !vevent.is_match(&components[1]) { continue; }
+        }
+        let Ok(url) = base_url.join(&href) else { continue; };
+        let url = url.to_string();
+        if !out.contains(&url) { out.push(url); }
+        if out.len() >= 12 { break; }
+    }
+    out
+}
+
+/// 从 .ics 文件（苹果「日历」导出、订阅链接下载等）读出时间范围内的日程，重复日程会展开。
+pub fn events_from_ics(ics: &str, lo: chrono::DateTime<chrono::Utc>, hi: chrono::DateTime<chrono::Utc>) -> Result<Vec<crate::mail::Meeting>, String> {
+    if !ics.contains("BEGIN:VCALENDAR") && !ics.contains("BEGIN:VEVENT") { return Err("不是有效的日历文件（.ics）".into()); }
+    let escaped = ics.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let xml = format!("<d:response><c:calendar-data>{escaped}</c:calendar-data></d:response>");
+    events_in_range(&xml, lo, hi).map_err(|e| e.message)
 }
 
 fn calendar_data(xml: &str) -> Vec<String> {
@@ -709,7 +838,10 @@ fn events_in_range(xml:&str,lo:chrono::DateTime<chrono::Utc>,hi:chrono::DateTime
     let mut events=Vec::new();
     for body in blocks {
         let raw=format!("BEGIN:VEVENT{body}END:VEVENT");
-        let Some(base)=crate::mail::meetings_of(&raw).into_iter().next() else{continue;};
+        let Some(base)=crate::mail::meetings_of(&raw).into_iter().next() else{
+            if field(&body,"STATUS").is_some_and(|s|s.split_once(':').is_some_and(|(_,v)|v.trim().eq_ignore_ascii_case("CANCELLED"))){continue;}
+            return Err(Failure::text("服务器返回了日程，但时间或时区无法解析，未完成同步"));
+        };
         if field(&body,"RECURRENCE-ID").is_some() || field(&body,"RRULE").is_none() {
             if field(&body,"RECURRENCE-ID").is_some() || !overrides.contains(&(field(&body,"UID").unwrap_or_default(),base.start)){events.push(base);}
             continue;
@@ -921,6 +1053,49 @@ pub fn human_error(provider: Provider, status: Option<u16>) -> String {
 
 #[cfg(test)]
 mod tests {
+    fn serve_calendar_discovery(listener:&std::net::TcpListener){
+        use std::io::Write;
+        let (mut socket,_)=listener.accept().unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        assert!(read_discovery_request(&mut socket).starts_with("PROPFIND "));
+        let xml="<d:multistatus><d:response><d:href>/calendar/</d:href><d:propstat><d:prop><d:resourcetype><c:calendar/></d:resourcetype></d:prop></d:propstat></d:response></d:multistatus>";
+        write!(socket,"HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}",xml.len()).unwrap();
+    }
+
+    #[test]
+    fn saved_empty_calendar_does_not_hide_other_calendars(){
+        use std::{io::Write,net::TcpListener};
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();listener.set_nonblocking(true).unwrap();
+        let base=format!("http://{}/",listener.local_addr().unwrap());
+        let (stop,done)=std::sync::mpsc::channel();
+        let worker=std::thread::spawn(move||{
+            while done.try_recv().is_err(){
+                let Ok((mut socket,_))=listener.accept() else{std::thread::sleep(Duration::from_millis(5));continue;};
+                socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                let request=read_discovery_request(&mut socket);
+                let body=if request.starts_with("PROPFIND ") {
+                    "<d:multistatus><d:response><d:href>/empty/</d:href><d:propstat><d:prop><d:resourcetype><c:calendar/></d:resourcetype></d:prop></d:propstat></d:response><d:response><d:href>/work/</d:href><d:propstat><d:prop><d:resourcetype><c:calendar/></d:resourcetype></d:prop></d:propstat></d:response></d:multistatus>"
+                }else if request.starts_with("REPORT /work/ ") {
+                    "<d:multistatus><d:response><d:href>/work/a.ics</d:href><c:calendar-data>BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:work-event\nDTSTART:20261104T020000Z\nSUMMARY:工作日程\nEND:VEVENT\nEND:VCALENDAR</c:calendar-data></d:response></d:multistatus>"
+                }else{"<d:multistatus/>"};
+                write!(socket,"HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            }
+        });
+        let cfg=Config{provider:Provider::DingTalk,username:"test".into(),href:Some(format!("{base}empty/")),server:Some(base)};
+        let result=fetch_month(&cfg,"test",NaiveDate::from_ymd_opt(2026,11,1).unwrap());
+        stop.send(()).unwrap();worker.join().unwrap();
+        assert_eq!(result.unwrap().events.len(),1,"已保存的空日历不能遮蔽其他日历");
+    }
+
+    #[test]
+    fn malformed_events_are_not_reported_as_an_empty_calendar(){
+        let lo="2026-11-01T00:00:00Z".parse().unwrap();let hi="2026-12-01T00:00:00Z".parse().unwrap();
+        let xml="<calendar-data>BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:test\nDTSTART;TZID=Unsupported/Zone:20261104T100000\nEND:VEVENT\nEND:VCALENDAR</calendar-data>";
+        assert!(events_in_range(xml,lo,hi).is_err());
+        let cancelled=xml.replace("UID:test","UID:test\nSTATUS:CANCELLED");
+        assert!(events_in_range(&cancelled,lo,hi).unwrap().is_empty());
+    }
+
     #[test]
     fn wecom_uses_exchange_endpoint() {
         assert_eq!(Provider::WeCom.server(), "https://wecom.work");
@@ -1161,6 +1336,7 @@ mod tests {
             let listener=TcpListener::bind("127.0.0.1:0").unwrap();
             let base=format!("http://{}/",listener.local_addr().unwrap());
             let server=std::thread::spawn(move||{
+            serve_calendar_discovery(&listener);
                 for index in 0..2 {
                     let (mut socket,_)=listener.accept().unwrap();
                     socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
@@ -1197,6 +1373,7 @@ mod tests {
             let listener=TcpListener::bind("127.0.0.1:0").unwrap();
             let base=format!("http://{}/",listener.local_addr().unwrap());
             let server=std::thread::spawn(move||{
+            serve_calendar_discovery(&listener);
                 for index in 0..3 {
                     let (mut socket,_)=listener.accept().unwrap();
                     socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
@@ -1246,6 +1423,7 @@ mod tests {
         let start=utc(2,1);let end=utc(3,1);
         let ics=[("month-first",start),("leap-day",utc(2,29)),("next-month",end)].into_iter().map(|(uid,at)|format!("BEGIN:VEVENT\r\nUID:{uid}\r\nSUMMARY:月度安排\r\nDTSTART:{}\r\nEND:VEVENT\r\n",at.format("%Y%m%dT%H%M%SZ"))).collect::<String>();
         let server=std::thread::spawn(move||{
+            serve_calendar_discovery(&listener);
             let (mut socket,_)=listener.accept().unwrap();
             socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             let mut buf=Vec::new();let mut chunk=[0u8;4096];
@@ -1360,6 +1538,13 @@ mod tests {
     fn error_messages_are_human() {
         assert_eq!(Failure::status(Provider::Feishu, 401).message, "用户名或密码不对，请回飞书重新生成一次");
         assert_eq!(Failure::status(Provider::WeCom, 401).message, "用户名或密码不对，请回企业微信重新生成一次");
+        assert_eq!(Failure::status(Provider::Exchange, 401).message, "用户名或密码不对，请核对账号和密码");
+        assert_eq!(Failure::status(Provider::Custom, 401).message, "用户名或密码不对，请核对账号和密码");
+        for provider in Provider::ALL {assert_eq!(Provider::parse(provider.key()),provider);}
+        assert!(Provider::Exchange.exchange() && Provider::WeCom.exchange() && !Provider::Custom.exchange());
+        assert!(Provider::Exchange.custom_server() && Provider::Exchange.server().is_empty());
+        let saved=Config{provider:Provider::Exchange,username:"me@example.com".into(),href:None,server:Some("https://mail.example.com/".into())};
+        assert_eq!(decode_config(&encode_config(&saved)).unwrap(),saved,"Exchange 账号的服务器地址要能保存和读回");
         assert_eq!(Failure::transport("timed out").message, "连不上服务器，检查网络");
         assert_eq!(Failure::status(Provider::DingTalk, 404).message, "服务器地址不对（404）");
     }
@@ -1431,7 +1616,7 @@ END:VCALENDAR</c:calendar-data></d:prop></d:propstat></d:response>
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
             let mut hits = Vec::new();
-            for _ in 0..3 {
+            for _ in 0..4 {
                 let Ok((mut sock, _)) = listener.accept() else { return Vec::new() };
                 let mut buf = Vec::new();
                 let mut tmp = [0u8; 4096];
@@ -1496,5 +1681,61 @@ END:VCALENDAR</c:calendar-data></d:prop></d:propstat></d:response></d:multistatu
         assert_eq!(again.events.len(), 1);
         let hits = server.join().unwrap();
         assert_eq!(hits.iter().filter(|h| h.starts_with("REPORT")).count(), 2);
+    }
+}
+
+#[cfg(test)]
+mod icloud_and_ics_tests {
+    use super::*;
+
+    #[test]
+    fn new_providers_round_trip_and_custom_server_is_validated() {
+        for p in Provider::ALL { assert_eq!(Provider::parse(p.key()), p); }
+        assert!(Provider::ICloud.all_calendars() && !Provider::Feishu.all_calendars());
+        assert_eq!(normalize_server("cloud.example.com/remote.php/dav").as_deref(), Some("https://cloud.example.com/remote.php/dav"));
+        assert_eq!(normalize_server("webcal://p01-caldav.icloud.com/x").as_deref(), Some("https://p01-caldav.icloud.com/x"));
+        assert!(normalize_server("http://example.com/dav").is_none(), "非本机地址必须 https");
+        assert!(normalize_server("http://127.0.0.1:5232/").is_some());
+        assert!(normalize_server("https://user:pw@example.com/").is_none());
+        assert!(normalize_server("  ").is_none());
+        let cfg = Config { provider: Provider::Custom, username: "me".into(), href: None, server: Some("https://dav.example.com/".into()) };
+        let back = decode_config(&encode_config(&cfg)).unwrap();
+        assert_eq!(back, cfg);
+    }
+
+    #[test]
+    fn icloud_may_move_to_partition_hosts_but_others_stay_same_origin() {
+        let base = url::Url::parse("https://caldav.icloud.com/").unwrap();
+        let part = url::Url::parse("https://p52-caldav.icloud.com/1234/calendars/home/").unwrap();
+        assert!(same_service(Provider::ICloud, &part, &base));
+        assert!(!same_service(Provider::ICloud, &url::Url::parse("https://evil.example.com/").unwrap(), &base));
+        assert!(!same_service(Provider::ICloud, &url::Url::parse("http://p52-caldav.icloud.com/").unwrap(), &base));
+        assert!(!same_service(Provider::Custom, &part, &url::Url::parse("https://dav.example.com/").unwrap()));
+    }
+
+    #[test]
+    fn event_calendars_skip_reminder_lists_and_inbox() {
+        let xml = r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+<d:response><d:href>/1234/calendars/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
+<d:response><d:href>/1234/calendars/home/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/><c:calendar/></d:resourcetype>
+<c:supported-calendar-component-set><c:comp name="VEVENT"/></c:supported-calendar-component-set></d:prop></d:propstat></d:response>
+<d:response><d:href>/1234/calendars/tasks/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/><c:calendar/></d:resourcetype>
+<c:supported-calendar-component-set><c:comp name="VTODO"/></c:supported-calendar-component-set></d:prop></d:propstat></d:response>
+<d:response><d:href>/1234/calendars/work/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/><c:calendar/></d:resourcetype></d:prop></d:propstat></d:response>
+<d:response><d:href>/1234/calendars/inbox/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/><c:schedule-inbox/></d:resourcetype></d:prop></d:propstat></d:response>
+</d:multistatus>"#;
+        assert_eq!(event_calendars(xml, "https://p52-caldav.icloud.com/1234/calendars/"),
+            vec!["https://p52-caldav.icloud.com/1234/calendars/home/".to_string(), "https://p52-caldav.icloud.com/1234/calendars/work/".to_string()]);
+    }
+
+    #[test]
+    fn ics_file_events_expand_weekly_repeats() {
+        let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Apple Inc.//macOS//EN\r\nBEGIN:VEVENT\r\nUID:apple-1\r\nSUMMARY:周会 & 复盘\r\nDTSTART:20261102T020000Z\r\nDTEND:20261102T030000Z\r\nRRULE:FREQ=WEEKLY;COUNT=3\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:apple-2\r\nSUMMARY:体检\r\nDTSTART;VALUE=DATE:20261110\r\nDTEND;VALUE=DATE:20261111\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let lo = chrono::DateTime::parse_from_rfc3339("2026-11-01T00:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let hi = chrono::DateTime::parse_from_rfc3339("2027-01-01T00:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let events = events_from_ics(ics, lo, hi).unwrap();
+        assert_eq!(events.iter().filter(|e| e.title == "周会 & 复盘").count(), 3);
+        assert!(events.iter().any(|e| e.title == "体检" && e.all_day));
+        assert!(events_from_ics("hello", lo, hi).is_err());
     }
 }

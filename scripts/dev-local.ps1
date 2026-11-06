@@ -5,10 +5,12 @@
 pwsh -File ./scripts/dev-local.ps1 Build
 .EXAMPLE
 pwsh -File ./scripts/dev-local.ps1 Run
+.EXAMPLE
+powershell -ExecutionPolicy Bypass -File ./scripts/dev-local.ps1 Watch -LowMemory
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Check', 'Build', 'Test', 'Run')]
+    [ValidateSet('Check', 'Build', 'Test', 'Run', 'Watch')]
     [string]$Action = 'Check',
     [switch]$LowMemory
 )
@@ -102,6 +104,54 @@ try {
                 $runExecutable = Join-Path $runDirectory 'daozai.exe'
                 Copy-Item -LiteralPath (Join-Path $projectRoot 'target/debug/daozai.exe') -Destination $runExecutable -Force
                 & $runExecutable
+            }
+        }
+        'Watch' {
+            $runDirectory = Join-Path $projectRoot 'target/dev-run'
+            New-Item -ItemType Directory -Path $runDirectory -Force | Out-Null
+            $runExecutable = Join-Path $runDirectory 'daozai.exe'
+            $instances = @(Get-Process daozai -ErrorAction SilentlyContinue)
+            if ($instances | Where-Object { $_.Path -ne $runExecutable }) {
+                throw '已安装版岛仔正在运行。请从托盘退出后启动开发监听。'
+            }
+            $watchedFiles = @('Cargo.toml', 'Cargo.lock', 'build.rs', 'app.rc')
+            function Get-SourceStamp {
+                $entries = @(
+                    Get-ChildItem -LiteralPath @('src','assets') -Recurse -File
+                    Get-Item -LiteralPath $watchedFiles
+                )
+                ($entries | Sort-Object FullName | ForEach-Object {
+                    '{0}:{1}:{2}' -f $_.FullName, $_.Length, $_.LastWriteTimeUtc.Ticks
+                }) -join [Environment]::NewLine
+            }
+            $previousStamp = $null
+            $preview = $instances | Select-Object -First 1
+            Write-Host '正在监听源码。保存后自动构建，编译成功才会刷新窗口。按 Ctrl+C 结束。'
+            while ($true) {
+                if ($preview -and $preview.HasExited) {
+                    Write-Host "开发窗口已退出（退出码 $($preview.ExitCode)），继续监听源码。"
+                    $preview = $null
+                }
+                $stamp = Get-SourceStamp
+                if ($stamp -ne $previousStamp) {
+                    $previousStamp = $stamp
+                    & cargo build --locked --offline @taskCargoProfile --bin daozai
+                    if ($LASTEXITCODE -eq 0) {
+                        if ($preview -and -not $preview.HasExited) {
+                            Stop-Process -InputObject $preview -ErrorAction Stop
+                            if (-not $preview.WaitForExit(5000)) { throw '旧开发窗口未能退出。' }
+                        }
+                        if (Get-Process daozai -ErrorAction SilentlyContinue) {
+                            throw '另一个岛仔实例正在运行，请从托盘退出后重新启动监听。'
+                        }
+                        Copy-Item -LiteralPath (Join-Path $projectRoot 'target/debug/daozai.exe') -Destination $runExecutable -Force
+                        $preview = Start-Process -FilePath $runExecutable -WorkingDirectory $projectRoot -PassThru
+                        Write-Host '开发窗口已刷新。'
+                    } else {
+                        Write-Host '编译失败，继续监听下一次保存。'
+                    }
+                }
+                Start-Sleep -Milliseconds 1000
             }
         }
         'Test' { & cargo test --locked --offline @taskCargoProfile --all-targets --features record -- --test-threads=1 }
