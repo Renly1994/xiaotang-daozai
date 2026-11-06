@@ -24,6 +24,8 @@ pub const PW: f32 = 419.0; // 展开面板宽
 pub const PH: f32 = 140.0; // 展开面板高
 pub(crate) const CALENDAR_PAGE: usize = 7;
 pub(crate) const CALENDAR_H: f32 = 216.0;
+pub(crate) const DEVICE_PAGE: usize = 8;
+pub(crate) const DEVICE_H: f32 = 216.0;
 pub const BAR_W: f32 = 163.0; // 收起药丸宽
 pub const BAR_H: f32 = 30.0; // 收起药丸高
 pub(crate) const HUD_W: f32 = 260.0;
@@ -49,14 +51,46 @@ fn pill_shadow(painter:&egui::Painter,rect:Rect,radius:f32,strength:f32){
         painter.rect_filled(r,radius+grow*0.8,Color32::from_black_alpha((255.0*a*strength) as u8));
     }
 }
-pub(crate) const PAGE_NAMES: [&str; 8] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程"];
+pub(crate) const PAGE_NAMES: [&str; 9] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "设备电量"];
+
+/// 功能页小点的提示气泡：跟随光标水平位置浮在光标上方 12 px；
+/// 顶边放不下时翻到光标下方，水平方向由 `Area::constrain_to` 做左右夹取。
+fn page_dot_tooltip(ctx: &egui::Context, page: usize, pointer: Pos2) {
+    let text = PAGE_NAMES[page];
+    let offset = 12.0;
+    // 一行提示大致高度（字号 12 + 弹窗内边距），只用于决定上下翻转。
+    let expected = 26.0;
+    let screen = ctx.screen_rect();
+    let above = pointer.y - offset - expected >= screen.top();
+    let pivot = if above { egui::Align2::CENTER_BOTTOM } else { egui::Align2::CENTER_TOP };
+    let pos = if above { Pos2::new(pointer.x, pointer.y - offset) } else { Pos2::new(pointer.x, pointer.y + offset) };
+    egui::Area::new(egui::Id::new(("page-dot-tip", page)))
+        .order(egui::Order::Tooltip)
+        .pivot(pivot)
+        .fixed_pos(pos)
+        .constrain_to(screen)
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::popup(&ctx.style()).show(ui, |ui| {
+                ui.style_mut().interaction.selectable_labels = false;
+                ui.label(egui::RichText::new(text).size(12.0));
+            });
+        });
+}
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
 const HOVER_INTENT: f64 = 0.20;
 const MINIMAL_HOVER_INTENT: f64 = 0.40;
-/// 移开后等待多久开始收起；这段时间内回来不会收。
-const LEAVE_DELAY: f64 = 0.12;
+/// 光标离开岛体后的收起宽限：期间回到安全距离内就继续展开。
+const LEAVE_DELAY: f64 = 0.35;
+/// 光标到岛体矩形边缘不超过这个距离时视为仍在悬停（24 px）。
+const HOVER_MARGIN: f32 = 24.0;
+/// 页面高度骤减超过这个值时，本次展开期间的距离阈值放宽到 48 px。
+const SHRINK_RELIEF: f32 = 60.0;
+const HOVER_MARGIN_LARGE: f32 = 48.0;
+/// 点击页面小点后的保护期，避免窗口缩矮瞬间把光标判成离开。
+const CLICK_PROTECT: f64 = 0.40;
 const SWELL: (f32, f32) = (1.075, 1.13);
 // 展开：欠阻尼，末段约 5% 过冲后回落；高度略软于宽度，像「垂落」下来。
 const OPEN_W: (f32, f32) = (330.0, 0.70);
@@ -105,6 +139,8 @@ pub struct Env {
     pub bt: Vec<crate::bt::Device>,
     /// 蓝牙服务是否已经完成首次扫描。
     pub bt_ready: bool,
+    /// 鼠标 / 耳机 / 键盘的电量快照（含离线标记）。
+    pub devices: Vec<crate::devices::Device>,
     /// 岛所在屏幕（与 `win` 同一坐标系，逻辑点）；用于让通知详情留在屏幕内。
     pub screen: Option<Rect>,
     /// 毛玻璃皮肤：岛体四周采样得到的背景色（sRGB 0..1）。
@@ -574,6 +610,11 @@ pub struct App {
     pub(crate) open: bool,
     hover_since: Option<f64>,
     leave_since: Option<f64>,
+    /// 点击页面小点后的保护截止时间。
+    protect_until: f64,
+    /// 本次展开过程中的最大岛体高度与「骤减放宽距离」标记。
+    open_peak_h: f32,
+    open_far: bool,
     /// 前台切换导致的强制收起：光标离开前不再自动展开。
     pub hover_lock: bool,
     pub(crate) reveal: f32,
@@ -584,7 +625,7 @@ pub struct App {
     page_dir: f32,
     page_t0: f64,
     slide: Spring,
-    dots: [Spring; 8],
+    dots: [Spring; 9],
     wheel_delta: f32,
     wheel_at: f64,
     wheel_page_at: f64,
@@ -704,6 +745,35 @@ pub struct App {
     pub(crate) updates: crate::updates::State,
     pub(crate) resident: bar::Motion,
     pub(crate) resident_power: (Option<u8>,bool),
+    /// 鼠标 / 耳机 / 键盘电量快照（来自后台采集）。
+    pub(crate) devices: Vec<crate::devices::Device>,
+    /// 本帧岛体上实际要画的设备（最多 2 台 + `+N`）。
+    pub(crate) bar_device_slot: BarDevices,
+    /// 设备电量页：按设备 key 记录悬停展开进度与移出起点。
+    pub(crate) device_page_anim: std::collections::HashMap<String,(f32,Option<f64>)>,
+    /// 设备电量页的列表滚动起点。
+    pub(crate) device_page_first: usize,
+}
+
+/// 岛体设备槽的内容：已过滤/排序的设备、溢出数量与图标风格。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct BarDevices {
+    pub items: Vec<crate::devices::Device>,
+    pub extra: usize,
+    pub style: model::DeviceIconStyle,
+}
+
+impl BarDevices {
+    pub(crate) const RING_WIDTH: f32 = 30.0;
+    pub(crate) const CAPSULE_WIDTH: f32 = 38.0;
+    fn item_width(&self) -> f32 {
+        match self.style { model::DeviceIconStyle::Ring => Self::RING_WIDTH, model::DeviceIconStyle::Capsule => Self::CAPSULE_WIDTH }
+    }
+    pub(crate) fn width(&self) -> Option<f32> {
+        if self.items.is_empty() { return None; }
+        let count = self.items.len() as f32;
+        Some(self.item_width() * count + 6.0 * (count - 1.0) + if self.extra > 0 { 18.0 } else { 0.0 })
+    }
 }
 
 impl App {
@@ -734,6 +804,9 @@ impl App {
             open: false,
             hover_since: None,
             leave_since: None,
+            protect_until: 0.0,
+            open_peak_h: 0.0,
+            open_far: false,
             hover_lock: false,
             reveal: 0.0,
             page: initial_page,
@@ -804,6 +877,7 @@ impl App {
             quota: crate::quota_ui::State::load(),
             updates: Default::default(),
             resident: Default::default(), resident_power:(None,false),
+            devices: Vec::new(), bar_device_slot: Default::default(), device_page_anim: Default::default(), device_page_first: 0,
         }
     }
 
@@ -1226,7 +1300,7 @@ impl App {
 
     pub fn show_page(&mut self,page:usize) {
         if !self.settings.visible_pages[page] {
-            self.settings_tab=[1,2,3,5,4,7,11,8][page];
+            self.settings_tab=[1,2,3,5,4,7,11,8,12][page];
             self.open_settings();
             return;
         }
@@ -1283,6 +1357,11 @@ impl App {
     /// 带过渡地切到某页。`dir` > 0 表示内容从右侧进入。
     pub(crate) fn go(&mut self, page: usize, dir: f32) {
         if page == self.page || !self.settings.visible_pages[page] { return; }
+        if self.page==DEVICE_PAGE && page!=DEVICE_PAGE {
+            // 离开电量页时清掉悬停进度，避免下次进入仍保留展开状态。
+            self.device_page_anim.clear();
+            self.device_page_first=0;
+        }
         self.subpage=None;
         // 连点：上一段过渡还没结束时，以当前页为起点重新开始，位移速度保留。
         self.page_from = self.page;
@@ -1372,6 +1451,35 @@ impl App {
     pub(crate) fn effective_minimal(&self)->bool {self.settings.minimal || self.browser_minimal_active}
     pub(crate) fn pet_enabled(&self)->bool {self.settings.pet && !self.effective_minimal() && !self.side()}
     pub(crate) fn pet_space(&self)->f32 {if self.pet_enabled(){44.0}else{0.0}}
+    /// 岛体上该显示的设备：总开关 + 逐设备开关 + 在线；电量低的排前面，最多 2 台。
+    pub(crate) fn bar_devices(&self)->BarDevices {
+        let mut items:Vec<crate::devices::Device>=self.devices.iter().filter(|device|device.present
+            && self.settings.device_battery
+            && self.settings.device_battery_show.iter().any(|key|key==&device.key)).cloned().collect();
+        items.sort_by_key(|device|device.battery.map(|level|level as u16).unwrap_or(u16::MAX));
+        let extra=items.len().saturating_sub(2);
+        items.truncate(2);
+        BarDevices {items,extra,style:self.settings.device_icon_style}
+    }
+    pub(crate) fn bar_device_width(&self)->Option<f32> {self.bar_devices().width()}
+    pub(crate) fn has_bar_devices(&self)->bool {!self.bar_devices().items.is_empty()}
+    /// 在岛体上画设备槽（`center_x` 是布局中心，坐标相对当前 Card）。
+    pub(crate) fn draw_bar_devices(&self,c:&Card,center_x:f32,layout:&Layout) {
+        let Some(x)=layout.x[bar::DEVICE] else {return;};
+        let style=self.bar_device_slot.style;
+        let per=self.bar_device_slot.item_width();
+        let extra_room=if self.bar_device_slot.extra>0 {18.0} else {0.0};
+        let count=self.bar_device_slot.items.len() as f32;
+        let total=per*count+6.0*(count-1.0)+extra_room;
+        let mut cursor=center_x+x-total/2.0;
+        for device in &self.bar_device_slot.items {
+            crate::extras::device_badge(c,cursor+per/2.0,BAR_H/2.0,style,device.kind,device.battery);
+            cursor+=per+6.0;
+        }
+        if self.bar_device_slot.extra>0 {
+            crate::extras::device_overflow(c,cursor+extra_room/2.0,BAR_H/2.0,self.bar_device_slot.extra);
+        }
+    }
     fn lyric_focus_space(&self)->f32 {if self.pomo.running{crate::focus_bar::LYRIC_WIDTH+10.0}else{0.0}}
     fn lyric_bar_width(&self)->f32 {LYRIC_BAR_W+if self.pet_enabled(){48.0}else{0.0}+self.lyric_focus_space()}
     fn notice_size(&self,a:&Alert)->(f32,f32) {
@@ -1413,7 +1521,7 @@ impl App {
     }
 
     pub(crate) fn expanded_height(&self)->f32 {
-        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
+        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==DEVICE_PAGE {DEVICE_H}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
     }
 
     // ---------------------------------------------------------------
@@ -1470,10 +1578,19 @@ impl App {
         self.update_media(env,&ctx);
         let bell=self.t<self.notification_bell_until&&!self.compact_notices();
         self.resident_power=(env.battery,env.charging);
-        let mut layout=Layout::new(self.settings.show_battery&&env.battery.is_some(),self.quota_bar_indices().len(),self.media.is_music()&&!bell,self.pomo.running,bell,self.pet_enabled());
+        self.devices=env.devices.clone();
+        let mut slot=self.bar_devices();
+        let clock_extra=bar::clock_extra(self.settings.clock_period!=0,self.settings.clock_show_seconds);
+        let mut layout=Layout::new(self.settings.show_battery&&env.battery.is_some(),self.quota_bar_indices().len(),self.media.is_music()&&!bell,self.pomo.running,bell,self.pet_enabled(),slot.width());
+        // 岛体空间不足时先收成 1 台，避免挤压时钟和额度；把时钟加宽量一起算进去。
+        if slot.items.len()>1 && layout.width+clock_extra>WIN_W-32.0 {
+            slot.extra+=1;slot.items.truncate(1);
+            layout=Layout::new(self.settings.show_battery&&env.battery.is_some(),self.quota_bar_indices().len(),self.media.is_music()&&!bell,self.pomo.running,bell,self.pet_enabled(),slot.width());
+        }
+        self.bar_device_slot=slot;
         layout.reorder(&self.settings.resident_order);
         for (position,extra) in self.quota_balance_layout(&ctx){layout.balance_tail(position,extra);}
-        if self.settings.clock_period!=0 { layout.widen_clock(40.0); }
+        if clock_extra>0.0 { layout.widen_clock(clock_extra); }
         if self.pet_enabled() {
             if let Some(a)=self.notice.as_ref().filter(|_|!self.compact_notices()&&!self.open){layout.x[bar::PET]=Some(22.0-(self.notice_size(a).0+self.pet_space())/2.0);}
             else if self.island_lyrics_active() {layout.x[bar::PET]=Some(60.0-self.lyric_bar_width()/2.0);}
@@ -1559,6 +1676,8 @@ impl App {
                         let clipboard_tab=self.page==3 && self.shelf_tab==1;
                         let list=match self.page {
                             CALENDAR_PAGE if calendar_body=>Some((&mut self.calendar.view.first,calendar_max)),
+                            DEVICE_PAGE if Rect::from_min_max(Pos2::new(40.0,34.0),Pos2::new(379.0,200.0)).contains(cursor)
+                                =>Some((&mut self.device_page_first,self.devices.len().saturating_sub(3))),
                             4 if Rect::from_min_max(Pos2::new(196.0,31.0),Pos2::new(377.0,124.0)).contains(cursor)
                                 =>Some((&mut self.todo_first,self.todos.items.len().saturating_sub(3))),
                             3 if clipboard_tab
@@ -1582,7 +1701,14 @@ impl App {
                 }
             }
         } else {self.wheel_delta=0.0;}
-        let want = (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open);
+        let island=self.island_rect(win,self.w.pos,self.h.pos);
+        let margin=if self.open_far {HOVER_MARGIN_LARGE}else{HOVER_MARGIN};
+        // `env.cursor` 已在输入层由 `GetCursorPos` 减去窗口原点换算成窗口逻辑坐标，
+        // 与岛体矩形同一坐标系，因此距离判定天然对齐 DPI / 负坐标多屏。
+        let within=env.cursor.is_some_and(|c|Self::edge_distance(island,c)<=margin);
+        let want = (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open))
+            || (self.open && ((within && !self.hover_lock) || self.t<self.protect_until || on_notice || self.t<self.forced_open_until || self.is_editing()))
+            || self.drag_hot;
         self.morph(want, inside, env.t, dt);
         self.update_pet(env, cx);
 
@@ -1803,9 +1929,11 @@ impl App {
             || self.dots.iter().any(|d| !d.settled(16.0))
             || self.hover_since.is_some() && !self.open
             || self.leave_since.is_some()
+            || self.t < self.protect_until
             || (self.drag_a > 0.001 && self.drag_a < 0.999)
             || self.drag_hot
             || (self.pet_a > 0.001 && self.pet_a < 0.999)
+            || self.open && self.page==DEVICE_PAGE && self.device_page_anim.values().any(|(t,leave)|(*t>0.001&&*t<0.999)||leave.is_some())
             || !self.resident.settled()
             || self.open && self.page==3 && self.shelf_x.values().any(|s| !s.settled(68.0))
             || self.open && self.page==2 && !self.water_ring.settled(1.0)
@@ -2106,9 +2234,24 @@ impl App {
         }
     }
 
+    /// 点到矩形的最短距离（点在矩形内为 0）。
+    fn edge_distance(rect: Rect, p: Pos2) -> f32 {
+        let dx=(rect.left()-p.x).max(0.0).max(p.x-rect.right());
+        let dy=(rect.top()-p.y).max(0.0).max(p.y-rect.bottom());
+        (dx*dx+dy*dy).sqrt()
+    }
+
     /// 悬停状态机：意图缓冲 → 弹簧展开 → 离开延迟 → 临界阻尼收起；全程可打断。
     fn morph(&mut self, want: bool, inside: bool, t: f64, dt: f32) {
         let (bw, bh) = self.base_size();
+        if self.open {
+            // 记录本次展开的最大高度；页面高度骤减超过 60 px 时放宽距离阈值。
+            self.open_peak_h = self.open_peak_h.max(self.h.pos);
+            if self.open_peak_h-self.expanded_height()>SHRINK_RELIEF {self.open_far=true;}
+        } else {
+            self.open_peak_h = 0.0;
+            self.open_far = false;
+        }
         if want {
             self.leave_since = None;
             let since = *self.hover_since.get_or_insert(t);
@@ -2267,6 +2410,11 @@ impl App {
             let c=base.faded(compact_alpha);let c=if compact_alpha<0.8{c.ghost()}else{c};
             self.draw_quota_bar(&c,local_cx,&layout);
         }
+        if compact_alpha>0.004 && layout.x[bar::DEVICE].is_some() {
+            let c=base.faded(compact_alpha);let c=if compact_alpha<0.8{c.ghost()}else{c};
+            let c=c.faded(layout.clearance(bar::DEVICE));
+            self.draw_bar_devices(&c,local_cx,&layout);
+        }
         if self.pomo.running && compact_alpha>0.004 {
             crate::focus_bar::draw(&base.faded(compact_alpha),local_cx+layout.x[bar::FOCUS].unwrap(),15.0,self.t,&self.pomo,self.phase_secs(self.pomo.phase),false);
         }
@@ -2317,7 +2465,7 @@ impl App {
         let (hover,press)=c.hover_t(&settings);
         c.circle(394.0,18.0,13.0,Color32::from_white_alpha((hover*24.0) as u8));
         paint::gear(&c.scaled(394.0,18.0,0.8*(1.0-press*0.08)),394.0,18.0,paint::mix(theme::GRAY,theme::WHITE,hover));
-        if settings.clicked(){self.settings_tab=[1,2,3,5,4,7,11,8][self.page];self.open_settings();}
+        if settings.clicked(){self.settings_tab=[1,2,3,5,4,7,11,8,12][self.page];self.open_settings();}
         if self.subpage==Some(self.page) {
             c.text(15.0,25.0,"‹",19.0,W::Bold,theme::WHITE,H::Left);
             c.text(37.0,25.0,if self.page==2{"饮水设置"}else{"专注设置"},size::TITLE,W::Bold,theme::WHITE,H::Left);
@@ -2359,6 +2507,7 @@ impl App {
             4 => ("待办", "清单", theme::GREEN),
             5 => ("邮箱", "", theme::CYAN),
             6 => ("AI", "额度", theme::SOFT_GREEN),
+            DEVICE_PAGE => ("设备", "电量", theme::GREEN),
             _ => ("岛仔", "设置", theme::WHITE),
         };
         let wa = c.text(15.0, base, a, size::TITLE, W::Bold, theme::WHITE, H::Left);
@@ -2390,11 +2539,15 @@ impl App {
             let col = paint::mix(Color32::from_rgb(92, 92, 96), theme::WHITE, on);
             c.fill(x, dot_y - 2.0, w, 4.0, 2.0, col);
             let hr = c.hit(x - 2.0, dot_y - 6.0, w + 4.0, 12.0, ("dot", i));
-            hr.clone().on_hover_text(PAGE_NAMES[i]);
+            if hr.hovered() {
+                if let Some(p)=c.ui.ctx().pointer_latest_pos() {page_dot_tooltip(c.ui.ctx(),i,p);}
+            }
             if hr.hovered() && i != self.page {
                 c.fill(x - 1.0, dot_y - 3.0, w + 2.0, 6.0, 3.0, Color32::from_white_alpha(28));
             }
             if hr.clicked() {
+                // 点击会立刻改变下一页的目标高度，给状态机一段保护期。
+                self.protect_until=self.t+CLICK_PROTECT;
                 clicked = Some(i);
             }
             x += w + gap;
@@ -2416,6 +2569,7 @@ impl App {
             5 => self.page_mail(c, env, cmds),
             6 => self.page_quota(c),
             CALENDAR_PAGE => self.page_calendar(c,env),
+            DEVICE_PAGE => self.page_devices(c,env),
             _ => self.page_settings(c),
         }
     }
