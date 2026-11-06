@@ -332,7 +332,18 @@ impl Window {
         };
         // 区域用哨兵值：首帧（包括启动即隐藏的空区域）也必须真正调用 SetWindowRgn，
         // 否则整块透明画布会挡住下层程序的点击。
-        let opaque_surface=cc.wgpu_render_state.as_ref().is_some_and(|state|state.adapter.get_info().backend==eframe::wgpu::Backend::Dx12);
+        // AMD/ATI OpenGL 和 WGPU 的 Vulkan 表面在部分 Windows 驱动上会把透明像素显示成黑色。
+        // 对这些路径按岛体轮廓裁剪窗口，避免透明画布露出黑矩形。
+        let opaque_surface=if let Some(state)=&cc.wgpu_render_state {
+            matches!(state.adapter.get_info().backend,eframe::wgpu::Backend::Dx12|eframe::wgpu::Backend::Vulkan)
+        } else if let Some(gl)=&cc.gl {
+            use eframe::glow::HasContext;
+            unsafe {
+                let vendor=gl.get_parameter_string(eframe::glow::VENDOR).to_ascii_lowercase();
+                let renderer=gl.get_parameter_string(eframe::glow::RENDERER).to_ascii_lowercase();
+                vendor.contains("ati") || vendor.contains("amd") || renderer.contains("radeon")
+            }
+        } else { false };
         watch_drag(hwnd,cc.egui_ctx.clone());
         Some(Self { hwnd, region: (i32::MIN, 0, 0, 0), expanded: false, hook, browser_state:(None,PollClock::default()), drag_capture:DragCapture::default(), glass:None, backdrop:None, blur:false, blur_unavailable:false, opaque_surface })
     }
@@ -441,7 +452,7 @@ impl Window {
                 self.blur = false;
             }
         }
-        // DX12 的普通窗口表面没有 alpha 合成，只有它需要按轮廓裁剪窗口区域。
+        // 对不能可靠逐像素合成 alpha 的后端按岛体轮廓裁剪窗口，避免透明画布显示成黑矩形。
         match glass.filter(|_|self.opaque_surface) {
             Some(shapes) => {
                 let key=glass_key(shapes,ppp);
