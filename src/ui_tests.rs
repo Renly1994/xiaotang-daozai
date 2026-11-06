@@ -26,7 +26,7 @@ fn calendar_editor_shows_its_bottom_actions_after_opening(){
     h.hover(H::local(300.0,40.0),1.0);
     assert_eq!(h.app.expanded_height(),crate::app::CALENDAR_EDITOR_H);
     assert!(h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(text)
-        if text.galley.text()=="保存" && shape.clip_rect.contains(text.visual_bounding_rect().center()))),"新建日程的保存按钮不能被岛体裁剪");
+        if text.galley.text()=="保存到本机" && shape.clip_rect.contains(text.visual_bounding_rect().center()))),"新建日程的保存按钮不能被岛体裁剪");
 }
 #[test]
 fn steam_account_notifications_are_isolated_and_distinct_achievements_queue(){
@@ -308,7 +308,8 @@ fn local_calendar_editor_makes_storage_scope_visible_with_connected_accounts() {
     let remote=crate::mail::Meeting{all_day:false,title:"飞书会议".into(),start:chrono::Local::now().timestamp()+3600,end:None,at:String::new(),uid:"remote-event".into()};
     h.app.calendar.events.push(remote.clone());
     h.app.open_calendar(None);h.hover(H::local(300.0,40.0),1.0);
-    h.click(H::local(124.0,18.0));h.hover(H::local(300.0,40.0),0.3);
+    // 日程入口固定在右侧列表底部，不再点击旧版顶部新增按钮的位置。
+    h.click_text("＋ 添加日程");h.hover(H::local(300.0,40.0),0.3);
     assert!(h.app.calendar.draft.is_some());
     let visible=|h:&H,text:&str|h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(t) if t.galley.text()==text));
     assert!(visible(&h,"仅保存在本机"));assert!(visible(&h,"保存到本机"));
@@ -5776,7 +5777,8 @@ fn wheel_short_clipboard_and_calendar_turn_pages(){
     h.app.calendar.view.day=day;h.app.calendar.view.month=crate::calendar::month_start(day);h.app.calendar.view.loaded=Some(h.app.calendar.view.month);
     for (count,ended,all_day) in [(0,false,false),(1,false,false),(5,false,false),(8,true,false),(4,false,true)]{
         h.app.calendar.view.events=(0..count).map(|i|crate::mail::Meeting{all_day,title:format!("日程 {i}"),start:if ended{start-7200}else{start+i*60},end:Some(if ended{start-3600}else{start+3600}),at:String::new(),uid:format!("wheel-{i}")}).collect();
-        for (delta,page) in [(-40.0,0),(40.0,6)]{
+        // Steam 是第九个可见页面，因此日程向后翻页会进入 Steam。
+        for (delta,page) in [(-40.0,8),(40.0,6)]{
             h.app.show_page(7);h.hover(H::local(300.0,160.0),0.5);h.wheel(delta);
             assert_eq!(h.app.page,page,"日历可见列表未溢出应翻页，条数 {count}");
         }

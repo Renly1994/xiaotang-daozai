@@ -2045,6 +2045,7 @@ impl App {
                             self.wheel_navigate(next);
                         }
                         ctx.input_mut(|i|{i.raw_scroll_delta=Vec2::ZERO;i.smooth_scroll_delta=Vec2::ZERO;});
+                }
             }
         } else {self.wheel_delta=0.0;}
         let want = self.dock_dragging || !self.side_player_is_folded() &&
