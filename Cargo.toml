@@ -53,6 +53,8 @@ rrule = "0.14.0"
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "x11"] }
 
 [target.'cfg(windows)'.dependencies]
+# Steam requests use the Windows certificate store, including user-trusted accelerator CAs.
+ureq = { version = "2.12", default-features = false, features = ["native-tls"] }
 clipboard-win = "5.4.3"
 wgpu = { version = "24", default-features = false, features = ["dx12"] }
 memmap2 = "0.9.12"

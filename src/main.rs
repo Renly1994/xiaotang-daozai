@@ -10,6 +10,13 @@ use std::time::{Duration, Instant};
 mod diagnostics;
 mod graphics;
 
+#[cfg(windows)]
+struct SecondaryIsland {
+    view: app::DockView,
+    native: Option<daozai::native::Window>,
+    placed: bool,
+}
+
 struct Shell {
     app: App,
     t0: Instant,
@@ -26,7 +33,9 @@ struct Shell {
     placement_at: PollClock,
     placement_scale: f32,
     /// 上次定位时的目标屏幕与水平位置；变化后立即重新定位，不等下一次轮询。
-    placement_key: (String, i32, daozai::model::Dock),
+    placement_key: (String, i32, daozai::model::Dock, [u16; 2]),
+    #[cfg(windows)]
+    dock_drag_offset: Option<(i32, i32)>,
     win_x: f32,
     sys: (Option<u8>, bool, PollClock),
     #[cfg(windows)]
@@ -58,6 +67,8 @@ struct Shell {
     #[cfg(windows)]
     native: Option<daozai::native::Window>,
     #[cfg(windows)]
+    secondary_islands: [Option<SecondaryIsland>; 3],
+    #[cfg(windows)]
     tray: Option<daozai::tray::Tray>,
     #[cfg(windows)]
     autostart: bool,
@@ -76,9 +87,58 @@ struct Shell {
     quota: daozai::quota::Service,
     quota_sig: Option<(bool,Vec<daozai::quota::Account>)>,
     quota_at: PollClock,
+    steam: daozai::steam::Service,
 }
 
 impl Shell {
+    #[cfg(windows)]
+    fn begin_dock_drag(&mut self, ctx: &egui::Context) {
+        let Some(native) = self.native.as_ref() else { return; };
+        let Some(origin) = native.logical_origin(1.0) else { return; };
+        let Some((x, y)) = cursor_logical(1.0) else { return; };
+        self.dock_drag_offset = Some(((x-origin.x) as i32, (y-origin.y) as i32));
+        self.app.dock_dragging = true;
+        ctx.request_repaint();
+    }
+
+    #[cfg(windows)]
+    fn update_dock_drag(&mut self, ctx: &egui::Context) {
+        use daozai::display_layout;
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+        let Some((dx, dy)) = self.dock_drag_offset else { return; };
+        let cursor = cursor_logical(1.0).map(|(x, y)| (x as i32, y as i32));
+        let cancel = ctx.input(|input| input.key_pressed(egui::Key::Escape));
+        if !cancel && unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0 } {
+            if let (Some(native), Some((x, y))) = (&self.native, cursor) {
+                native.move_dock_preview((x - dx, y - dy));
+            }
+            return;
+        }
+
+        self.dock_drag_offset = None;
+        self.app.dock_dragging = false;
+        self.placement_at = PollClock::default();
+        let scale = ctx.pixels_per_point()*eframe::root_frame_paint_scale();
+        if let Some(cursor) = cursor.filter(|_| !cancel) {
+            let displays = display_layout::connected();
+            let target = displays.iter().find_map(|display| {
+                display_layout::dock_target(display.bounds, cursor, 44.0*scale).map(|dock| (display, dock))
+            });
+            if let Some((display, dock)) = target {
+                let offset = display_layout::dock_offset(display.bounds, cursor, dock, scale, self.app.settings.dock_half_extent(dock));
+                if display_layout::selected(&displays, &self.app.settings.display_id).is_none_or(|active| active.id != display.id) {
+                    self.app.settings.display_id.clone_from(&display.id);
+                }
+                self.app.settings.dock = dock;
+                self.app.settings.island_offset = offset;
+                self.app.settings.save();
+                let page = self.app.page();
+                if self.app.settings.page_on(page, dock) { self.app.show_page(page); }
+            }
+        }
+        ctx.request_repaint();
+    }
+
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         diagnostics::graphics(cc);
         diagnostics::startup("加载本地配置");
@@ -91,6 +151,7 @@ impl Shell {
         {let ctx=cc.egui_ctx.clone();daozai::clipboard::watch(app.clipboard.clone(),move||ctx.request_repaint());}
         if std::env::args().any(|arg|arg=="--settings"){app.open_settings();}
         if std::env::args().any(|arg|arg=="--calendar"){app.open_calendar(None);}
+        if std::env::args().any(|arg|arg=="--steam"){app.open_steam_settings();}
         #[cfg(feature="record")]
         if std::env::var("DAOZAI_MAIL_DEMO").is_ok(){app.mail_demo();}
         #[cfg(feature="record")]
@@ -134,7 +195,9 @@ impl Shell {
             placed: false,
             placement_at: PollClock::default(),
             placement_scale: 0.0,
-            placement_key: (String::new(), 0, daozai::model::Dock::Top),
+            placement_key: (String::new(), 0, daozai::model::Dock::Top, [0; 2]),
+            #[cfg(windows)]
+            dock_drag_offset: None,
             win_x: 0.0,
             sys: (None, false, PollClock::default()),
             #[cfg(windows)]
@@ -154,6 +217,8 @@ impl Shell {
             #[cfg(windows)]
             native: daozai::native::Window::new(cc),
             #[cfg(windows)]
+            secondary_islands: std::array::from_fn(|_| None),
+            #[cfg(windows)]
             tray,
             #[cfg(windows)]
             autostart,
@@ -167,6 +232,7 @@ impl Shell {
             cal: daozai::calendar::Service::start(),
             cal_sig: (Vec::new(), true),
             quota: daozai::quota::Service::start(), quota_sig: None, quota_at: PollClock::default(),
+            steam: daozai::steam::Service::start(cc.egui_ctx.clone()),
         }
     }
 
@@ -259,6 +325,76 @@ impl Shell {
             },
         }
     }
+
+    #[cfg(windows)]
+    fn secondary_commands(&mut self, ctx: &egui::Context, env: &Env, foreground_changed: bool) -> Vec<(egui::ViewportId, Cmd)> {
+        use daozai::model::Dock;
+        let mut commands = Vec::new();
+        let bounds = daozai::display_layout::selected(&self.app.displays, &self.app.settings.display_id).map(|display| display.bounds);
+        let opaque = self.native.as_ref().is_some_and(|window| window.opaque_surface());
+        for dock in Dock::ALL {
+            let slot = &mut self.secondary_islands[dock.index()];
+            if dock == self.app.settings.dock || !self.app.settings.dock_in_use(dock) {
+                *slot = None;
+                continue;
+            }
+            let Some(bounds) = bounds else { continue; };
+            let island = slot.get_or_insert_with(|| SecondaryIsland { view: app::DockView::new(dock), native: None, placed: false });
+            let id = egui::ViewportId::from_hash_of(("daozai-island", dock.key()));
+            let title = format!("岛仔 · {} · {}", dock.label(), std::process::id());
+            let size = if dock.is_side() { egui::vec2(daozai::side_dock::SIDE_W, daozai::side_dock::SIDE_H) }
+                else { egui::vec2(app::CANVAS_W, self.app.settings.top_canvas_height()) };
+            let builder = egui::ViewportBuilder::default().with_title(&title).with_inner_size(size)
+                .with_decorations(false).with_transparent(true).with_resizable(false).with_taskbar(false)
+                .with_active(false).with_visible(false).with_window_level(egui::WindowLevel::AlwaysOnTop);
+            let app = &mut self.app;
+            let hidden = self.hidden;
+            ctx.show_viewport_immediate(id, builder, |child, class| {
+                if class == egui::ViewportClass::Embedded { return; }
+                if island.native.as_ref().is_some_and(|window| !window.is_alive()) {
+                    island.native = None;
+                    island.placed = false;
+                }
+                if island.native.is_none() {
+                    island.native = daozai::native::Window::attach_viewport(&title, child, opaque);
+                }
+                let Some(native) = &mut island.native else { child.request_repaint(); return; };
+                let ppp = child.pixels_per_point();
+                let positioned = native.place_dock(ppp, bounds, &app.settings, dock);
+                let Some(origin) = native.logical_origin(ppp) else { return; };
+                let mut env = env.clone();
+                env.cursor = cursor_logical(ppp).map(|(x,y)| Pos2::new(x-origin.x, y-origin.y));
+                env.screen = Some(egui::Rect::from_min_max(
+                    Pos2::new(bounds.left as f32/ppp-origin.x, bounds.top as f32/ppp-origin.y),
+                    Pos2::new(bounds.right as f32/ppp-origin.x, bounds.bottom as f32/ppp-origin.y)));
+                env.backdrop = None;
+                env.glass_blur = native.blur_active();
+                env.opaque_surface = native.opaque_surface();
+                let mut output = None;
+                if foreground_changed { island.view.foreground_changed(); }
+                egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::TRANSPARENT)).show(child, |ui| {
+                    let win = egui::Rect::from_min_size(ui.max_rect().min, egui::vec2(if dock.is_side() {size.x} else {app::WIN_W}, size.y));
+                    output = Some(app.secondary_frame(dock, &mut island.view, ui, win, &env));
+                });
+                if let Some((out, fullscreen_notice)) = output {
+                    let rect = |r: egui::Rect| (r.left(), r.top(), r.width(), r.height());
+                    let empty = (0.0,0.0,0.0,0.0);
+                    native.update(if hidden && !fullscreen_notice {empty} else {rect(out.region)},
+                        if hidden {empty} else {rect(out.hit)},
+                        if hidden {None} else {out.notice_hit.map(rect)},
+                        if hidden {None} else {out.file_drop_zone.map(rect)},
+                        if hidden {None} else {out.glass.as_deref()}, ppp, out.editing, !hidden && out.expanded);
+                    if positioned && !island.placed {
+                        island.placed = true;
+                        child.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    }
+                    commands.extend(out.cmds.into_iter().map(|command| (id, command)));
+                    ctx.request_repaint_after_for(out.repaint_after, egui::ViewportId::ROOT);
+                }
+            });
+        }
+        commands
+    }
 }
 
 impl eframe::App for Shell {
@@ -301,16 +437,17 @@ impl eframe::App for Shell {
             self.app.foreground_changed();
         }
         #[cfg(windows)]
-        let placement_key=(self.app.settings.display_id.clone(),self.app.settings.island_offset,self.app.settings.dock);
+        self.update_dock_drag(ctx);
         #[cfg(windows)]
-        if !self.placed || self.placement_scale!=(ctx.pixels_per_point()*eframe::root_frame_paint_scale()) || self.placement_key!=placement_key || self.placement_at.ready(Duration::from_secs(1)) {
+        let placement_key=(self.app.settings.display_id.clone(),self.app.settings.island_offset,self.app.settings.dock,self.app.settings.dock_sizes[self.app.settings.dock.index()]);
+        #[cfg(windows)]
+        if self.dock_drag_offset.is_none() && (!self.placed || self.placement_scale!=(ctx.pixels_per_point()*eframe::root_frame_paint_scale()) || self.placement_key!=placement_key || self.placement_at.ready(Duration::from_secs(1))) {
             self.placement_at=PollClock::now();
             self.placement_scale=(ctx.pixels_per_point()*eframe::root_frame_paint_scale());
             self.placement_key=placement_key;
             self.app.displays=daozai::display_layout::connected();
             let display=daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id);
-            let offset=self.app.settings.island_offset_ratio();
-            if display.is_some_and(|d|self.native.as_ref().is_some_and(|w|w.place_on_display(self.placement_scale,d.bounds,offset,self.app.settings.dock))) {
+            if display.is_some_and(|d|self.native.as_ref().is_some_and(|w|w.place_on_display(self.placement_scale,d.bounds,&self.app.settings))) {
                 if !self.placed {diagnostics::startup("目标屏幕物理坐标定位完成，已请求显示");}
                 self.placed=true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -427,7 +564,10 @@ impl eframe::App for Shell {
                 if !success{self.app.say("播放器未完成跳转，请打开客户端后重试");}
             }
         }
-        let env = self.env(ctx);
+        let mut env = self.env(ctx);
+        let primary_active = self.app.settings.dock_in_use(self.app.settings.dock);
+        if !primary_active { env.cursor = None; }
+        while let Some(event)=self.steam.try_recv(){self.app.steam_event(event);}
         // v0.5.5 邮件：开关 / 间隔 / 账号清单变了就重新对齐收信线程，再把事件交给界面。
         let sig=(self.app.settings.mail_enabled,self.app.settings.mail_interval,self.app.mail_accounts().to_vec());
         if sig!=self.mail_sig{
@@ -464,7 +604,7 @@ impl eframe::App for Shell {
             .frame(egui::Frame::new().fill(Color32::TRANSPARENT))
             .show(ctx, |ui| {
                 // 左右停靠时画布是竖向的 SIDE_W × SIDE_H。
-                let size=if self.app.settings.dock.is_side() {egui::vec2(daozai::side_dock::SIDE_W,daozai::side_dock::SIDE_H)} else {egui::vec2(app::WIN_W,app::WIN_H)};
+                let size=if self.app.settings.dock.is_side() {egui::vec2(daozai::side_dock::SIDE_W,daozai::side_dock::SIDE_H)} else {egui::vec2(app::WIN_W,self.app.settings.top_canvas_height())};
                 let win = egui::Rect::from_min_size(ui.max_rect().min,size);
                 out = Some(self.app.frame(ui, win, &env));
             });
@@ -474,11 +614,15 @@ impl eframe::App for Shell {
         if let Some(native) = &mut self.native {
             let r = |r: egui::Rect| (r.left(), r.top(), r.width(), r.height());
             // 保留主窗口的事件循环，避免全屏隐藏后设置窗口无法关闭或重新打开。
-            let region=if self.hidden {(0.0,0.0,0.0,0.0)} else {r(out.region)};
-            let hit=if self.hidden {(0.0,0.0,0.0,0.0)} else {r(out.hit)};
-            native.update(region, hit, if self.hidden{None}else{out.notice_hit.map(r)},if self.hidden{None}else{out.file_drop_zone.map(r)},if self.hidden{None}else{out.glass.as_deref()},(ctx.pixels_per_point()*eframe::root_frame_paint_scale()), out.editing, !self.hidden && out.expanded);
+            let hidden = self.hidden || !primary_active;
+            let region=if hidden && !self.app.steam_fullscreen_notice() {(0.0,0.0,0.0,0.0)} else {r(out.region)};
+            let hit=if hidden {(0.0,0.0,0.0,0.0)} else {r(out.hit)};
+            native.update(region, hit, if hidden{None}else{out.notice_hit.map(r)},if hidden{None}else{out.file_drop_zone.map(r)},if hidden{None}else{out.glass.as_deref()},ctx.pixels_per_point()*eframe::root_frame_paint_scale(), out.editing, !hidden && out.expanded);
         }
-        for cmd in out.cmds {
+        let mut commands: Vec<_> = out.cmds.into_iter().map(|command| (egui::ViewportId::ROOT, command)).collect();
+        #[cfg(windows)]
+        commands.extend(self.secondary_commands(ctx, &env, foreground_changed));
+        for (viewport, cmd) in commands {
             match cmd {
                 Cmd::Media(t) => {
                     let source=self.media.lock().map(|media|media.source.clone()).unwrap_or_default();
@@ -530,6 +674,10 @@ impl eframe::App for Shell {
                     #[cfg(windows)] if let Err(e)=daozai::system::drag_file(&p){self.app.say(format!("无法拖出文件：{}",e.code()));}
                     ctx.input_mut(|i| i.pointer=Default::default());
                 },
+                Cmd::BeginDockDrag => {
+                    #[cfg(windows)]
+                    self.begin_dock_drag(ctx);
+                }
                 Cmd::DisconnectNotifications=>{#[cfg(windows)]{self.incoming=None;self.app.settings.read_notifications=false;self.app.settings.save();self.app.listener_status="已断开，不再读取 Windows 通知".into();}},
                 Cmd::Reveal(p)=>{let _=std::process::Command::new("explorer.exe").arg(format!("/select,{}",p.display())).spawn();},
                 Cmd::QuotaChooseFile=>{
@@ -568,6 +716,7 @@ impl eframe::App for Shell {
                 },
                 Cmd::MailTest(account,password)=>self.mail.test(account,password),
                 Cmd::CalendarTest(cfg,password)=>self.cal.test(cfg,password),
+                Cmd::Steam(action)=>self.steam.send(action),
                 Cmd::CalendarSync=>self.cal.sync_now(),
                 Cmd::CalendarMonth(month)=>self.cal.view_month(month),
                 Cmd::CalendarForget=>{
@@ -577,7 +726,7 @@ impl eframe::App for Shell {
                     self.cal.configure(configs.clone(),self.app.settings.calendar_auto_sync);
                     self.cal_sig=(configs,self.app.settings.calendar_auto_sync);
                 },
-                Cmd::Focus => ctx.send_viewport_cmd(egui::ViewportCommand::Focus),
+                Cmd::Focus => ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::Focus),
             }
         }
 
@@ -586,7 +735,7 @@ impl eframe::App for Shell {
         #[cfg(not(windows))] let autostart = false;
         self.app.settings_ui(ctx, autostart);
         self.app.mail_reader_ui(ctx);
-        #[cfg(windows)] let repaint_after=if self.hidden{Duration::from_secs(1)}else{out.repaint_after};
+        #[cfg(windows)] let repaint_after=if self.hidden && !self.app.steam_fullscreen_notice(){Duration::from_secs(1)}else{out.repaint_after};
         #[cfg(not(windows))] let repaint_after=out.repaint_after;
         schedule_repaint(ctx,repaint_after);
     }

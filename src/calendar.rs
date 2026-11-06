@@ -1134,6 +1134,8 @@ mod tests {
                 let mut paths=Vec::new();
                 while stop_rx.try_recv().is_err() {
                     let Ok((mut stream,_))=listener.accept() else {std::thread::sleep(Duration::from_millis(5));continue;};
+                    // Windows 可让已接受的 socket 继承 listener 的非阻塞模式。
+                    stream.set_nonblocking(false).unwrap();
                     stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
                     let mut request=String::new();
                     while !request.contains("\r\n\r\n") {

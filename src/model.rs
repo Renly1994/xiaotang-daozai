@@ -1,4 +1,4 @@
-﻿//! 持久化与状态模型。
+//! 持久化与状态模型。
 //!
 //! 文件布局与原工具同名同结构（原工具字符串中可见的路径与键名），但默认目录
 //! 用独立的 `%APPDATA%\Daozai`，避免与原工具的 `%APPDATA%\Nusa` 互相覆盖：
@@ -167,6 +167,10 @@ impl Dock {
         match self { Self::Top => "顶部", Self::Left => "左侧", Self::Right => "右侧" }
     }
     pub fn is_side(self) -> bool { self != Self::Top }
+    pub fn index(self) -> usize {
+        match self { Self::Top => 0, Self::Left => 1, Self::Right => 2 }
+    }
+    pub fn bit(self) -> u8 { 1 << self.index() }
 }
 
 /// 岛体大小（百分比）的范围与步进。
@@ -192,18 +196,29 @@ pub struct Settings {
     pub island_offset: i32,
     /// 停靠边缘；左右停靠时 `island_offset` 表示上下位置。
     pub dock: Dock,
+    pub dock_sizes: [[u16; 2]; 3],
+    pub split_docks: bool,
+    /// 电量、Windows 通知、微信、QQ 的唯一停靠位置。
+    pub status_docks: [Dock; 4],
+    pub page_docks: [u8; 9],
+    pub clipboard_docks: u8,
     pub settings_theme: crate::settings_theme::SettingsTheme,
     pub pet: bool,
     pub minimal: bool,
     pub browser_minimal: bool,
     pub avoid_browsers: bool,
     pub avoid_apps: Vec<(String,String)>,
-    pub visible_pages: [bool; 8],
-    pub page_order: [usize; 8],
+    pub visible_pages: [bool; 9],
+    pub page_order: [usize; 9],
+    pub steam_notice_seconds: u32,
     pub show_battery: bool,
     pub clock_12h: bool,
     pub clock_period: u8,
     pub resident_order: Vec<usize>,
+    pub resident_pages: [bool;9],
+    /// 鼠标悬停在时钟上时是否自动打开日程；时钟本身始终显示。
+    pub calendar_resident: bool,
+    pub hover_page_delay_ms: u32,
     pub system_hud: bool,
     pub bluetooth_notifications: bool,
     pub read_notifications:bool,
@@ -241,11 +256,80 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true }
+        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, split_docks: false, status_docks: [Dock::Top; 4], dock_sizes: [[419, 140], [156, 380], [156, 380]], page_docks: [7, 7, 7, 7, 7, 1, 7, 7, 7], clipboard_docks: 1, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 9], page_order: [0,1,2,3,4,5,6,7,8], steam_notice_seconds: 8, show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), resident_pages:[false;9], calendar_resident:true, hover_page_delay_ms:500, system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false,wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true }
     }
 }
 
 impl Settings {
+    pub fn dock_size(&self, dock: Dock) -> (f32, f32) {
+        let [width, height] = self.dock_sizes[dock.index()];
+        let (width, height) = if dock.is_side() {
+            (side_width(width), height.clamp(280, 500))
+        } else {
+            (width.clamp(419, 520), height.clamp(140, 350))
+        };
+        (f32::from(width), f32::from(height))
+    }
+
+    pub fn top_canvas_height(&self) -> f32 {
+        crate::app::WIN_H.max(self.dock_size(Dock::Top).1 * 1.08 + 36.0)
+    }
+
+    pub fn dock_half_extent(&self, dock: Dock) -> f32 {
+        let (width, height) = self.dock_size(dock);
+        if dock.is_side() {
+            let height = if self.page_on(0, dock) { height.max(crate::side_dock::SIDE_PLAYER_H) } else { height };
+            height * 0.54 + 32.0
+        } else {
+            width / 2.0 + 32.0
+        }
+    }
+
+    pub fn shelf_tab_on(&self, tab: usize, dock: Dock) -> bool {
+        let mask = if tab == 0 { self.page_docks[3] } else { self.clipboard_docks };
+        if self.split_docks { self.owner(mask) == dock }
+        else if self.has_explicit_dock_assignments() { dock == self.dock }
+        else { mask & dock.bit() != 0 }
+    }
+
+    pub fn page_on(&self, page: usize, dock: Dock) -> bool {
+        let here = if self.split_docks { self.page_dock(page) == dock }
+        else if self.has_explicit_dock_assignments() { dock == self.dock }
+        else { self.page_docks[page] & dock.bit() != 0 };
+        self.visible_pages[page] && (here
+            || page == 3 && self.shelf_tab_on(1, dock))
+    }
+
+    fn owner(&self, mask: u8) -> Dock {
+        if mask & self.dock.bit() != 0 { self.dock }
+        else { Dock::ALL.into_iter().find(|dock| mask & dock.bit() != 0).unwrap_or(self.dock) }
+    }
+
+    pub fn page_dock(&self, page: usize) -> Dock { self.owner(self.page_docks[page]) }
+    pub fn clipboard_dock(&self) -> Dock { self.owner(self.clipboard_docks) }
+
+    pub fn enable_split_docks(&mut self) {
+        self.page_docks = self.page_docks.map(|mask| self.owner(mask).bit());
+        self.clipboard_docks = self.clipboard_dock().bit();
+        self.split_docks = true;
+    }
+
+    fn has_explicit_dock_assignments(&self) -> bool {
+        // 多岛模式保存单一归属；收回单岛时保留这些配置供再次启用。
+        self.page_docks.iter().all(|mask| mask.is_power_of_two()) && self.clipboard_docks.is_power_of_two()
+    }
+
+    pub fn dock_in_use(&self, dock: Dock) -> bool {
+        if !self.split_docks { return dock == self.dock; }
+        (self.pet && dock == self.dock) || self.page_dock(crate::app::CALENDAR_PAGE) == dock
+            || self.page_order.iter().any(|&page| self.page_on(page, dock))
+            || self.status_docks.iter().enumerate().any(|(index, &owner)| owner == dock && match index {
+                0 => self.show_battery,
+                1 => self.system_hud || (self.read_notifications && !self.qq_only) || self.bluetooth_notifications,
+                2 => self.wechat_notifications,
+                _ => self.read_notifications,
+            })
+    }
     /// 主窗口（灵动岛）的界面缩放倍率。
     pub fn island_scale(&self) -> f32 {
         island_size_value(self.island_size) as f32 / 100.0
@@ -284,6 +368,25 @@ impl Settings {
                 "dock" => s.dock = Dock::parse(&v),
                 "glass_blur" => s.glass_blur = v != "0",
                 "island_size" => s.island_size = island_size_value(v.parse::<u32>().unwrap_or(100)),
+                "dock_sizes" => {
+                    let values: Vec<u16> = v.split(',').filter_map(|part| part.parse().ok()).collect();
+                    if let [tw, th, lw, lh, rw, rh] = values[..] {
+                        s.dock_sizes = [[tw, th], [side_width(lw), lh], [side_width(rw), rh]];
+                    }
+                }
+                "page_docks" if v.len() == 9 && v.bytes().all(|b| (b'1'..=b'7').contains(&b)) => {
+                    for (mask, value) in s.page_docks.iter_mut().zip(v.bytes()) {
+                        *mask = value - b'0';
+                    }
+                }
+                "split_docks" => s.split_docks = v == "1",
+                "status_docks" => {
+                    let docks: Vec<_> = v.split(',').map(Dock::parse).collect();
+                    if let Ok(docks) = docks.try_into() { s.status_docks = docks; }
+                }
+                "clipboard_docks" => {
+                    if let Ok(mask @ 1..=7) = v.parse::<u8>() { s.clipboard_docks = mask; }
+                }
                 "island_offset" => s.island_offset = v.parse::<i32>().unwrap_or(0).clamp(-ISLAND_OFFSET_MAX, ISLAND_OFFSET_MAX),
                 "pet" => s.pet = v == "1" || v.eq_ignore_ascii_case("true"),
                 "minimal" => s.minimal = v == "1" || v.eq_ignore_ascii_case("true"),
@@ -292,22 +395,31 @@ impl Settings {
                 "avoid_apps" => s.avoid_apps = serde_json::from_str(&v).unwrap_or_default(),
                 "resident_order" => {
                     let order:Vec<usize>=v.split(',').filter_map(|n|n.parse().ok()).collect();
-                    if crate::bar_layout::valid_order(&order){s.resident_order=order;}
+                    if let Some(order)=crate::bar_layout::normalize_order(&order){s.resident_order=order;}
                 }
+                "resident_pages" if v.len()==9 && v.bytes().all(|b|b==b'0'||b==b'1')=>{
+                    for (on,value) in s.resident_pages.iter_mut().zip(v.bytes()){*on=value==b'1';}
+                }
+                "calendar_resident" => s.calendar_resident = v != "0",
+                "hover_page_delay_ms" => s.hover_page_delay_ms=v.parse::<u32>().unwrap_or(500).clamp(200,1500),
                 "page_order" => {
                     if let Ok(order)=v.split(',').map(str::parse::<usize>).collect::<Result<Vec<_>,_>>() {
-                        if order.len()==8 && (0..8).all(|page|order.contains(&page)) {
+                        if order.len()==9 && (0..9).all(|page|order.contains(&page)) {
                             s.page_order.copy_from_slice(&order);
+                        } else if order.len()==8 && (0..8).all(|page|order.contains(&page)) {
+                            s.page_order[..8].copy_from_slice(&order);
                         }
                     }
                 }
                 "clock_period" => s.clock_period = v.parse::<u8>().ok().filter(|v|*v<=2).unwrap_or(0),
                 "clock_12h" => s.clock_12h = v == "1",
                 "show_battery" => s.show_battery = v != "0",
-                "visible_pages" if (6..=8).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
+                "visible_pages" if (6..=9).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
                     for (enabled,value) in s.visible_pages.iter_mut().zip(v.bytes()) { *enabled=value==b'1'; }
                     for enabled in &mut s.visible_pages[v.len()..]{*enabled=v.bytes().any(|b|b==b'1');}
+                    if v.len()<9 { s.visible_pages[8]=true; }
                 }
+                "steam_notice_seconds" => s.steam_notice_seconds=v.parse::<u32>().unwrap_or(8).clamp(3,30),
                 "read_notifications" => s.read_notifications=v=="1",
                 "wechat_notifications" => s.wechat_notifications=v=="1",
                 "wechat_tray_open" => s.wechat_tray_open=v=="1",
@@ -340,6 +452,7 @@ impl Settings {
             }
         }
         if !s.visible_pages.contains(&true) { s.visible_pages[0]=true; }
+        if s.split_docks { s.enable_split_docks(); }
         s
     }
 
@@ -353,6 +466,11 @@ impl Settings {
                 ("dock".into(),self.dock.key().into()),
                 ("glass_blur".into(),(self.glass_blur as u8).to_string()),
                 ("island_size".into(),island_size_value(self.island_size).to_string()),
+                ("dock_sizes".into(),self.dock_sizes.iter().flatten().map(u16::to_string).collect::<Vec<_>>().join(",")),
+                ("page_docks".into(),self.page_docks.iter().map(u8::to_string).collect::<Vec<_>>().join("")),
+                ("split_docks".into(), u8::from(self.split_docks).to_string()),
+                ("status_docks".into(), self.status_docks.map(Dock::key).join(",")),
+                ("clipboard_docks".into(),self.clipboard_docks.to_string()),
                 ("island_offset".into(),self.island_offset.clamp(-ISLAND_OFFSET_MAX,ISLAND_OFFSET_MAX).to_string()),
                 ("settings_theme".into(),self.settings_theme.key().into()),
                 ("pet".into(), if self.pet { "1".to_string() } else { "0".to_string() }),
@@ -362,7 +480,11 @@ impl Settings {
                 ("avoid_apps".into(), serde_json::to_string(&self.avoid_apps).unwrap_or_default()),
                 ("visible_pages".into(), self.visible_pages.iter().map(|enabled|if *enabled {'1'}else{'0'}).collect()),
                 ("page_order".into(),self.page_order.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
+                ("steam_notice_seconds".into(),self.steam_notice_seconds.to_string()),
                 ("resident_order".into(),self.resident_order.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
+                ("resident_pages".into(),self.resident_pages.iter().map(|on|if *on{'1'}else{'0'}).collect()),
+                ("calendar_resident".into(),(self.calendar_resident as u8).to_string()),
+                ("hover_page_delay_ms".into(),self.hover_page_delay_ms.to_string()),
                 ("clock_period".into(), self.clock_period.to_string()),
                 ("clock_12h".into(), (self.clock_12h as u8).to_string()),
                 ("show_battery".into(), (self.show_battery as u8).to_string()),
@@ -397,6 +519,11 @@ impl Settings {
             ],
         );
     }
+}
+
+fn side_width(width: u16) -> u16 {
+    use crate::side_dock::{SIDE_MAX_W, SIDE_MIN_W, SIDE_PLAYER_W};
+    if (SIDE_MIN_W..=SIDE_MAX_W).contains(&width) { width } else { SIDE_PLAYER_W as u16 }
 }
 
 #[derive(Clone, Debug, Default)]

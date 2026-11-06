@@ -51,6 +51,13 @@ impl<'a> Card<'a> {
         c.origin += Vec2::new(dx, dy) * self.s;
         c
     }
+    /// 把已有组件的局部锚点放到另一处，绘制和命中使用同一变换。
+    pub(crate) fn placed(&self, from: (f32, f32), to: (f32, f32), scale: f32) -> Self {
+        let mut card = self.clone();
+        card.origin = self.pos(to.0, to.1) - Vec2::new(from.0, from.1) * self.s * scale;
+        card.s *= scale;
+        card
+    }
     /// 以局部点 (cx, cy) 为中心整体缩放（按钮按下的回弹）。
     pub fn scaled(&self, cx: f32, cy: f32, k: f32) -> Self {
         let mut c = self.clone();
@@ -103,6 +110,29 @@ impl<'a> Card<'a> {
         let pos=self.pos(x,cy)-Vec2::new(dx,g.mesh_bounds.center().y);
         self.painter.galley(pos,g,color);
     }
+    /// 窄栏长标题在同一行内往返滚动，并在两端停留。
+    pub fn scrolling_title(&self, bounds: (f32, f32, f32), title: &str, size: f32, time: f64, id: &str) {
+        let (left, center_y, width) = bounds;
+        let overflow = self.text_w(title, size, W::Semibold) - width;
+        let animated = crate::bar_layout::animations_enabled() && self.ui.style().animation_time > 0.0;
+        let height = size + 6.0;
+        if overflow > 0.0 && animated {
+            let leg = 1.4 + overflow / 23.0;
+            let phase = time.rem_euclid(f64::from(2.0 * leg)) as f32;
+            let travel = if phase < leg { ((phase - 1.4) * 23.0).clamp(0.0, overflow) }
+                else { overflow - ((phase - leg - 1.4) * 23.0).clamp(0.0, overflow) };
+            self.clipped(left, center_y - height / 2.0, width, height)
+                .centered_text(left - travel, center_y, title, size, W::Semibold, crate::theme::WHITE, H::Left);
+            if self.live { self.ui.ctx().request_repaint_after(std::time::Duration::from_millis(33)); }
+        } else {
+            self.centered_text(left + width / 2.0, center_y, &self.fit(title, size, W::Semibold, width),
+                size, W::Semibold, crate::theme::WHITE, H::Center);
+        }
+        if overflow > 0.0 {
+            self.hit(left, center_y - height / 2.0, width, height, id).on_hover_text(title);
+        }
+    }
+
     /// 超宽时末尾加省略号。
     pub fn fit(&self, t: &str, size: f32, w: W, max_w: f32) -> String {
         if self.text_w(t, size, w) <= max_w {
@@ -120,6 +150,14 @@ impl<'a> Card<'a> {
             }
         }
         chars[..low].iter().collect::<String>() + "…"
+    }
+
+    /// 在一列内逐字居中排布。
+    pub fn vertical_text(&self, x: f32, center_y: f32, t: &str, size: f32, pitch: f32, w: W, color: Color32) {
+        let start = center_y - t.chars().count().saturating_sub(1) as f32 * pitch / 2.0;
+        for (index, ch) in t.chars().enumerate() {
+            self.centered_text(x, start + index as f32 * pitch, ch.encode_utf8(&mut [0; 4]), size, w, color, H::Center);
+        }
     }
 
     /// 按宽度折行，最多 `max_lines` 行，还有剩余内容时最后一行加省略号。
@@ -612,6 +650,25 @@ pub fn checklist(c: &Card, cx: f32, cy: f32, size: f32, ink: Color32, plate: Col
     }
 }
 
+pub fn resident_water(c: &Card, x: f32, y: f32) {
+    droplet(c, x, y, 16.0, Color32::from_rgb(78, 191, 246));
+}
+
+pub fn resident_todo(c: &Card, x: f32, y: f32) {
+    c.circle(x, y, 8.0, Color32::from_rgb(40, 208, 109));
+    check(c, x, y, 9.0, 1.0, 1.8, Color32::from_rgb(11, 43, 25));
+}
+
+pub fn resident_shelf(c: &Card, x: f32, y: f32) {
+    tray(c, x, y - 1.0, 18.0, 0.0, Color32::from_gray(235), Color32::from_gray(100));
+}
+
+pub fn resident_mail(c: &Card, x: f32, y: f32) {
+    let ink = Color32::from_rgb(112, 206, 242);
+    c.stroke(x - 7.0, y - 5.0, 14.0, 10.0, 2.0, 1.3, ink);
+    c.path(&[(x - 6.2, y - 4.0), (x, y + 0.8), (x + 6.2, y - 4.0)], 1.3, ink);
+}
+
 /// 下载托盘：向下箭头落进收纳盒。`drop` 为箭头下坠位移（拖入时轻微弹跳）。
 pub fn tray(c: &Card, cx: f32, cy: f32, size: f32, drop: f32, color: Color32, shade: Color32) {
     let u = size / 30.0;
@@ -791,7 +848,7 @@ const CHASE_ROWS: [f32; 23] = [
 /// 头前只有约 3 DIP 的收边（两头一阶导都为 0，接得上，不会顿一下）。
 ///
 /// `hot`：暂停 0.45 / 播放 0.62 / 按住拖动 1.0，只影响亮度与尾巴长度。
-pub fn chase(c: &Card, x0: f32, head: f32, y: f32, thick: f32, tint: Color32, hot: f32) {
+pub fn chase(c: &Card, x0: f32, head: f32, y: f32, thick: f32, tint: Color32, hot: f32, vertical: bool) {
     let th = thick.max(1.0);
     let hot = hot.clamp(0.0, 1.0);
     let span = head - x0;
@@ -896,7 +953,8 @@ pub fn chase(c: &Card, x0: f32, head: f32, y: f32, thick: f32, tint: Color32, ho
             let inv_a = if a > 1e-4 { 1.0 / a } else { 0.0 };
             let q = |v: f32| (v * inv_a * 255.0).clamp(0.0, 255.0) as u8;
             let col = Color32::from_rgba_unmultiplied(q(acc[0]), q(acc[1]), q(acc[2]), (a * 255.0) as u8);
-            mesh.colored_vertex(c.pos(x, y + off), col);
+            let point = if vertical { c.pos(y - off, x) } else { c.pos(x, y + off) };
+            mesh.colored_vertex(point, col);
         }
     }
     let stride = cols as u32;

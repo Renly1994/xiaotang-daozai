@@ -10,6 +10,29 @@ pub fn selected<'a>(displays:&'a [Display],id:&str)->Option<&'a Display>{
         .or_else(||displays.iter().find(|d|d.primary)).or_else(||displays.first())
 }
 
+/// Select an edge on the display under the pointer. The closest edge wins in a corner.
+pub fn dock_target(bounds: Bounds, (x, y): (i32, i32), distance: f32) -> Option<crate::model::Dock> {
+    use crate::model::Dock;
+    if !(bounds.left..bounds.right).contains(&x) || !(bounds.top..bounds.bottom).contains(&y) {
+        return None;
+    }
+    [(y - bounds.top, Dock::Top), (x - bounds.left, Dock::Left), (bounds.right - 1 - x, Dock::Right)]
+        .into_iter()
+        .filter(|&(delta, _)| delta as f32 <= distance)
+        .min_by_key(|&(delta, _)| delta)
+        .map(|(_, edge)| edge)
+}
+
+pub fn dock_offset(bounds: Bounds, point: (i32, i32), dock: crate::model::Dock, scale: f32, half_extent: f32) -> i32 {
+    let (lo, hi, position) = if dock.is_side() { (bounds.top, bounds.bottom, point.1) }
+        else { (bounds.left, bounds.right, point.0) };
+    let travel = (f64::from(hi - lo)/2.0 - f64::from(half_extent*scale)).max(0.0);
+    if travel == 0.0 { return 0; }
+    let mid = (f64::from(lo) + f64::from(hi))/2.0;
+    let limit = f64::from(crate::model::ISLAND_OFFSET_MAX);
+    (((f64::from(position) - mid)/travel).clamp(-1.0, 1.0)*limit).round() as i32
+}
+
 #[cfg(windows)]
 pub fn connected()->Vec<Display>{
     use windows::{core::PCWSTR,Win32::{Foundation::{BOOL,LPARAM,RECT},Graphics::Gdi::*,UI::WindowsAndMessaging::EDD_GET_DEVICE_INTERFACE_NAME}};
@@ -58,9 +81,14 @@ pub fn island_travel(m:Bounds, scale:f32)->f64 {
 /// 按水平偏移定位：`offset` 为 -1（最左）..0（居中）..1（最右），按可移动范围的比例换算，
 /// 所以换屏、改系统缩放或调整岛体大小后仍保持相同的相对位置。
 pub fn island_origin_offset(m:Bounds, island_width:f32, scale:f32, offset:f32)->Option<(i32,i32)> {
+    island_origin_with_extent(m, island_width, scale, offset, ISLAND_HALF_EXTENT)
+}
+
+pub fn island_origin_with_extent(m:Bounds, island_width:f32, scale:f32, offset:f32, half_extent:f32)->Option<(i32,i32)> {
     let (x,y)=island_origin(m,island_width,scale)?;
     let offset=if offset.is_finite(){offset.clamp(-1.0,1.0)}else{0.0};
-    let shift=(island_travel(m,scale)*offset as f64).round();
+    let travel = ((m.right as f64 - m.left as f64) / 2.0 - f64::from(half_extent * scale)).max(0.0);
+    let shift=(travel*offset as f64).round();
     Some(((x as f64+shift).clamp(i32::MIN as f64,i32::MAX as f64) as i32,y))
 }
 

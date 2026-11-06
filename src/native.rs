@@ -27,7 +27,10 @@ const SUBCLASS_ID: usize = 0x4E55_5341; // "DAOZAI"
 const WS_EX_NOREDIRECTIONBITMAP: isize = 0x0020_0000;
 
 /// 命中区（物理像素，窗口坐标，left/top/right/bottom）。
-static HIT: OnceLock<Mutex<Vec<(i32, i32, i32, i32)>>> = OnceLock::new();
+type HitRects = Vec<(i32, i32, i32, i32)>;
+static WINDOW_HITS: OnceLock<Mutex<std::collections::HashMap<isize, HitRects>>> = OnceLock::new();
+#[cfg(test)]
+static HIT: OnceLock<Mutex<HitRects>> = OnceLock::new();
 /// 前台窗口切到别的进程时置位，由主线程消费。
 static FG_CHANGED: AtomicBool = AtomicBool::new(false);
 
@@ -35,12 +38,29 @@ static FG_CHANGED: AtomicBool = AtomicBool::new(false);
 // 会回 ERROR_INVALID_PARAMETER），本项目用 GL 合成窗口，加上这一位后画面上什么都
 // 看不到，因此不使用；具体见 `apply_style` 注释与交付说明。
 
-fn hit() -> &'static Mutex<Vec<(i32, i32, i32, i32)>> {
+#[cfg(test)]
+fn hit() -> &'static Mutex<HitRects> {
     HIT.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+#[cfg(test)]
 fn inside_hit(x: i32, y: i32) -> bool {
     hit().lock().unwrap_or_else(|e|e.into_inner()).iter().any(|&(l,t,r,b)|x>=l&&x<r&&y>=t&&y<b)
+}
+
+fn window_hits() -> &'static Mutex<std::collections::HashMap<isize, HitRects>> {
+    WINDOW_HITS.get_or_init(Default::default)
+}
+
+fn inside_window_hit(hwnd: HWND, x: i32, y: i32) -> bool {
+    let hits = window_hits().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(rects) = hits.get(&(hwnd.0 as isize)) {
+        return rects.iter().any(|&(l,t,r,b)| x>=l && x<r && y>=t && y<b);
+    }
+    #[cfg(test)]
+    return inside_hit(x, y);
+    #[cfg(not(test))]
+    false
 }
 
 fn file_drag_region(region:(i32,i32,i32,i32),zone:Option<(i32,i32,i32,i32)>,capture:bool)->(i32,i32,i32,i32){
@@ -211,7 +231,7 @@ unsafe extern "system" fn subclass(
         if GetWindowRect(hwnd, &mut rect).is_ok() {
             let px = x - rect.left;
             let py = y - rect.top;
-            return if inside_hit(px, py) {
+            return if inside_window_hit(hwnd, px, py) {
                 LRESULT(HTCLIENT as isize)
             } else {
                 LRESULT(HTTRANSPARENT as isize)
@@ -316,11 +336,26 @@ impl Window {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Option<Self> {
         let RawWindowHandle::Win32(handle) = cc.window_handle().ok()?.as_raw() else { return None };
         let hwnd = HWND(handle.hwnd.get() as *mut _);
+        let opaque_surface=cc.wgpu_render_state.as_ref().is_some_and(|state|state.adapter.get_info().backend==eframe::wgpu::Backend::Dx12);
+        Some(Self::attach(hwnd, &cc.egui_ctx, opaque_surface, true))
+    }
+
+    pub fn attach_viewport(title: &str, ctx: &eframe::egui::Context, opaque_surface: bool) -> Option<Self> {
+        let title: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+        let hwnd = unsafe { FindWindowW(None, windows::core::PCWSTR(title.as_ptr())).ok()? };
+        let mut pid = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)); }
+        (pid == std::process::id()).then(|| Self::attach(hwnd, ctx, opaque_surface, false))
+    }
+
+    pub fn is_alive(&self) -> bool { unsafe { IsWindow(self.hwnd).as_bool() } }
+
+    fn attach(hwnd: HWND, ctx: &eframe::egui::Context, opaque_surface: bool, observe_foreground: bool) -> Self {
         let hook = unsafe {
             apply_style(hwnd, false, false);
             let _=enable_alpha_composition(hwnd);
             let _ = SetWindowSubclass(hwnd, Some(subclass), SUBCLASS_ID, 0);
-            SetWinEventHook(
+            if observe_foreground { SetWinEventHook(
                 EVENT_SYSTEM_FOREGROUND,
                 EVENT_SYSTEM_FOREGROUND,
                 None,
@@ -328,23 +363,28 @@ impl Window {
                 0,
                 0,
                 WINEVENT_OUTOFCONTEXT,
-            )
+            ) } else { HWINEVENTHOOK::default() }
         };
-        let opaque_surface=cc.wgpu_render_state.as_ref().is_some_and(|state|state.adapter.get_info().backend==eframe::wgpu::Backend::Dx12);
-        watch_drag(hwnd,cc.egui_ctx.clone());
-        Some(Self { hwnd, region: (0, 0, 0, 0), expanded: false, hook, browser_state:(None,PollClock::default()), drag_capture:DragCapture::default(), glass:None, backdrop:None, blur:false, blur_unavailable:false, opaque_surface })
+        watch_drag(hwnd,ctx.clone());
+        Self { hwnd, region: (-1, -1, -1, -1), expanded: false, hook, browser_state:(None,PollClock::default()), drag_capture:DragCapture::default(), glass:None, backdrop:None, blur:false, blur_unavailable:false, opaque_surface }
     }
 
     /// 使用目标屏幕的物理坐标定位，并在缩放、岛体大小、水平位置或屏幕连接变化后重新校正。
     /// `scale` 是主窗口的实际像素比（系统 DPI × 岛体大小），画布按它同步调整物理尺寸。
-    pub fn place_on_display(&self, scale:f32, bounds:crate::display_layout::Bounds, offset:f32, dock:crate::model::Dock)->bool {
+    pub fn place_on_display(&self, scale:f32, bounds:crate::display_layout::Bounds, settings:&crate::model::Settings)->bool {
+        self.place_dock(scale, bounds, settings, settings.dock)
+    }
+
+    pub fn place_dock(&self, scale:f32, bounds:crate::display_layout::Bounds, settings:&crate::model::Settings,dock:crate::model::Dock)->bool {
         unsafe {
+            let offset = if dock == settings.dock { settings.island_offset_ratio() } else { 0.0 };
+            let extent = settings.dock_half_extent(dock);
             // 顶部：水平居中 + 水平偏移；左右：贴边 + 竖直偏移，画布换成竖向的大小。
             let origin=if dock.is_side() {
-                crate::display_layout::side_origin(bounds,dock,(crate::side_dock::SIDE_W,crate::side_dock::SIDE_H),crate::side_dock::SIDE_HALF_EXTENT,scale,offset)
-            } else {crate::display_layout::island_origin_offset(bounds,crate::app::WIN_W,scale,offset)};
+                crate::display_layout::side_origin(bounds,dock,(crate::side_dock::SIDE_W,crate::side_dock::SIDE_H),extent,scale,offset)
+            } else {crate::display_layout::island_origin_with_extent(bounds,crate::app::WIN_W,scale,offset,extent)};
             let Some((x,y))=origin else{return false;};
-            let (canvas_w,canvas_h)=if dock.is_side() {(crate::side_dock::SIDE_W,crate::side_dock::SIDE_H)} else {(crate::app::CANVAS_W,crate::app::WIN_H)};
+            let (canvas_w,canvas_h)=if dock.is_side() {(crate::side_dock::SIDE_W,crate::side_dock::SIDE_H)} else {(crate::app::CANVAS_W,settings.top_canvas_height())};
             let (w,h)=((canvas_w*scale).round() as i32,(canvas_h*scale).round() as i32);
             let mut current=RECT::default();
             if GetWindowRect(self.hwnd,&mut current).is_err(){return false;}
@@ -366,6 +406,12 @@ impl Window {
         let mut r=RECT::default();
         unsafe { GetWindowRect(self.hwnd,&mut r).ok()?; }
         Some(eframe::egui::pos2(r.left as f32/scale,r.top as f32/scale))
+    }
+
+    pub fn move_dock_preview(&self, (x, y): (i32, i32)) {
+        unsafe {
+            let _ = SetWindowPos(self.hwnd, None, x, y, 0, 0, SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSIZE);
+        }
     }
 
     pub fn browser_at_top(&mut self,settings:&crate::model::Settings)->Option<bool> {
@@ -405,7 +451,7 @@ impl Window {
         );
         let mut hits=vec![h];
         if let Some((x,y,w,h))=notice_hit {hits.push((px(x),px(y),px(x+w),px(y+h)));}
-        *hit().lock().unwrap_or_else(|e| e.into_inner()) = hits;
+        window_hits().lock().unwrap_or_else(|e|e.into_inner()).insert(self.hwnd.0 as isize, hits);
         // 毛玻璃：合成引擎的模糊块贴合岛体轮廓，窗口区域仍用矩形（含阴影与拖放感应区）。
         let _ = capture;
         match glass.filter(|g|!g.is_empty() && !self.blur_unavailable && !self.opaque_surface) {
@@ -477,6 +523,7 @@ impl Window {
 
 impl Drop for Window {
     fn drop(&mut self) {
+        window_hits().lock().unwrap_or_else(|e|e.into_inner()).remove(&(self.hwnd.0 as isize));
         unsafe {
             let _ = RemoveWindowSubclass(self.hwnd, Some(subclass), SUBCLASS_ID);
             if !self.hook.is_invalid() {

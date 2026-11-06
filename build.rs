@@ -7,6 +7,14 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn find_rc() -> Option<PathBuf> {
+    if let Some(rc) = env::var_os("RC").map(PathBuf::from).filter(|path|path.is_file()) {
+        return Some(rc);
+    }
+    if let Some(paths) = env::var_os("PATH") {
+        if let Some(rc) = env::split_paths(&paths).map(|path|path.join("rc.exe")).find(|path|path.is_file()) {
+            return Some(rc);
+        }
+    }
     let roots = [
         r"C:\Program Files (x86)\Windows Kits\10\bin",
         r"C:\Program Files\Windows Kits\10\bin",
@@ -33,6 +41,7 @@ fn main() {
     println!("cargo:rerun-if-changed=app.rc");
     println!("cargo:rerun-if-changed=assets/daozai.ico");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=RC");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }

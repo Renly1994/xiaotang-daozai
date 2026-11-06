@@ -44,10 +44,29 @@ impl ReminderPicker {
         if date<today{return String::new();}
         match (date-today).num_days(){0=>"今天".into(),1=>"明天".into(),2=>"后天".into(),_=>date.format(if date.year()==today.year(){"%m/%d"}else{"%y/%m/%d"}).to_string()}
     }
-    pub fn draw(&mut self,c:&Card,title:&str,has_reminder:bool)->Option<PickerAction> {
+    pub fn draw_side(&mut self, ui: &mut egui::Ui, has_reminder: bool) -> Option<PickerAction> {
+        use crate::side_pages::form_button;
+        let width = ui.available_width().min(136.0);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 54.0), egui::Sense::hover());
+        let mut card = Card::new(ui, rect.min, ui.clip_rect());
+        card.live = ui.is_enabled();
+        let wheel = card.placed((202.0, 51.0), (0.0, 0.0), width / 169.0);
+        self.draw_wheels(&wheel);
+        if !self.error.is_empty() { ui.colored_label(theme::RED, &self.error); }
+        let mut action = None;
+        ui.horizontal(|ui| {
+            let width = (ui.available_width() - 4.0) / 2.0;
+            if ui.add_sized([width, 24.0], form_button("取消", false)).clicked() { action = Some(PickerAction::Cancel); }
+            if ui.add_sized([width, 24.0], form_button("完成", true)).clicked() { action = self.confirm(); }
+        });
+        if ui.add(form_button(if has_reminder { "取消提醒" } else { "暂不提醒" }, false)).clicked() {
+            action = Some(PickerAction::Skip);
+        }
+        action
+    }
+
+    fn draw_wheels(&mut self, c: &Card) {
         let ctx=c.ui.ctx();
-        c.fill(196.0,31.0,181.0,99.0,11.0,Color32::from_rgb(23,23,25));
-        c.text(204.0,45.0,&c.fit(title,9.5,W::Regular,165.0),9.5,W::Regular,theme::GRAY,H::Left);
         c.fill(202.0,65.0,169.0,24.0,6.0,Color32::from_rgb(42,42,46));
         c.seg((269.0,69.0),(269.0,85.0),0.5,Color32::from_gray(70));
         for y in [74.5,80.0]{c.circle(317.0,y,0.9,theme::WHITE);}
@@ -88,6 +107,21 @@ impl ReminderPicker {
                 clipped.centered_text(x+width/2.0,77.0+distance*18.0,&self.label(column,value),size,if strength>0.7{W::Semibold}else{W::Regular},color,H::Center);
             }
         }
+    }
+
+    fn confirm(&mut self) -> Option<PickerAction> {
+        if self.repeat_note.as_deref().is_none_or(str::is_empty) && self.selected() <= Local::now().naive_local() {
+            self.error = "请选择晚于当前的时间".into();
+            None
+        } else {
+            Some(PickerAction::Save)
+        }
+    }
+
+    pub fn draw(&mut self,c:&Card,title:&str,has_reminder:bool)->Option<PickerAction> {
+        c.fill(196.0,31.0,181.0,99.0,11.0,Color32::from_rgb(23,23,25));
+        c.text(204.0,45.0,&c.fit(title,9.5,W::Regular,165.0),9.5,W::Regular,theme::GRAY,H::Left);
+        self.draw_wheels(c);
         let note=self.repeat_note.as_deref();
         let (label,color)=if !self.error.is_empty(){(self.error.as_str(),theme::RED)}else if let Some(note)=note.filter(|n|!n.is_empty()){(note,theme::BLUE)}else{("已完成",theme::GRAY)};
         let w=c.text(42.0,79.0,label,9.0,W::Regular,color,H::Left);
@@ -99,11 +133,7 @@ impl ReminderPicker {
         c.centered_text(269.5,119.0,"取消",10.0,W::Regular,theme::GRAY,H::Center);
         let (save,b)=capsule(c,307.0,108.0,63.0,20.0,"task-reminder-save",Color32::from_rgb(10,132,255),Color32::from_rgb(35,150,255));
         b.centered_text(338.5,118.0,"完成",10.0,W::Semibold,theme::WHITE,H::Center);
-        if save.clicked(){
-            if self.repeat_note.as_deref().is_none_or(str::is_empty) && self.selected()<=Local::now().naive_local(){self.error="请选择晚于当前的时间".into();}
-            else{return Some(PickerAction::Save);}
-        }
-        None
+        if save.clicked() { self.confirm() } else { None }
     }
 }
 
