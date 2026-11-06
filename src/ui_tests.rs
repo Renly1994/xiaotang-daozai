@@ -59,8 +59,14 @@ fn v0649_settings_and_mail_accounts_survive_upgrade(){
     for _ in 0..2 {
         crate::model::Settings::load().save();
         let saved=std::fs::read_to_string(directory.join("settings.txt")).unwrap();
-        for line in legacy.lines(){assert!(saved.lines().any(|value|value==line),"升级保存不能改变旧设置：{line}");}
+        // 页面开关与页序因新增「设备电量」页需要升级为 9 项，其余旧设置必须逐行保持。
+        for line in legacy.lines().filter(|line|!line.starts_with("visible_pages=")&&!line.starts_with("page_order=")) {
+            assert!(saved.lines().any(|value|value==line),"升级保存不能改变旧设置：{line}");
+        }
     }
+    let migrated=crate::model::Settings::load();
+    assert_eq!(migrated.visible_pages,[true,false,true,true,true,true,true,true,false],"旧页面开关保持，新加的设备电量页默认关闭");
+    assert_eq!(migrated.page_order,[5,2,0,1,3,4,6,7,8],"旧页序保持，新页面排到末尾");
     std::fs::write(directory.join("mail-accounts.json"),br#"[{"email":"OldUser@qq.com","provider":"qq","enabled":true},{"email":"old@icloud.com","provider":"icloud","enabled":false}]"#).unwrap();
     let accounts=crate::mail::load_accounts();
     assert_eq!(accounts.len(),2);assert!(accounts.iter().all(|account|account.custom.is_none()));
@@ -402,6 +408,7 @@ struct H {
     animating:bool,
     shapes:Vec<egui::epaint::ClippedShape>,
     bt: Vec<crate::bt::Device>,
+    devices: Vec<crate::devices::Device>,
     media: crate::smtc::NowPlaying,
     power: (Option<u8>, bool),
     network: Option<bool>,
@@ -418,7 +425,7 @@ impl H {
         std::env::set_var("DAOZAI_DATA_DIR", &dir);
         let ctx = egui::Context::default();
         let app = App::new(&ctx, Options { fetch_lyrics: false, pet_idle: 1e9 });
-        Self { ctx, app, t: 0.0, cursor: None,cmds:vec![],region:Rect::NOTHING,hit:Rect::NOTHING,animating:false,shapes:Vec::new(), bt:Vec::new(),media:Default::default(),power:(None,false),network:None,system_idle:None,browser_at_top:None,file_drop_zone:None,hovered_files:vec![],dropped_files:vec![] }
+        Self { ctx, app, t: 0.0, cursor: None,cmds:vec![],region:Rect::NOTHING,hit:Rect::NOTHING,animating:false,shapes:Vec::new(), bt:Vec::new(),devices:Vec::new(),media:Default::default(),power:(None,false),network:None,system_idle:None,browser_at_top:None,file_drop_zone:None,hovered_files:vec![],dropped_files:vec![] }
     }
     fn frame(&mut self, events: Vec<egui::Event>) {
         self.t += 1.0 / 60.0;
@@ -439,6 +446,7 @@ impl H {
             cursor: self.cursor,
             bt: self.bt.clone(),
             bt_ready: true,
+            devices: self.devices.clone(),
             media:self.media.clone(),
             battery:self.power.0,
             charging:self.power.1,
@@ -1235,6 +1243,20 @@ fn hover_expands_with_overshoot_and_leave_collapses() {
 }
 
 #[test]
+fn hover_grip_keeps_island_open_within_the_edge_margin(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.hover(Pos2::new(WIN_W/2.0,12.0),0.6);
+    assert!(h.app.open);
+    let bottom=h.app.expanded_height();
+    // 光标落在岛体下方 20 px（≤24 px）：保持展开。
+    h.hover(H::local(PW/2.0,bottom+20.0),0.8);
+    assert!(h.app.open,"边缘 24 px 内不应收起");
+    // 下方 60 px 超出安全距离，宽限 350 ms 后才收起。
+    h.hover(H::local(PW/2.0,bottom+60.0),0.8);
+    assert!(!h.app.open,"超过安全距离且宽限结束后应收起");
+}
+
+#[test]
 fn browser_minimal_preserves_preferences_and_restores_the_previous_mode(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.app.settings.pet=true;h.app.settings.minimal=false;h.browser_at_top=Some(true);
@@ -1442,6 +1464,30 @@ fn resident_quotas_coexist_with_music_and_focus(){
 }
 
 #[test]
+fn device_battery_slot_shows_two_lowest_online_and_hides_offline(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    let device=|key:&str,name:&str,level:Option<u8>,offline:bool| -> crate::devices::Device {crate::devices::Device{key:key.into(),name:name.into(),chinese:None,kind:crate::devices::Kind::Mouse,link:crate::devices::Link::Bluetooth,battery:level,present:!offline,online:!offline,missed:0,..crate::devices::Device::default()}};
+    h.devices=vec![
+        device("bt:aa","High",Some(88),false),
+        device("bt:bb","Low",Some(20),false),
+        device("bt:cc","NoBattery",None,false),
+        device("bt:dd","Offline",Some(5),true),
+    ];
+    h.app.settings.device_battery=true;
+    h.app.settings.device_battery_show=vec!["bt:aa".into(),"bt:bb".into(),"bt:cc".into(),"bt:dd".into()];
+    h.frame(vec![]);
+    assert_eq!(h.app.bar_device_slot.items.len(),2,"岛体最多显示两台");
+    assert_eq!(h.app.bar_device_slot.extra,1,"其余设备收进 +N");
+    assert_eq!(h.app.bar_device_slot.items[0].key,"bt:bb","电量低的设备优先");
+    assert!(h.app.resident.target.x[crate::bar_layout::DEVICE].is_some(),"设备槽应排在岛体上");
+    h.app.settings.device_battery=false;h.frame(vec![]);
+    assert!(h.app.bar_device_slot.items.is_empty()&&h.app.resident.target.x[crate::bar_layout::DEVICE].is_none(),"关闭总开关后设备槽必须消失");
+    h.app.settings.device_battery=true;h.app.settings.device_battery_show.clear();h.frame(vec![]);
+    assert!(h.app.bar_device_slot.items.is_empty(),"逐设备开关默认关闭");
+}
+
+#[test]
 fn resident_fifth_account_stays_clear_of_clock_and_opens(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.app.settings.pet=false;h.app.settings.show_battery=false;h.quota_accounts(5);
     for _ in 0..90 {h.frame(vec![]);}
@@ -1560,7 +1606,7 @@ fn quota_accounts_switch_independently_and_hide_with_the_page() {
 fn page_visibility_is_saved_and_sets_the_starting_page() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    assert_eq!(h.app.settings.visible_pages,[true;8]);
+    assert_eq!(h.app.settings.visible_pages,[true,true,true,true,true,true,true,true,false]);
     assert!(h.app.settings.show_battery);
     h.app.settings.show_battery=false;
     h.app.set_page_visible(0,false);
@@ -1568,17 +1614,19 @@ fn page_visibility_is_saved_and_sets_the_starting_page() {
     h.app.settings.save();
     let settings=crate::model::Settings::load();
     assert!(!settings.show_battery);
-    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true]);
+    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true,false]);
     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
     assert_eq!(restarted.page(),1);
     assert_eq!(restarted.settings.visible_pages,settings.visible_pages);
     assert!(!restarted.settings.show_battery);
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=000000\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,false]);
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,false,false]);
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=1000000\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,true],"旧版页面开关应保留，并开启新增的日程页");
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,true,false],"旧版页面开关应保留，并开启新增的日程页；设备电量页默认关闭");
+    std::fs::write(crate::model::config_dir().join("settings.txt"),"page_order=5,2,0,1,3,4,6,7\n").unwrap();
+    assert_eq!(crate::model::Settings::load().page_order,[5,2,0,1,3,4,6,7,8],"旧版页序应追加新页而不打乱既有顺序");
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=invalid\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true;8]);
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,true,true,true,true,true,true,true,false]);
 }
 
 #[test]
@@ -2438,7 +2486,7 @@ fn bluetooth_connection_soon_after_initial_scan_is_not_suppressed(){
     let mut h=H::new();
     h.frame(vec![]);
     h.t=2.0;
-    h.bt=vec![crate::bt::Device{id:"shokz".into(),name:"Shokz".into(),battery:Some(100),kind:crate::bt::DeviceKind::Bone}];
+    h.bt=vec![crate::bt::Device{id:"shokz".into(),name:"Shokz".into(),battery:Some(100),kind:crate::bt::DeviceKind::Bone,..crate::bt::Device::default()}];
     h.frame(vec![]);
     assert_eq!(h.app.notice.as_ref().map(|a|a.title.as_str()),Some("蓝牙设备"));
 }
@@ -2450,7 +2498,7 @@ fn bluetooth_audio_connection_takes_precedence_over_volume_notice(){
         let mut h=H::new();h.frame(vec![]);
         h.app.alert("系统音量","音量 80%",5,false);
         if volume_already_visible {h.frame(vec![]);}
-        h.bt=vec![crate::bt::Device{id:"audio".into(),name:"Shokz".into(),battery:Some(80),kind:crate::bt::DeviceKind::Bone}];
+        h.bt=vec![crate::bt::Device{id:"audio".into(),name:"Shokz".into(),battery:Some(80),kind:crate::bt::DeviceKind::Bone,..crate::bt::Device::default()}];
         h.frame(vec![]);
         assert_eq!(h.app.notice.as_ref().map(|a|a.title.as_str()),Some("蓝牙设备"),"耳机连接应优先于音量提示");
         assert!(!h.app.alerts.iter().any(|a|a.title=="系统音量"),"切换耳机产生的音量提示不应延后补弹");
@@ -2465,7 +2513,7 @@ fn bluetooth_keyboard_connection_keeps_unrelated_volume_notice(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();h.frame(vec![]);
     h.app.alert("系统音量","音量 60%",5,false);h.frame(vec![]);
-    h.bt=vec![crate::bt::Device{id:"keyboard".into(),name:"Keyboard".into(),battery:None,kind:crate::bt::DeviceKind::Keyboard}];h.frame(vec![]);
+    h.bt=vec![crate::bt::Device{id:"keyboard".into(),name:"Keyboard".into(),battery:None,kind:crate::bt::DeviceKind::Keyboard,..crate::bt::Device::default()}];h.frame(vec![]);
     assert_eq!(h.app.notice.as_ref().map(|a|a.title.as_str()),Some("系统音量"));
     assert!(h.app.alerts.iter().any(|a|a.title=="蓝牙设备"));
 }
@@ -2474,8 +2522,8 @@ fn bluetooth_keyboard_connection_keeps_unrelated_volume_notice(){
 fn bluetooth_notices_track_multiple_devices_independently(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    let audio=crate::bt::Device{id:"audio".into(),name:"Shokz".into(),battery:None,kind:crate::bt::DeviceKind::Bone};
-    let keyboard=crate::bt::Device{id:"keyboard".into(),name:"QingLong 87".into(),battery:None,kind:crate::bt::DeviceKind::Keyboard};
+    let audio=crate::bt::Device{id:"audio".into(),name:"Shokz".into(),battery:None,kind:crate::bt::DeviceKind::Bone,..crate::bt::Device::default()};
+    let keyboard=crate::bt::Device{id:"keyboard".into(),name:"QingLong 87".into(),battery:None,kind:crate::bt::DeviceKind::Keyboard,..crate::bt::Device::default()};
     h.bt=vec![audio.clone()];h.frame(vec![]);
     h.bt.push(keyboard.clone());h.t=3.0;h.frame(vec![]);
     let notice=h.app.notice.as_ref().unwrap();
@@ -2793,14 +2841,14 @@ fn hud_shrinks_smoothly_after_expiration(){
 fn bluetooth_badge_follows_connect_and_disconnect(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     // 首次扫描已连接的设备，记录但不作为新连接提醒。
-    h.bt=vec![crate::bt::Device{id:"buds".into(),name:"Buds".into(),battery:Some(80),kind:crate::bt::DeviceKind::Earbuds}];h.frame(vec![]);
+    h.bt=vec![crate::bt::Device{id:"buds".into(),name:"Buds".into(),battery:Some(80),kind:crate::bt::DeviceKind::Earbuds,..crate::bt::Device::default()}];h.frame(vec![]);
     assert!(h.app.notice.is_none());
     assert_eq!(h.app.bt_shown.first().map(|d|d.name.as_str()),Some("Buds"));
     // 之后断开、再连上，各弹一条 HUD 通知。
     h.t=20.0;h.bt.clear();h.frame(vec![]);
     assert_eq!(h.app.notice.as_ref().map(|a|a.body.as_str()),Some("Buds · 已断开"));
     assert!(h.app.bt_shown.is_empty());
-    h.t=30.0;h.bt=vec![crate::bt::Device{id:"buds".into(),name:"Buds".into(),battery:Some(80),kind:crate::bt::DeviceKind::Earbuds}];h.frame(vec![]);
+    h.t=30.0;h.bt=vec![crate::bt::Device{id:"buds".into(),name:"Buds".into(),battery:Some(80),kind:crate::bt::DeviceKind::Earbuds,..crate::bt::Device::default()}];h.frame(vec![]);
     assert_eq!(h.app.notice.as_ref().map(|a|a.body.as_str()),Some("Buds · 电量 80%"));
     // 没有设备时不留残留状态。
     h.t=40.0;h.bt.clear();h.frame(vec![]);
@@ -3419,7 +3467,7 @@ fn ui_alignment_layout_gallery(){
         h.app.mail.recent=(0..3).map(|uid|crate::mail::Item {received_unix: None, account:"product-team@example.com".into(),from:"产品与设计协作团队".into(),subject:"请确认下阶段的设计方案和开发排期，评审前同步最新进度".into(),time:"11-01 09:41".into(),code:if uid==0{Some("123456".into())}else{None},summary:"这是一段邮件正文，需要确认当前需求与后续的产品设计安排。".repeat(20).into(),links:vec![],meeting:None,uid}).collect();
         h.quota_accounts(3);h
     }
-    let collapsed=["collapsed","volume","caps","language","power","network","meeting","meeting-dingtalk","meeting-wecom","bt-headphones","bt-keyboard","bt-mouse","bt-gamepad","bt-phone","bt-other","bt-speaker"];
+    let collapsed=["collapsed","volume","caps","language","power","network","meeting","meeting-dingtalk","meeting-wecom","bt-headphones","bt-keyboard","bt-mouse","bt-gamepad","bt-phone","bt-other","bt-speaker","device-ring","device-capsule"];
     let scenes=["page-0","page-1","page-2","page-3","page-4","page-5","page-6","page-7","lyrics","todo-empty","shelf-empty","mail-empty","mail-detail","reminder","water-chart","focus-running"];
     for ppp in [1.25,2.0]{for name in scenes.into_iter().chain(collapsed){
         let mut h=fixture();let page=name.strip_prefix("page-").and_then(|p|p.parse::<usize>().ok()).unwrap_or(match name{"lyrics"=>0,"shelf-empty"=>3,"mail-empty"|"mail-detail"=>5,_=>4});
@@ -3427,9 +3475,19 @@ fn ui_alignment_layout_gallery(){
         if !collapsed.contains(&name){h.app.show_page(page);}
         if name=="water-chart"{h.app.show_page(2);h.app.water_view=1;h.app.water.drunk_ml=1250;h.app.water.hours[9]=250;h.app.water.hours[8]=500;h.app.water.hours[7]=500;}
         if name=="focus-running"{h.app.show_page(1);h.app.pomo.running=true;h.app.pomo.remaining=1283.0;}
+        if name.starts_with("device-") {
+            use crate::devices::{Device,Kind,Link};
+            h.devices=vec![
+                Device{key:"bt:d200388f9d27".into(),name:"Mi Mouse4P".into(),chinese:Some("小米无线鼠标 4 Pro"),kind:Kind::Mouse,link:Link::Bluetooth,battery:Some(76),route:crate::bt::BatteryRoute::BleGatt,present:true,online:true,missed:0,..crate::devices::Device::default()},
+                Device{key:"usb:3554:fa09".into(),name:"2.4G Wireless Receiver".into(),chinese:Some("RK R98"),kind:Kind::Mouse,link:Link::Usb,battery:None,route:crate::bt::BatteryRoute::Unsupported,present:true,online:true,missed:0,..crate::devices::Device::default()},
+            ];
+            h.app.settings.device_battery=true;
+            h.app.settings.device_battery_show=vec!["bt:d200388f9d27".into(),"usb:3554:fa09".into()];
+            h.app.settings.device_icon_style=if name=="device-capsule"{crate::model::DeviceIconStyle::Capsule}else{crate::model::DeviceIconStyle::Ring};
+        }
         if let Some(kind)=name.strip_prefix("bt-"){
             let kind=match kind{"headphones"=>crate::bt::DeviceKind::Headphones,"keyboard"=>crate::bt::DeviceKind::Keyboard,"mouse"=>crate::bt::DeviceKind::Mouse,"gamepad"=>crate::bt::DeviceKind::Gamepad,"phone"=>crate::bt::DeviceKind::Phone,"speaker"=>crate::bt::DeviceKind::Speaker,_=>crate::bt::DeviceKind::Other};
-            h.app.bluetooth_alert(&crate::bt::Device{id:"preview".into(),name:"我的蓝牙设备 · 超长设备名称与连接状态".into(),battery:Some(100),kind},true);
+            h.app.bluetooth_alert(&crate::bt::Device{id:"preview".into(),name:"我的蓝牙设备 · 超长设备名称与连接状态".into(),battery:Some(100),kind,..crate::bt::Device::default()},true);
         }
         match name{"volume"=>{h.app.volume_ui=Some((64,false));h.app.alert("系统音量","64%",0,false);},"caps"=>h.app.alert("大写锁定","已开启",0,false),"language"=>h.app.alert("键盘输入语言","中文（简体，中国）",0,false),"network"=>h.app.alert("网络连接","Wi-Fi · 网络已连接",0,false),"power"=>h.app.alert("电源已连接","当前电量 76%",0,false),"meeting"=>h.app.meeting_alert(crate::mail::Meeting{ all_day:false,title:"产品方案评审与下阶段开发排期确认".into(),start:chrono::Local::now().timestamp()+600,end:None,at:"11-01 10:00".into(),uid:"preview".into()},"邮件 · product-and-design-team@company-example.com".into(),5),_=>{}}
         if name=="meeting-dingtalk" || name=="meeting-wecom" {
@@ -3441,14 +3499,22 @@ fn ui_alignment_layout_gallery(){
         let (width,height)=((WIN_W*ppp)as u32,(WIN_H*ppp)as u32);let mut raster=crate::preview_raster::Raster::new(width as usize,height as usize);
         for f in 0..90{
             let t=f as f64/60.0;let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(WIN_W,WIN_H))),time:Some(t),viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(ppp),..Default::default()})).collect(),..Default::default()};
-            let env=Env{t,clock:"09:41:00".into(),today:"2026-11-01".into(),date:"11月1日 周日".into(),cursor:if collapsed.contains(&name){None}else{Some(H::local(150.0,40.0))},media:h.media.clone(),battery:h.power.0,bt_ready:true,..Default::default()};
+            let env=Env{t,clock:"09:41:00".into(),today:"2026-11-01".into(),date:"11月1日 周日".into(),cursor:if collapsed.contains(&name){None}else{Some(H::local(150.0,40.0))},media:h.media.clone(),devices:h.devices.clone(),battery:h.power.0,bt_ready:true,..Default::default()};
             let out=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx,|ui|{let win=ui.max_rect();h.app.frame(ui,win,&env);});});raster.update_textures(&out.textures_delta);
             if f==89{raster.buf.fill([0.07,0.09,0.13,1.0]);raster.draw(&h.ctx.tessellate(out.shapes,out.pixels_per_point),out.pixels_per_point);let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);image::save_buffer(dest.join(format!("{name}-{}.png",(ppp*100.0)as u32)),&rgba,width,height,image::ColorType::Rgba8).unwrap();}
             raster.free_textures(&out.textures_delta);
         }
     }}
-    for width in [600.0,690.0]{for tab in 0..12{
+    for width in [600.0,690.0]{for tab in 0..13{
         let mut h=fixture();h.app.settings_tab=tab;h.app.open_settings();h.ctx.set_embed_viewports(false);
+        if tab==12 {
+            use crate::devices::{Device,Kind,Link};
+            h.app.devices=vec![
+                Device{key:"bt:d200388f9d27".into(),name:"Mi Mouse4P".into(),chinese:Some("小米无线鼠标 4 Pro"),kind:Kind::Mouse,link:Link::Bluetooth,battery:Some(76),route:crate::bt::BatteryRoute::BleGatt,present:true,online:true,missed:0,..crate::devices::Device::default()},
+                Device{key:"usb:3554:fa09".into(),name:"2.4G Wireless Receiver".into(),chinese:Some("RK R98"),kind:Kind::Mouse,link:Link::Usb,battery:None,route:crate::bt::BatteryRoute::Unsupported,present:true,online:true,missed:0,..crate::devices::Device::default()},
+                Device{key:"bt:aa1122334455".into(),name:"Tonemay Q6".into(),chinese:None,kind:Kind::Headphones,link:Link::Bluetooth,battery:None,route:crate::bt::BatteryRoute::Pnp,present:false,online:false,missed:7,..crate::devices::Device::default()},
+            ];
+        }
         let size=egui::vec2(width,if width==600.0{450.0}else{560.0});let ppp=1.25;
         let output=std::sync::Arc::new(Mutex::new(None));let capture=output.clone();
         egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{let id=viewport.ids.this;let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,size)),viewports:std::iter::once((id,egui::ViewportInfo{native_pixels_per_point:Some(ppp),focused:Some(true),..Default::default()})).collect(),focused:true,..Default::default()};*capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));});
@@ -3735,10 +3801,10 @@ fn calendar_sync_result_does_not_enqueue_another_sync() {
 fn page_order_persists_and_controls_navigation() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    h.app.settings.page_order=[5,2,0,1,3,4,6,7];
+    h.app.settings.page_order=[5,2,0,1,3,4,6,7,8];
     h.app.settings.save();
     let settings=crate::model::Settings::load();
-    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7]);
+    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7,8]);
     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
     assert_eq!(restarted.page(),5);
     for page in [1,3,4,6,7] {h.app.set_page_visible(page,false);}
@@ -3754,7 +3820,7 @@ fn page_order_persists_and_controls_navigation() {
     assert_eq!(h.app.page,5);
     for invalid in ["0,0,1,2,3,4,5,6","8,1,2,3,4,5,6,7","0,1","invalid"] {
         std::fs::write(crate::model::config_dir().join("settings.txt"),format!("page_order={invalid}\n")).unwrap();
-        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7]);
+        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7,8]);
     }
 }
 
@@ -3781,10 +3847,38 @@ fn page_order_drag_applies_on_release_and_saves() {
     draw(&mut h,vec![egui::Event::PointerMoved(from),button(from,true)]);
     draw(&mut h,vec![egui::Event::PointerMoved(from+egui::vec2(0.0,10.0))]);
     draw(&mut h,vec![egui::Event::PointerMoved(to)]);
-    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7]);
+    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7,8]);
     draw(&mut h,vec![button(to,false)]);
-    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7]);
+    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7,8]);
     assert_eq!(crate::model::Settings::load().page_order,h.app.settings.page_order);
+}
+
+#[test]
+fn device_page_lists_all_devices_and_expands_details_on_hover() {
+    use crate::devices::{Device,Kind,Link};
+    use crate::bt::BatteryRoute;
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.visible_pages[8]=true;
+    h.devices=vec![
+        Device{key:"usb:2717:50fc".into(),name:"Mi Mouse 4 Pro".into(),chinese:Some("小米无线鼠标 4 Pro"),kind:Kind::Mouse,link:Link::Usb,battery:Some(84),route:BatteryRoute::Hid,present:true,online:true,..Device::default()},
+        Device{key:"bt:d200388f9d27".into(),name:"Mi Air3 SE".into(),kind:Kind::Headphones,link:Link::Bluetooth,battery:None,route:BatteryRoute::BleGatt,note:"GATT 超时".into(),present:false,online:false,..Device::default()},
+    ];
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    h.app.show_page(8);h.hover(H::local(200.0,25.0),0.8);
+    assert_eq!(h.app.page,8);
+    let has=|h:&H,text:&str|h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(t) if t.galley.text().contains(text)));
+    assert!(has(&h,"Mi Mouse 4 Pro（小米无线鼠标 4 Pro"));
+    assert!(has(&h,"Mi Air3 SE"),"离线设备按口径保留并灰显在最后");
+    assert!(has(&h,"离线"),"离线设备电量位显示「离线」，与在线无电量的 — 区分");
+    assert!(!has(&h,"—"),"离线设备不显示电量占位符");
+    assert!(!has(&h,"类型：鼠标 · 连接：2.4G · 状态：在线"));
+    // 悬停在线设备：约 0.2 s 缓出展开，详情与诊断出现。
+    h.hover(H::local(150.0,48.0),0.35);
+    assert!(has(&h,"类型：鼠标 · 连接：2.4G · 状态：在线"));
+    assert!(has(&h,"电量：84% · 读取通路：2.4G HID"));
+    // 移出后先保持一小段再收起，不应抖动；离页后详情消失。
+    h.hover(H::local(200.0,25.0),0.5);
+    assert!(!has(&h,"类型：鼠标 · 连接：2.4G · 状态：在线"));
 }
 
 #[test]
@@ -3807,7 +3901,7 @@ fn settings_theme_follows_system_and_preserves_island_style() {
                 viewports:std::iter::once((id,egui::ViewportInfo{native_pixels_per_point:Some(1.0),..Default::default()})).collect(),..Default::default()};
             *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
         });
-        for tab in 0..12 {
+        for tab in 0..13 {
             h.app.settings_tab=tab;
             // AI 额度的添加账号表单默认收起，点「＋ 添加账号」才展开；展开后再检查表单行对齐。
             h.app.quota.connect_open=tab==11;
@@ -4339,7 +4433,7 @@ fn compact_font_atlas_preserves_settings_pixels_at_multiple_scales(){
             *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
         });
         let mut raster=crate::preview_raster::Raster::new((690.0*scale)as usize,(560.0*scale)as usize);let mut result=Vec::new();
-        for tab in 0..12 {h.app.settings_tab=tab;
+        for tab in 0..13 {h.app.settings_tab=tab;
             for frame in 0..3 {
                 let root=h.ctx.run(egui::RawInput{max_texture_side:Some(limit),viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(scale),..Default::default()})).collect(),..Default::default()},|ctx|h.app.settings_ui(ctx,false));
                 let mut child=output.lock().unwrap().take().unwrap();
@@ -4399,7 +4493,7 @@ fn mailbox_compact_fourth_row_is_visible_and_opens_correct_mail(){
 fn bluetooth_switch_clears_notices_and_restarts_with_fresh_baseline(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
-    let device=crate::bt::Device{id:"keyboard".into(),name:"Keyboard".into(),battery:None,kind:crate::bt::DeviceKind::Keyboard};
+    let device=crate::bt::Device{id:"keyboard".into(),name:"Keyboard".into(),battery:None,kind:crate::bt::DeviceKind::Keyboard,..crate::bt::Device::default()};
     h.app.bluetooth_alert(&device,true);h.frame(vec![]);
     h.app.bluetooth_alert(&device,false);
     h.app.settings.bluetooth_notifications=false;h.frame(vec![]);

@@ -8,6 +8,37 @@ pub struct Device {
     pub name: String,
     pub battery: Option<u8>,
     pub kind: DeviceKind,
+    /// 是否为 BLE 设备（决定是否尝试 GATT 电量）。
+    pub le: bool,
+    /// 当前电量来自哪条通路（设置页诊断用）。
+    pub route: BatteryRoute,
+    /// 读取失败原因；成功时为空。
+    pub note: String,
+}
+
+impl Default for Device {
+    fn default() -> Self {
+        Self { id:String::new(), name:String::new(), battery:None, kind:DeviceKind::Mouse, le:false, route:BatteryRoute::Unknown, note:String::new() }
+    }
+}
+
+/// 电量读取通路（仅用于诊断展示）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BatteryRoute { #[default] Unknown, Pnp, BleGatt, Hid, Unsupported }
+
+impl BatteryRoute {
+    pub fn label(self) -> &'static str {
+        match self { Self::Unknown=>"未知", Self::Pnp=>"PnP 缓存", Self::BleGatt=>"BLE GATT", Self::Hid=>"2.4G HID", Self::Unsupported=>"未支持" }
+    }
+}
+
+/// 一次电量扫描的结果（逐设备，含失败原因）。
+#[derive(Clone, Debug)]
+pub struct BatteryReading {
+    pub id: String,
+    pub level: Option<u8>,
+    pub route: BatteryRoute,
+    pub note: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,14 +87,24 @@ impl Device {
 #[derive(Default)]
 struct Cache {devices:Vec<Device>,battery_at:Option<Instant>}
 impl Cache {
-    fn update(&mut self,mut devices:Vec<Device>,now:Instant,read:impl FnOnce(&[Device])->Result<Vec<(String,u8)>,()>)->Vec<Device>{
+    fn update(&mut self,mut devices:Vec<Device>,now:Instant,read:impl FnOnce(&[Device])->Result<Vec<BatteryReading>,()>)->Vec<Device>{
         let changed=devices.len()!=self.devices.len() || devices.iter().any(|d|!self.devices.iter().any(|old|old.id==d.id));
-        for device in &mut devices {device.battery=self.devices.iter().find(|old|old.id==device.id).and_then(|old|old.battery);}
+        for device in &mut devices {
+            if let Some(old)=self.devices.iter().find(|old|old.id==device.id){
+                device.battery=old.battery;device.route=old.route;device.note=old.note.clone();
+            }
+        }
         if devices.is_empty(){self.battery_at=None;}
         else if changed || self.battery_at.is_none_or(|at|now.duration_since(at)>=Duration::from_secs(60)) {
             // 失败同样限频，避免设备驱动异常时每两秒重新枚举整机。
             self.battery_at=Some(now);
-            if let Ok(levels)=read(&devices){for device in &mut devices {device.battery=levels.iter().find(|(id,_)|id==&device.id).map(|(_,level)|*level);}}
+            if let Ok(readings)=read(&devices){
+                for device in &mut devices {
+                    if let Some(reading)=readings.iter().find(|reading|reading.id==device.id){
+                        device.battery=reading.level;device.route=reading.route;device.note=reading.note.clone();
+                    }
+                }
+            }
         }
         self.devices=devices.clone();devices
     }
@@ -129,7 +170,7 @@ fn query(cache:&mut Cache) -> Result<Vec<Device>, ()> {
                 };
                 device_kind(&name,classic,class)
             };
-            devices.push(Device { id: address, kind, name, battery: None });
+            devices.push(Device { id: address, kind, name, battery: None, le: !classic, route: BatteryRoute::Unknown, note: String::new() });
         }
     }
     devices.sort_by(|a,b|a.id.cmp(&b.id));
@@ -137,18 +178,19 @@ fn query(cache:&mut Cache) -> Result<Vec<Device>, ()> {
 }
 
 #[cfg(windows)]
-fn read_batteries(devices:&[Device])->Result<Vec<(String,u8)>,()> {
+fn read_batteries(devices:&[Device])->Result<Vec<BatteryReading>,()> {
     use windows::core::{GUID, PCWSTR};
     use windows::Win32::Devices::DeviceAndDriverInstallation::*;
     use windows::Win32::Devices::Properties::DEVPROPKEY;
     use windows::Win32::Foundation::HWND;
 
     // DEVPKEY_Bluetooth_Battery {104EA319-6EE2-4701-BD47-8DDBF425BBE5}, 2
-    const BATTERY: DEVPROPKEY = DEVPROPKEY {
-        fmtid: GUID::from_u128(0x104ea319_6ee2_4701_bd47_8ddbf425bbe5),
-        pid: 2,
-    };
-    let mut batteries: Vec<(String, u8)> = Vec::new();
+    const FMTID: GUID = GUID::from_u128(0x104ea319_6ee2_4701_bd47_8ddbf425bbe5);
+    const BATTERY: DEVPROPKEY = DEVPROPKEY { fmtid: FMTID, pid: 2 };
+    // 同一 GUID 下的 7 号属性是更新时间；停在旧日期的值就是假电量。
+    const UPDATED: DEVPROPKEY = DEVPROPKEY { fmtid: FMTID, pid: 7 };
+
+    let mut nodes: Vec<(String, Option<u8>, Option<u64>)> = Vec::new();
     unsafe {
         let set = SetupDiGetClassDevsW(None, PCWSTR::null(), HWND::default(), DIGCF_PRESENT | DIGCF_ALLCLASSES)
             .map_err(|_| ())?;
@@ -163,14 +205,100 @@ fn read_batteries(devices:&[Device])->Result<Vec<(String,u8)>,()> {
             let Some(instance) = instance_id(set, &data) else { continue };
             let upper = instance.to_ascii_uppercase();
             if !devices.iter().any(|device|upper.contains(&device.id)){continue;}
-            if let Some(level) = byte_prop(set, &data, &BATTERY).filter(|b| *b <= 100) {
-                batteries.push((upper.clone(), level));
-            }
+            nodes.push((upper, byte_prop(set, &data, &BATTERY), u64_prop(set, &data, &UPDATED)));
         }
         // 每次枚举后释放设备列表句柄。
         let _ = SetupDiDestroyDeviceInfoList(set);
     }
-    Ok(devices.iter().filter_map(|device|batteries.iter().find(|(node,_)|node.contains(&device.id)).map(|(_,level)|(device.id.clone(),*level))).collect())
+    let now = filetime_now();
+    Ok(devices.iter().map(|device| {
+        let matched: Vec<_> = nodes.iter().filter(|(node,_,_)| node.contains(&device.id)).collect();
+        let pnp = matched.iter().find_map(|(_,level,updated)| fresh_pnp_level(*level,*updated,now));
+        let pnp_note = if pnp.is_some() {
+            String::new()
+        } else if matched.iter().any(|(_,level,_)| level.is_some()) {
+            "PnP 缓存已过期".to_string()
+        } else {
+            "PnP 无 Battery 属性".to_string()
+        };
+        let gatt: Result<u8,&'static str> = if device.le {
+            let id = device.id.clone();
+            with_timeout(Duration::from_secs(3), move || gatt_battery(&id))
+        } else {
+            Err("经典蓝牙没有 GATT 电量")
+        };
+        match gatt {
+            Ok(level) => BatteryReading { id:device.id.clone(), level:Some(level), route:BatteryRoute::BleGatt, note:String::new() },
+            Err(gatt_note) => BatteryReading {
+                id:device.id.clone(), level:pnp, route:BatteryRoute::Pnp,
+                note:if pnp.is_some() {format!("GATT：{gatt_note}")} else {format!("GATT：{gatt_note}；{pnp_note}")},
+            },
+        }
+    }).collect())
+}
+
+/// PnP 电量只有在「1..=100 且更新时间不超过 24 小时」时才可信。
+pub(crate) fn fresh_pnp_level(level:Option<u8>,updated:Option<u64>,now:u64)->Option<u8>{
+    const MAX_AGE_100NS:u64=24*60*60*10_000_000;
+    let level=level.filter(|value|(1..=100).contains(value))?;
+    let updated=updated?;
+    (now.saturating_sub(updated)<=MAX_AGE_100NS).then_some(level)
+}
+
+fn filetime_now()->u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed|elapsed.as_secs()*10_000_000+(elapsed.subsec_nanos()/100) as u64+116_444_736_000_000_000)
+        .unwrap_or(0)
+}
+
+/// WinRT 的 `.get()` 没有超时，放到独立线程里等待，避免拖住蓝牙扫描线程。
+#[cfg(windows)]
+fn with_timeout<T:Send+'static>(limit:Duration, task:impl FnOnce()->Result<T,&'static str>+Send+'static)->Result<T,&'static str>{
+    let (tx,rx)=std::sync::mpsc::sync_channel(1);
+    if std::thread::Builder::new().name("daozai-gatt".into()).spawn(move||{let _=tx.send(task());}).is_err(){
+        return Err("无法启动 GATT 线程");
+    }
+    match rx.recv_timeout(limit) {Ok(result)=>result,Err(_)=>Err("GATT 超时")}
+}
+
+#[cfg(windows)]
+fn gatt_battery(id:&str)->Result<u8,&'static str> {
+    use windows::core::{GUID, Interface};
+    use windows::Devices::Bluetooth::{BluetoothCacheMode, BluetoothLEDevice};
+    use windows::Devices::Bluetooth::GenericAttributeProfile::GattCommunicationStatus;
+    use windows::Win32::System::WinRT::IBufferByteAccess;
+
+    const BATTERY_SERVICE: GUID = GUID::from_u128(0x0000180f_0000_1000_8000_00805f9b34fb);
+    const BATTERY_LEVEL: GUID = GUID::from_u128(0x00002a19_0000_1000_8000_00805f9b34fb);
+
+    let address = u64::from_str_radix(id,16).map_err(|_|"设备地址无效")?;
+    // 后台线程没有现成的 COM 套间，显式初始化为 MTA（重复初始化会返回错误，可忽略）。
+    unsafe {let _=windows::Win32::System::WinRT::RoInitialize(windows::Win32::System::WinRT::RO_INIT_MULTITHREADED);}
+    let device = BluetoothLEDevice::FromBluetoothAddressAsync(address).map_err(|_|"创建 BLE 设备失败")?
+        .get().map_err(|_|"连接 BLE 设备失败")?;
+    let services = device.GetGattServicesWithCacheModeAsync(BluetoothCacheMode::Uncached).map_err(|_|"枚举 GATT 服务失败")?
+        .get().map_err(|_|"枚举 GATT 服务超时")?;
+    let service = services.Services().map_err(|_|"读取服务列表失败")?
+        .into_iter().find(|service|service.Uuid().ok()==Some(BATTERY_SERVICE))
+        .ok_or("无 180F 电量服务")?;
+    let characteristics = service.GetCharacteristicsWithCacheModeAsync(BluetoothCacheMode::Uncached).map_err(|_|"枚举电量特征失败")?
+        .get().map_err(|_|"枚举电量特征超时")?;
+    let characteristic = characteristics.Characteristics().map_err(|_|"读取特征列表失败")?
+        .into_iter().find(|characteristic|characteristic.Uuid().ok()==Some(BATTERY_LEVEL))
+        .ok_or("无 2A19 电量特征")?;
+    let value = characteristic.ReadValueWithCacheModeAsync(BluetoothCacheMode::Uncached).map_err(|_|"读取电量失败")?
+        .get().map_err(|_|"读取电量超时")?;
+    if value.Status().map_err(|_|"读取状态不可用")? != GattCommunicationStatus::Success {
+        return Err("读取状态非 Success");
+    }
+    let buffer = value.Value().map_err(|_|"电量值为空")?;
+    let len = buffer.Length().map_err(|_|"电量长度不可用")? as usize;
+    let access:IBufferByteAccess = buffer.cast().map_err(|_|"电量缓冲不可读")?;
+    let data = unsafe {std::slice::from_raw_parts(access.Buffer().map_err(|_|"电量缓冲不可读")?,len)};
+    let level = *data.first().ok_or("电量值为空")?;
+    if !(1..=100).contains(&level) {return Err("电量值无效");}
+    Ok(level)
 }
 
 #[cfg(windows)]
@@ -202,17 +330,36 @@ unsafe fn byte_prop(
     (ty == BYTE && size == 1).then_some(buf[0])
 }
 
+/// 读取 8 字节属性（更新时间可以是 FILETIME 或 UINT64）。
+#[cfg(windows)]
+unsafe fn u64_prop(
+    set: windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO,
+    data: &windows::Win32::Devices::DeviceAndDriverInstallation::SP_DEVINFO_DATA,
+    key: &windows::Win32::Devices::Properties::DEVPROPKEY,
+) -> Option<u64> {
+    use windows::Win32::Devices::DeviceAndDriverInstallation::SetupDiGetDevicePropertyW;
+    use windows::Win32::Devices::Properties::DEVPROPTYPE;
+    const UINT64: DEVPROPTYPE = DEVPROPTYPE(0x9);
+    const FILETIME: DEVPROPTYPE = DEVPROPTYPE(0x10);
+    let mut ty = DEVPROPTYPE::default();
+    let mut buf = [0u8; 8];
+    let mut size = 0u32;
+    SetupDiGetDevicePropertyW(set, data, key, &mut ty, Some(&mut buf), Some(&mut size), 0).ok()?;
+    ((ty == UINT64 || ty == FILETIME) && size == 8).then(|| u64::from_le_bytes(buf))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn device(id:&str)->Device {Device{id:id.into(),name:id.into(),battery:None,kind:DeviceKind::Mouse}}
+    fn device(id:&str)->Device {Device{id:id.into(),name:id.into(),..Device::default()}}
+    fn reading(id:&str,level:Option<u8>)->BatteryReading {BatteryReading{id:id.into(),level,route:BatteryRoute::Pnp,note:String::new()}}
 
     #[test]
     fn idle_bluetooth_does_not_rescan_all_hardware_every_two_seconds(){
         let start=std::time::Instant::now();let mut cache=Cache::default();let mut scans=0;
         for second in (0..360).step_by(2){
-            let found=cache.update(vec![device("AA")],start+Duration::from_secs(second),|_|{scans+=1;Ok(vec![("AA".into(),80)])});
+            let found=cache.update(vec![device("AA")],start+Duration::from_secs(second),|_|{scans+=1;Ok(vec![reading("AA",Some(80))])});
             assert_eq!(found[0].battery,Some(80));
         }
         assert_eq!(scans,6,"六分钟内同一设备的电量扫描应最多每分钟一次");
@@ -221,14 +368,14 @@ mod tests {
     #[test]
     fn bluetooth_connection_change_refreshes_immediately_and_failed_scans_back_off(){
         let now=std::time::Instant::now();let mut cache=Cache::default();
-        cache.update(vec![device("AA")],now,|_|Ok(vec![("AA".into(),80)]));
-        let found=cache.update(vec![device("AA"),device("BB")],now+Duration::from_secs(2),|_|Ok(vec![("AA".into(),79),("BB".into(),60)]));
+        cache.update(vec![device("AA")],now,|_|Ok(vec![reading("AA",Some(80))]));
+        let found=cache.update(vec![device("AA"),device("BB")],now+Duration::from_secs(2),|_|Ok(vec![reading("AA",Some(79)),reading("BB",Some(60))]));
         assert_eq!(found[1].battery,Some(60));
         let found=cache.update(vec![device("AA"),device("BB")],now+Duration::from_secs(62),|_|Err(()));
         assert_eq!(found[0].battery,Some(79));
         cache.update(vec![device("AA"),device("BB")],now+Duration::from_secs(64),|_|panic!("失败后不能立即重复扫描"));
         assert!(cache.update(vec![],now+Duration::from_secs(66),|_|panic!("无设备不能扫描整机")).is_empty());
-        cache.update(vec![device("AA")],now+Duration::from_secs(68),|_|Ok(vec![("AA".into(),78)]));
+        cache.update(vec![device("AA")],now+Duration::from_secs(68),|_|Ok(vec![reading("AA",Some(78))]));
         assert_eq!(cache.devices[0].battery,Some(78));
     }
 
@@ -243,8 +390,19 @@ mod tests {
     }
 
     #[test]
+    fn pnp_battery_needs_a_recent_update_time(){
+        const DAY:u64=24*60*60*10_000_000;
+        let now=1_700_000_000_000_000_000u64;
+        assert_eq!(fresh_pnp_level(Some(2),Some(now-DAY/2),now),Some(2),"近期的值可以采信");
+        assert_eq!(fresh_pnp_level(Some(2),Some(now-200*DAY),now),None,"停在旧日期的假电量必须丢弃");
+        assert_eq!(fresh_pnp_level(Some(2),None,now),None,"没有更新时间也丢弃");
+        assert_eq!(fresh_pnp_level(Some(0),Some(now),now),None,"0 表示未知");
+        assert_eq!(fresh_pnp_level(Some(101),Some(now),now),None,"超出范围");
+    }
+
+    #[test]
     fn summary_omits_missing_battery() {
-        let d = Device { id: "1".into(), name: "Headset".into(), battery: None, kind: DeviceKind::Headphones };
+        let d = Device { id: "1".into(), name: "Headset".into(), kind: DeviceKind::Headphones, ..Device::default() };
         assert_eq!(d.summary(), "Headset");
         let d = Device { battery: Some(80), ..d };
         assert_eq!(d.summary(), "Headset · 电量 80%");

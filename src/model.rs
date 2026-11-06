@@ -1,4 +1,4 @@
-﻿//! 持久化与状态模型。
+//! 持久化与状态模型。
 //!
 //! 文件布局与原工具同名同结构（原工具字符串中可见的路径与键名），但默认目录
 //! 用独立的 `%APPDATA%\Daozai`，避免与原工具的 `%APPDATA%\Nusa` 互相覆盖：
@@ -146,6 +146,27 @@ impl IslandShape {
     }
 }
 
+/// 岛体上设备电量的图标风格。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DeviceIconStyle {
+    #[default]
+    Ring,
+    Capsule,
+}
+
+impl DeviceIconStyle {
+    pub const ALL: [DeviceIconStyle; 2] = [DeviceIconStyle::Ring, DeviceIconStyle::Capsule];
+    pub fn key(self) -> &'static str {
+        match self { Self::Ring => "ring", Self::Capsule => "capsule" }
+    }
+    pub fn parse(value: &str) -> Self {
+        match value { "capsule" => Self::Capsule, _ => Self::Ring }
+    }
+    pub fn label(self) -> &'static str {
+        match self { Self::Ring => "圆环", Self::Capsule => "胶囊" }
+    }
+}
+
 /// 岛体停靠的屏幕边缘：顶部为横向刘海 / 胶囊，左右两侧为竖向排列。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Dock {
@@ -198,10 +219,16 @@ pub struct Settings {
     pub browser_minimal: bool,
     pub avoid_browsers: bool,
     pub avoid_apps: Vec<(String,String)>,
-    pub visible_pages: [bool; 8],
-    pub page_order: [usize; 8],
+    pub visible_pages: [bool; 9],
+    pub page_order: [usize; 9],
     pub show_battery: bool,
+    /// 设备电量：岛体总开关、逐设备开关（按设备 key 保存）、图标风格。
+    pub device_battery: bool,
+    pub device_battery_show: Vec<String>,
+    pub device_icon_style: DeviceIconStyle,
     pub clock_12h: bool,
+    /// 时钟是否带秒；默认关闭（与旧版本行为一致）。
+    pub clock_show_seconds: bool,
     pub clock_period: u8,
     pub resident_order: Vec<usize>,
     pub system_hud: bool,
@@ -241,7 +268,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true }
+        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true,true,true,true,true,true,true,true,false], page_order: [0,1,2,3,4,5,6,7,8], show_battery: true, device_battery: false, device_battery_show: Vec::new(), device_icon_style: DeviceIconStyle::Ring, clock_12h: false, clock_show_seconds: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true }
     }
 }
 
@@ -258,9 +285,17 @@ impl Settings {
 
     pub fn clock_text(&self, clock: &str) -> String {
         use chrono::Timelike;
-        let Ok(time) = chrono::NaiveTime::parse_from_str(clock.get(..5).unwrap_or(""), "%H:%M") else { return "--:--".into(); };
+        let Ok(time) = chrono::NaiveTime::parse_from_str(clock.get(..5).unwrap_or(""), "%H:%M") else {
+            return if self.clock_show_seconds { "--:--:--".into() } else { "--:--".into() };
+        };
         let (pm, hour) = time.hour12();
-        let digits=if self.clock_12h {format!("{}:{:02}",hour,time.minute())}else{time.format("%H:%M").to_string()};
+        let mut digits=if self.clock_12h {format!("{}:{:02}",hour,time.minute())}else{time.format("%H:%M").to_string()};
+        // `env.clock` 是 `HH:MM:SS`；取后两位追加，兼容只传 `HH:MM` 的调用方。
+        if self.clock_show_seconds {
+            if let Some(second)=clock.get(6..8).and_then(|value|value.parse::<u32>().ok()).filter(|value|*value<60) {
+                digits.push_str(&format!(":{second:02}"));
+            }
+        }
         let period=match self.clock_period {
             1=>if pm {"下午"}else{"上午"},
             2=>match time.hour() {0..=5=>"凌晨",6..=10=>"上午",11..=12=>"中午",13..=16=>"下午",17..=18=>"傍晚",_=>"晚上"},
@@ -292,21 +327,31 @@ impl Settings {
                 "avoid_apps" => s.avoid_apps = serde_json::from_str(&v).unwrap_or_default(),
                 "resident_order" => {
                     let order:Vec<usize>=v.split(',').filter_map(|n|n.parse().ok()).collect();
+                    let order=crate::bar_layout::migrate_order(&order);
                     if crate::bar_layout::valid_order(&order){s.resident_order=order;}
                 }
                 "page_order" => {
-                    if let Ok(order)=v.split(',').map(str::parse::<usize>).collect::<Result<Vec<_>,_>>() {
-                        if order.len()==8 && (0..8).all(|page|order.contains(&page)) {
+                    if let Ok(mut order)=v.split(',').map(str::parse::<usize>).collect::<Result<Vec<_>,_>>() {
+                        // 旧档只有 8 页：新页面追加到末尾，避免打乱老用户的既有顺序。
+                        if order.len()==8 && (0..8).all(|page|order.contains(&page)) {order.push(8);}
+                        if order.len()==9 && (0..9).all(|page|order.contains(&page)) {
                             s.page_order.copy_from_slice(&order);
                         }
                     }
                 }
                 "clock_period" => s.clock_period = v.parse::<u8>().ok().filter(|v|*v<=2).unwrap_or(0),
                 "clock_12h" => s.clock_12h = v == "1",
+                "clock_show_seconds" => s.clock_show_seconds = v != "0",
                 "show_battery" => s.show_battery = v != "0",
-                "visible_pages" if (6..=8).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
+                "device_battery" => s.device_battery = v != "0",
+                "device_battery_show" => s.device_battery_show = serde_json::from_str(&v).unwrap_or_default(),
+                "device_icon_style" => s.device_icon_style = DeviceIconStyle::parse(&v),
+                "visible_pages" if (6..=9).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
+                    let len=v.len();
                     for (enabled,value) in s.visible_pages.iter_mut().zip(v.bytes()) { *enabled=value==b'1'; }
-                    for enabled in &mut s.visible_pages[v.len()..]{*enabled=v.bytes().any(|b|b==b'1');}
+                    // 6/7 位旧档：补全已存在的页面；新加的设备电量页默认关闭。
+                    if len<8 {for enabled in &mut s.visible_pages[len..8]{*enabled=v.bytes().any(|b|b==b'1');}}
+                    if len<9 {s.visible_pages[8]=false;}
                 }
                 "read_notifications" => s.read_notifications=v=="1",
                 "wechat_notifications" => s.wechat_notifications=v=="1",
@@ -365,7 +410,11 @@ impl Settings {
                 ("resident_order".into(),self.resident_order.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
                 ("clock_period".into(), self.clock_period.to_string()),
                 ("clock_12h".into(), (self.clock_12h as u8).to_string()),
+                ("clock_show_seconds".into(), (self.clock_show_seconds as u8).to_string()),
                 ("show_battery".into(), (self.show_battery as u8).to_string()),
+                ("device_battery".into(), (self.device_battery as u8).to_string()),
+                ("device_battery_show".into(), serde_json::to_string(&self.device_battery_show).unwrap_or_default()),
+                ("device_icon_style".into(), self.device_icon_style.key().into()),
                 ("read_notifications".into(),(self.read_notifications as u8).to_string()),
                 ("wechat_notifications".into(),(self.wechat_notifications as u8).to_string()),
                 ("wechat_tray_open".into(),(self.wechat_tray_open as u8).to_string()),
@@ -766,6 +815,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn clock_text_supports_optional_seconds(){
+        let mut s=Settings::default();
+        assert!(!s.clock_show_seconds,"显示秒默认关闭，保持旧行为");
+        assert_eq!(s.clock_text("09:05:07"),"09:05");
+        s.clock_show_seconds=true;
+        assert_eq!(s.clock_text("09:05:07"),"09:05:07");
+        assert_eq!(s.clock_text("09:05"),"09:05","没有秒信息时不会补 0");
+        s.clock_12h=true;s.clock_period=1;
+        assert_eq!(s.clock_text("13:04:09"),"下午 1:04:09");
+        assert_eq!(s.clock_text("bad"),"--:--:--");
+    }
+
+    #[test]
     fn island_appearance_values_are_normalized() {
         assert_eq!(island_size_value(100), 100);
         assert_eq!(island_size_value(10), ISLAND_SIZE_MIN);
@@ -776,6 +838,11 @@ mod tests {
         assert_eq!(Skin::parse("unknown"), Skin::Classic);
         assert_eq!(Skin::parse("glass"), Skin::GlassDark, "旧版本保存的毛玻璃即深色毛玻璃");
         for shape in IslandShape::ALL { assert_eq!(IslandShape::parse(shape.key()), shape); }
+        for style in DeviceIconStyle::ALL { assert_eq!(DeviceIconStyle::parse(style.key()), style); }
+        assert_eq!(DeviceIconStyle::parse("unknown"), DeviceIconStyle::Ring);
+        let defaults=Settings::default();
+        assert!(!defaults.device_battery,"设备电量默认关闭");
+        assert!(defaults.device_battery_show.is_empty(),"新设备默认关闭");
         assert_eq!(Settings::default().island_shape, IslandShape::Notch);
         let mut s = Settings::default();
         assert_eq!((s.skin, s.glass_blur, s.island_scale(), s.island_offset_ratio()), (Skin::Classic, true, 1.0, 0.0));

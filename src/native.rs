@@ -492,8 +492,12 @@ impl Drop for Window {
 mod tests {
     use super::*;
 
+    /// 这些用例都会读写进程级 `hit()`，并行跑会互相覆盖，统一串行化。
+    static HIT_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn opaque_surface_clips_black_background_even_without_system_blur(){
+        let _guard=HIT_LOCK.lock().unwrap_or_else(|e|e.into_inner());
         use windows::Win32::Graphics::Gdi::{GetWindowRgn,PtInRegion};
         unsafe {
             let hwnd=CreateWindowExW(WS_EX_TOOLWINDOW,windows::core::w!("STATIC"),windows::core::w!(""),WS_POPUP,-10000,-10000,400,200,None,None,None,None).unwrap();
@@ -571,6 +575,7 @@ mod tests {
 
     #[test]
     fn expanding_raises_the_island_without_activating_it(){
+        let _guard=HIT_LOCK.lock().unwrap_or_else(|e|e.into_inner());
         struct TestWindow(HWND);
         impl Drop for TestWindow {fn drop(&mut self){unsafe{let _=DestroyWindow(self.0);}}}
         unsafe fn above(first:HWND,second:HWND)->bool {
@@ -625,6 +630,7 @@ mod tests {
 
     #[test]
     fn file_capture_below_the_island_still_returns_click_through(){
+        let _guard=HIT_LOCK.lock().unwrap_or_else(|e|e.into_inner());
         unsafe {
             let saved=std::mem::replace(&mut *hit().lock().unwrap_or_else(|e|e.into_inner()),vec![(230,0,410,42)]);
             let hwnd=CreateWindowExW(WS_EX_NOACTIVATE,windows::core::w!("STATIC"),windows::core::w!(""),WS_POPUP,0,0,640,270,None,None,None,None).unwrap();
@@ -641,6 +647,7 @@ mod tests {
 
     #[test]
     fn right_notice_keeps_empty_space_below_the_main_bar_click_through(){
+        let _guard=HIT_LOCK.lock().unwrap_or_else(|e|e.into_inner());
         let saved=std::mem::replace(&mut *hit().lock().unwrap_or_else(|e|e.into_inner()),vec![(100,0,400,30),(372,0,760,96)]);
         assert!(inside_hit(600,70));assert!(inside_hit(200,15));assert!(!inside_hit(200,70));
         *hit().lock().unwrap_or_else(|e|e.into_inner())=saved;
