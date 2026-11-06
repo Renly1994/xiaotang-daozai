@@ -721,10 +721,16 @@ mod tests {
     static CONTROL_TESTS:Mutex<()>=Mutex::new(());
     /// 封面线程全进程最多两个，其中一项测试会故意把它们占满；用到封面线程的测试需要串行，否则并行时会互相抢名额而误报。
     static ARTWORK_TESTS:Mutex<()>=Mutex::new(());
+    /// 上一个测试释放工作对象后，后台线程要稍后才退出并交还名额；开始前先等名额空出来。
+    fn wait_lane_idle(lane:&'static crate::resources::Lane){
+        let until=std::time::Instant::now()+Duration::from_secs(5);
+        while lane.active()>0 && std::time::Instant::now()<until{std::thread::sleep(Duration::from_millis(5));}
+        assert_eq!(lane.active(),0,"{} 名额被其他测试长期占用",lane.name);
+    }
 
     #[test]
     fn queued_seeks_for_the_same_player_run_only_the_latest(){
-        let _serial=CONTROL_TESTS.lock().unwrap_or_else(|e|e.into_inner());
+        let _serial=CONTROL_TESTS.lock().unwrap_or_else(|e|e.into_inner());wait_lane_idle(&crate::resources::CONTROL);
         let (entered,started)=std::sync::mpsc::channel();let (release,wait)=std::sync::mpsc::channel::<()>();
         let handled=Arc::new(Mutex::new(Vec::new()));let log=handled.clone();
         let worker=ControlWorker::start_with(eframe::egui::Context::default(),move|command,source|{
@@ -748,7 +754,7 @@ mod tests {
 
     #[test]
     fn resource_control_queue_stays_bounded_when_the_player_is_stuck(){
-        let _serial=CONTROL_TESTS.lock().unwrap_or_else(|e|e.into_inner());
+        let _serial=CONTROL_TESTS.lock().unwrap_or_else(|e|e.into_inner());wait_lane_idle(&crate::resources::CONTROL);
         let (entered,started)=std::sync::mpsc::channel();let (release,wait)=std::sync::mpsc::channel::<()>();
         let worker=ControlWorker::start_with(eframe::egui::Context::default(),move|_,_|{let _=entered.send(());let _=wait.recv();true}).unwrap();
         worker.submit(Transport::Next,"player".into()).unwrap();started.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -761,6 +767,8 @@ mod tests {
     }
     #[test]
     fn resource_poller_stops_even_when_shared_state_is_still_owned(){
+        // 采样线程会建自己的封面缓存并占用封面名额。
+        let _serial=ARTWORK_TESTS.lock().unwrap_or_else(|e|e.into_inner());wait_lane_idle(&crate::resources::ARTWORK);
         let state=shared();let poller=spawn_poller(state.clone(),eframe::egui::Context::default());
         poller.store(false,std::sync::atomic::Ordering::Relaxed);drop(poller);
         let until=std::time::Instant::now()+Duration::from_secs(5);
@@ -775,7 +783,7 @@ mod tests {
     }
     #[test]
     fn resource_reconnections_cannot_accumulate_blocked_artwork_workers(){
-        let _serial=ARTWORK_TESTS.lock().unwrap_or_else(|e|e.into_inner());
+        let _serial=ARTWORK_TESTS.lock().unwrap_or_else(|e|e.into_inner());wait_lane_idle(&crate::resources::ARTWORK);
         use std::sync::{Condvar,atomic::{AtomicUsize,Ordering}};
         let gate=Arc::new((Mutex::new(false),Condvar::new()));
         let started=Arc::new(AtomicUsize::new(0));
@@ -812,7 +820,7 @@ mod tests {
 
     #[test]
     fn unchanged_cover_does_not_start_a_worker_on_every_poll(){
-        let _serial=ARTWORK_TESTS.lock().unwrap_or_else(|e|e.into_inner());
+        let _serial=ARTWORK_TESTS.lock().unwrap_or_else(|e|e.into_inner());wait_lane_idle(&crate::resources::ARTWORK);
         let mut cache=ArtworkCache::default();
         let now=std::time::Instant::now();
         let calls=Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -827,7 +835,7 @@ mod tests {
 
     #[test]
     fn stable_cover_is_rechecked_rarely_but_a_new_song_starts_fast(){
-        let _serial=ARTWORK_TESTS.lock().unwrap_or_else(|e|e.into_inner());
+        let _serial=ARTWORK_TESTS.lock().unwrap_or_else(|e|e.into_inner());wait_lane_idle(&crate::resources::ARTWORK);
         let mut cache=ArtworkCache::default();
         let now=std::time::Instant::now();
         for _ in 0..3 {cache.get("song".into(),||Some(cover_bytes(eframe::egui::Color32::RED)));}
@@ -843,7 +851,7 @@ mod tests {
 
     #[test]
     fn changing_tracks_reuses_the_cover_worker_without_waiting_for_old_backoff(){
-        let _serial=ARTWORK_TESTS.lock().unwrap_or_else(|e|e.into_inner());
+        let _serial=ARTWORK_TESTS.lock().unwrap_or_else(|e|e.into_inner());wait_lane_idle(&crate::resources::ARTWORK);
         let mut cache=ArtworkCache::default();let mut threads=std::collections::HashSet::new();
         for song in ["first","second","third"] {
             let (tx,rx)=std::sync::mpsc::channel();
@@ -892,7 +900,7 @@ mod tests {
 
     #[test]
     fn slow_cover_does_not_block_metadata_or_replace_a_new_song(){
-        let _serial=ARTWORK_TESTS.lock().unwrap_or_else(|e|e.into_inner());
+        let _serial=ARTWORK_TESTS.lock().unwrap_or_else(|e|e.into_inner());wait_lane_idle(&crate::resources::ARTWORK);
         let mut cache=ArtworkCache::default();
         let (release,wait)=std::sync::mpsc::channel();
         let start=std::time::Instant::now();

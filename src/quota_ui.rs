@@ -472,12 +472,12 @@ impl App {
                 ui.label("连接官网个人账号，查看剩余积分。");
                 ui.horizontal(|ui|{
                     if ui.button("打开官网用量页").clicked(){self.pending.push(Cmd::OpenUrl("https://www.codebuddy.cn/profile/usage".into()));}
-                    if ui.add_enabled(self.quota.workbuddy_connecting.is_none(),egui::Button::new("连接当前浏览器")).clicked(){
+                    if ui.add_enabled(self.quota.workbuddy_connecting.is_none(),egui::Button::new("登录并连接")).clicked(){
                         let expected=self.quota.connect_target.as_ref().and_then(|id|self.quota.config.accounts.iter().find(|a|&a.id==id)).and_then(|a|a.slot.clone());self.quota.note.clear();self.quota.workbuddy_connecting=Some(quota::workbuddy::Connect::start(self.quota.alias.clone(),expected));
                     }
                 });
-                ui.label(egui::RichText::new("首次连接时打开已登录的官网用量页。连接成功后可关闭浏览器。").size(12.0).color(ui.visuals().weak_text_color()));
-                if self.quota.workbuddy_connecting.is_some(){ui.spinner();ui.label("正在验证积分…");ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));}
+                ui.label(egui::RichText::new("自动识别本机登录；需要授权时打开默认浏览器。登录状态加密保存在本机。").size(12.0).color(ui.visuals().weak_text_color()));
+                if self.quota.workbuddy_connecting.is_some(){ui.horizontal(|ui|{ui.spinner();ui.label("请在默认浏览器完成官网登录…");if ui.button("取消").clicked(){self.quota.workbuddy_connecting=None;self.quota.note="已取消 WorkBuddy 连接".into();}});ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));}
             }else if self.quota.provider==Provider::DeepSeek{
                 ui.label("查询 API 账户余额，密钥仅保存在本机。");
                 ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.deepseek_key).password(true).hint_text("粘贴 API Key"));

@@ -365,8 +365,10 @@ impl Window {
                 WINEVENT_OUTOFCONTEXT,
             ) } else { HWINEVENTHOOK::default() }
         };
+        // 首帧（包括启动即隐藏的空区域）也必须触发 SetWindowRgn，避免透明画布拦截点击。
+        let region=(i32::MIN, 0, 0, 0);
         watch_drag(hwnd,ctx.clone());
-        Self { hwnd, region: (-1, -1, -1, -1), expanded: false, hook, browser_state:(None,PollClock::default()), drag_capture:DragCapture::default(), glass:None, backdrop:None, blur:false, blur_unavailable:false, opaque_surface }
+        Self { hwnd, region, expanded: false, hook, browser_state:(None,PollClock::default()), drag_capture:DragCapture::default(), glass:None, backdrop:None, blur:false, blur_unavailable:false, opaque_surface }
     }
 
     /// 使用目标屏幕的物理坐标定位，并在缩放、岛体大小、水平位置或屏幕连接变化后重新校正。

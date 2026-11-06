@@ -52,6 +52,28 @@ fn create_backdrop_window() -> windows::core::Result<HWND> {
     }
 }
 
+/// 把底板窗口裁成模糊块的并集。底板和岛仔画布一样大，而 `HTTRANSPARENT`
+/// 只把点击让给同一线程的窗口：不裁剪时，画布范围内（含岛右侧和下方大片空白）
+/// 其他程序的标题栏按钮等都会点不动，直到退出岛仔。
+fn clip_to_pieces(hwnd: HWND, pieces: &[BlurPiece]) {
+    use windows::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, SetWindowRgn, RGN_OR};
+    unsafe {
+        let all = CreateRectRgn(0, 0, 0, 0);
+        if all.0.is_null() { return; }
+        for p in pieces {
+            let (l, t) = (p.x.floor() as i32, p.y.floor() as i32);
+            let (r, b) = ((p.x + p.w).ceil() as i32, (p.y + p.h).ceil() as i32);
+            let d = (p.radius * 2.0).round() as i32;
+            let part = CreateRoundRectRgn(l, t, r + 1, b + 1, d, d);
+            if part.0.is_null() { continue; }
+            let _ = CombineRgn(all, all, part, RGN_OR);
+            let _ = DeleteObject(part);
+        }
+        // 成功后区域归系统所有，不能再删除。
+        if SetWindowRgn(hwnd, all, true) == 0 { let _ = DeleteObject(all); }
+    }
+}
+
 pub struct Backdrop {
     hwnd: HWND,
     placed: (RECT, bool),
@@ -138,6 +160,7 @@ impl Backdrop {
                     None => visual.SetIsVisible(false)?,
                 }
             }
+            clip_to_pieces(self.hwnd, pieces);
             self.shown = pieces.to_vec();
         }
         if !self.visible {
@@ -162,5 +185,30 @@ impl Backdrop {
 impl Drop for Backdrop {
     fn drop(&mut self) {
         unsafe { let _ = DestroyWindow(self.hwnd); }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject, GetWindowRgn, PtInRegion};
+
+    #[test]
+    fn backdrop_only_covers_the_blur_pieces_so_other_apps_stay_clickable() {
+        let hwnd = create_backdrop_window().unwrap();
+        unsafe {
+            let _ = SetWindowPos(hwnd, None, 0, 0, 960, 270, SWP_NOACTIVATE | SWP_NOZORDER);
+            clip_to_pieces(hwnd, &[BlurPiece { x: 230.0, y: 0.0, w: 180.0, h: 34.0, radius: 12.0 }]);
+            let region = CreateRectRgn(0, 0, 0, 0);
+            assert_ne!(GetWindowRgn(hwnd, region).0, 0, "底板必须带窗口区域");
+            assert!(PtInRegion(region, 320, 17).as_bool(), "岛体下方仍要显示模糊");
+            assert!(!PtInRegion(region, 800, 150).as_bool(), "画布右侧空白处必须让给下层程序");
+            assert!(!PtInRegion(region, 320, 200).as_bool(), "岛下方空白处必须让给下层程序");
+            clip_to_pieces(hwnd, &[]);
+            GetWindowRgn(hwnd, region);
+            assert!(!PtInRegion(region, 320, 17).as_bool(), "没有模糊块时不能占任何区域");
+            let _ = DeleteObject(region);
+            let _ = DestroyWindow(hwnd);
+        }
     }
 }

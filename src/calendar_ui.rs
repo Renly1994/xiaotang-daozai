@@ -37,9 +37,14 @@ fn calendar_now(env: &Env) -> i64 {
         .unwrap_or_else(|| chrono::Local::now().timestamp())
 }
 
-fn occurs_on(event:&mail::Meeting,day:NaiveDate)->bool {
-    let Some(start)=event_day(event) else{return false;};
+fn event_days(event:&mail::Meeting)->Option<(NaiveDate,NaiveDate)> {
+    let start=event_day(event)?;
     let last=event.end.and_then(|end|chrono::DateTime::from_timestamp(end-1,0)).map(|at|at.with_timezone(&chrono::Local).date_naive()).unwrap_or(start);
+    Some((start,last))
+}
+
+fn occurs_on(event:&mail::Meeting,day:NaiveDate)->bool {
+    let Some((start,last))=event_days(event) else{return false;};
     start<=day && day<=last
 }
 
@@ -234,6 +239,14 @@ mod tests {
 }
 
 impl App {
+    pub(crate) fn calendar_scroll_max(&self,env:&Env)->usize{
+        let now=calendar_now(env);
+        let events:Vec<_>=self.calendar_entries(self.calendar.view.day).into_iter()
+            .filter(|entry|self.calendar.view.show_ended || !has_ended(entry.event,now)).collect();
+        let featured=featured_index(&events,self.calendar.view.focus.as_deref(),now).is_some();
+        events.len().saturating_sub(usize::from(featured)+4)
+    }
+
     pub(crate) fn mail_event_ignored(&self,event:&mail::Meeting)->bool {
         self.settings.ignored_mail_events.contains(&calendar::dedupe_key(event))
     }
@@ -299,12 +312,14 @@ impl App {
                 .map(|event| (event, Source::Mail(item.account.as_str())))
         });
         let mut events: Vec<Entry<'_>>=vec![];
+        let mut seen=std::collections::HashMap::<String,usize>::new();
         let local=self.calendar.local.iter().map(|entry|(&entry.event,Source::Local));
         for (event,source) in work.chain(mail).chain(local).filter(|(event,_)|occurs_on(event,day)) {
-            if let Some(entry)=events.iter_mut().find(|entry|entry_key(entry.event)==entry_key(event)) {
+            let key=entry_key(event);
+            if let Some(&index)=seen.get(&key) {
+                let entry=&mut events[index];
                 if !entry.sources.contains(&source){entry.sources.push(source);}
-            }else{events.push(Entry{event,sources:vec![source],
-                });}
+            }else{seen.insert(key,events.len());events.push(Entry{event,sources:vec![source]});}
         }
         events.sort_by(|a,b|{
             (!a.event.all_day,a.event.start,&a.event.title,&a.event.uid,
@@ -312,14 +327,6 @@ impl App {
                 ))
         });
         events
-    }
-
-    pub(crate) fn calendar_scroll_max(&self, env: &Env) -> usize {
-        let now = calendar_now(env);
-        let mut events = self.calendar_entries(self.calendar.view.day);
-        events.retain(|entry| self.calendar.view.show_ended || !has_ended(entry.event, now));
-        let featured = featured_index(&events, self.calendar.view.focus.as_deref(), now).is_some();
-        events.len().saturating_sub(if featured { 3 } else { 4 })
     }
 
     pub(crate) fn page_calendar(&mut self,c:&Card,env:&Env) {
@@ -350,11 +357,18 @@ impl App {
         let work=self.calendar_work_events(Some(self.calendar.view.month)).into_iter().map(|(event,provider)|(event,Source::Calendar(provider)));
         let mail=self.mail.recent.iter().filter_map(|item|{
             item.meeting.as_ref().filter(|event|!self.mail_event_ignored(event)).map(|event|(event,Source::Mail(item.account.as_str())))});
+        let grid=calendar::month_grid(self.calendar.view.month);
         let mut dots:std::collections::HashMap<NaiveDate,Vec<Source<'_>>>=std::collections::HashMap::new();
         let local=self.calendar.local.iter().map(|entry|(&entry.event,Source::Local));
-        for (event,source) in work.chain(mail).chain(local){for date in calendar::month_grid(self.calendar.view.month){if occurs_on(event,date){dots.entry(date).or_default().push(source);}}}
+        for (event,source) in work.chain(mail).chain(local) {
+            let Some((start,last))=event_days(event) else{continue;};
+            if last<grid[0] || start>grid[41]{continue;}
+            for date in grid.iter().filter(|date|start<=**date && **date<=last) {
+                dots.entry(*date).or_default().push(source);
+            }
+        }
         let dots:std::collections::HashMap<_,_>=dots.into_iter().map(|(date,sources)|(date,marker_colors(&sources))).collect();
-        for (i,date) in calendar::month_grid(self.calendar.view.month).iter().enumerate() {
+        for (i,date) in grid.iter().enumerate() {
             let x=34.0+(i%7) as f32*17.5;let y=77.0+(i/7) as f32*14.0;
             let selected=*date==self.calendar.view.day;
             let hit=c.hit(x-8.75,y-7.0,17.5,14.0,("calendar-day",date));

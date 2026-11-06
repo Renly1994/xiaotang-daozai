@@ -261,6 +261,71 @@ fn local_calendar_failed_save_keeps_draft_and_does_not_change_events() {
 }
 
 #[test]
+#[ignore="按需测量 ICS 导入后日历页的绘制耗时"]
+fn imported_ics_calendar_frame_cost() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for (count,same_day) in [(0,false),(100,false),(1000,false),(1000,true),(5000,true)] {
+        let mut h=H::new();h.app.settings.pet=false;
+        let start=chrono::Local::now().date_naive().and_hms_opt(12,0,0).unwrap().and_local_timezone(chrono::Local).earliest().unwrap().with_timezone(&chrono::Utc);
+        let mut ics=String::from("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n");
+        for index in 0..count {
+            let at=start+chrono::Duration::days(if same_day {0} else {index%365});
+            ics.push_str(&format!("BEGIN:VEVENT\r\nUID:import-{index}\r\nSUMMARY:导入日程 {index}\r\nDTSTART:{}\r\nDTEND:{}\r\nEND:VEVENT\r\n",at.format("%Y%m%dT%H%M%SZ"),(at+chrono::Duration::hours(1)).format("%Y%m%dT%H%M%SZ")));
+        }
+        ics.push_str("END:VCALENDAR\r\n");
+        let at=std::time::Instant::now();h.app.import_ics(&[("sample.ics".into(),ics)]);let import=at.elapsed();
+        assert_eq!(h.app.calendar.local.len(),count as usize);
+        h.app.open_calendar(None);h.hover(H::local(300.0,40.0),0.2);
+        let at=std::time::Instant::now();for _ in 0..3 {h.frame(vec![]);}let frames=at.elapsed()/3;
+        h.app.show_page(0);h.hover(H::local(300.0,40.0),0.2);
+        let at=std::time::Instant::now();for _ in 0..3 {h.frame(vec![]);}let other=at.elapsed()/3;
+        println!("count={count} same_day={same_day} import_ms={:.2} calendar_frame_ms={:.2} other_frame_ms={:.2}",import.as_secs_f64()*1000.0,frames.as_secs_f64()*1000.0,other.as_secs_f64()*1000.0);
+    }
+}
+
+#[test]
+fn ics_import_preserves_recurring_overnight_and_all_day_events_on_reimport() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    let day=chrono::Local::now().date_naive();
+    let utc=|hour,minute|day.and_hms_opt(hour,minute,0).unwrap().and_local_timezone(chrono::Local).earliest().unwrap().with_timezone(&chrono::Utc);
+    let start=utc(12,0);let overnight=utc(23,30);
+    let ics=format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:daily\r\nSUMMARY:每日安排\r\nDTSTART:{}\r\nDTEND:{}\r\nRRULE:FREQ=DAILY;COUNT=3\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:overnight\r\nSUMMARY:跨夜安排\r\nDTSTART:{}\r\nDTEND:{}\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:all-day\r\nSUMMARY:两天休假\r\nDTSTART;VALUE=DATE:{}\r\nDTEND;VALUE=DATE:{}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",start.format("%Y%m%dT%H%M%SZ"),(start+chrono::Duration::hours(1)).format("%Y%m%dT%H%M%SZ"),overnight.format("%Y%m%dT%H%M%SZ"),(overnight+chrono::Duration::hours(1)).format("%Y%m%dT%H%M%SZ"),day.format("%Y%m%d"),(day+chrono::Duration::days(2)).format("%Y%m%d"));
+    let files=vec![("sample.ics".into(),ics)];
+    h.app.import_ics(&files);assert_eq!(h.app.calendar.local.len(),5);
+    h.app.import_ics(&files);assert_eq!(h.app.calendar.local.len(),5,"重复导入应跳过已有日程");
+    h.app.calendar.local=crate::local_calendar::load().unwrap();
+    assert_eq!(h.app.calendar_entries(day).len(),3);
+    assert_eq!(h.app.calendar_entries(day+chrono::Duration::days(1)).len(),3);
+    assert_eq!(h.app.calendar_entries(day+chrono::Duration::days(2)).len(),1);
+    assert!(h.app.calendar_entries(day+chrono::Duration::days(3)).is_empty());
+}
+
+#[test]
+fn local_calendar_editor_makes_storage_scope_visible_with_connected_accounts() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    let cfg=crate::calendar::Config{provider:crate::calendar::Provider::Feishu,username:"test".into(),href:None,server:None};
+    crate::calendar::save_config(&cfg).unwrap();h.app.calendar=crate::app::CalendarState::load();
+    let remote=crate::mail::Meeting{all_day:false,title:"飞书会议".into(),start:chrono::Local::now().timestamp()+3600,end:None,at:String::new(),uid:"remote-event".into()};
+    h.app.calendar.events.push(remote.clone());
+    h.app.open_calendar(None);h.hover(H::local(300.0,40.0),1.0);
+    h.click(H::local(124.0,18.0));h.hover(H::local(300.0,40.0),0.3);
+    assert!(h.app.calendar.draft.is_some());
+    let visible=|h:&H,text:&str|h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(t) if t.galley.text()==text));
+    assert!(visible(&h,"仅保存在本机"));assert!(visible(&h,"保存到本机"));
+    h.click(H::local(334.0,199.0));h.frame(vec![]);
+    assert!(!h.app.calendar.draft.as_ref().unwrap().error.is_empty());
+    assert!(visible(&h,"仅保存在本机"),"填写错误时仍需说明保存范围");
+    h.app.calendar.draft.as_mut().unwrap().title="自己的安排".into();
+    h.click(H::local(334.0,199.0));h.frame(vec![]);
+    assert!(h.app.calendar.draft.is_none());assert_eq!(h.app.calendar.local.len(),1);
+    assert_eq!(crate::local_calendar::load().unwrap()[0].event.title,"自己的安排");
+    assert_eq!(h.app.calendar.events.len(),1);assert_eq!(h.app.calendar.events[0].uid,remote.uid);
+    assert_eq!(crate::calendar::load_config().unwrap(),cfg);
+    let uid=h.app.calendar.local[0].event.uid.clone();h.app.open_calendar_editor(Some(&uid));h.frame(vec![]);
+    assert!(visible(&h,"仅保存在本机"));assert!(visible(&h,"保存到本机"));
+}
+
+#[test]
 fn local_calendar_can_create_edit_reload_and_remind_without_accounts() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.app.open_calendar(None);h.app.open_calendar_editor(None);
@@ -951,6 +1016,10 @@ fn kugou_missing_lyrics_rechecks_late_cache_without_flashing_loading() {
     tx.send(Err(crate::lyrics::FetchError::NotFound)).unwrap();h.frame(vec![]);
     let retry=h.app.ly.retry_at.expect("酷狗尚未写入缓存时仍需自动检查");
     assert!((retry-h.t-5.0).abs()<0.001);
+    // 歌词通道全进程只有 1 个名额，前面测试的歌词线程可能还在查网络；占着时这一帧会直接跳过。
+    let until=std::time::Instant::now()+std::time::Duration::from_secs(20);
+    while crate::resources::LYRICS.active()>0 && std::time::Instant::now()<until{std::thread::sleep(std::time::Duration::from_millis(10));}
+    assert_eq!(crate::resources::LYRICS.active(),0,"歌词名额被其他测试长期占用");
     h.t=retry+0.1;h.frame(vec![]);
     assert!(!h.app.ly.loading,"检查本机缓存不能反复闪出加载提示");
     assert_eq!(h.app.ly.error,Some(crate::lyrics::FetchError::NotFound));
@@ -1450,7 +1519,7 @@ fn wheel_clipboard_stays_at_both_edges() {
     let mut h=H::new();
     h.app.show_page(3);
     h.app.shelf_tab=1;
-    for count in [0, 1, crate::pages::CLIP_ROWS+1] {
+    for count in [crate::pages::CLIP_ROWS+1] {
         h.app.clipboard.lock().items.clear();
         for i in 0..count { h.app.clipboard.lock().push(&i.to_string(), "09:00"); }
         let last=count.saturating_sub(crate::pages::CLIP_ROWS);
@@ -2155,6 +2224,72 @@ fn mascot_expression_gallery(){
         }
     }
     eprintln!("表情预览：{}",dest.display());
+}
+#[test]
+fn minimal_island_hides_messenger_notices_until_expanded(){
+    // 群友截图：极简刘海下来电 / 新消息后，细线变成带微信图标的方块。极简刘海照常弹横幅，收起后只留细线，未读不常挂。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    use crate::app::Messenger;
+    for (source,shape) in [(Messenger::Wechat,crate::model::IslandShape::Notch),(Messenger::Wechat,crate::model::IslandShape::Pill),(Messenger::Qq,crate::model::IslandShape::Pill)] {
+        let mut h=H::new();
+        h.app.settings.wechat_notifications=true;h.app.settings.read_notifications=true;h.app.settings.minimal=true;h.app.settings.island_shape=shape;
+        for _ in 0..60 {h.frame(vec![]);}
+        let idle=h.region;
+        match source {
+            Messenger::Wechat=>h.app.receive_wechat_reminder_from(4242,0x1234),
+            Messenger::Qq=>h.app.receive_notification("QQ".into(),"QQ".into(),"QQ · 新消息".into()),
+        }
+        for _ in 0..30 {h.frame(vec![]);}
+        assert!(h.app.notice.as_ref().and_then(|a|a.messenger())==Some(source),"{source:?} {shape:?}：极简刘海照常弹横幅");
+        for _ in 0..(8*60) {h.frame(vec![]);}
+        assert!(h.app.notice.is_none(),"{source:?}：横幅按时收起");
+        assert_eq!(h.app.pending_messengers.len(),1,"{source:?}：未读仍要记住");
+        assert_eq!(h.region,idle,"{source:?} {shape:?}：收起时仍只有细线");
+        // 鼠标移上去展开：未读胶囊出现在面板旁，可以点。
+        h.hover(Pos2::new(WIN_W/2.0,2.0),0.8);h.hover(Pos2::new(WIN_W/2.0,40.0),1.0);
+        assert!(h.app.open && h.app.progress()>0.9,"{source:?}：悬停应展开");
+        assert!(h.app.messenger_appear()>0.9 && h.app.pending_messengers.len()==1,"{source:?}：展开后未读胶囊在面板旁显示");
+    }
+}
+/// 微信语音来电：响铃期间任务栏持续闪动，按秒渲染岛体，排查样式问题。
+#[test]
+#[ignore="生成来电响铃时的岛体逐帧画面，供人工查看"]
+fn preview_wechat_call_ringing(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::env::var_os("DAOZAI_CALL_PREVIEW_DIR").map(std::path::PathBuf::from)
+        .unwrap_or_else(||std::env::temp_dir().join(format!("daozai-call-preview-{}",std::process::id())));
+    std::fs::create_dir_all(&dest).unwrap();
+    // 单条提醒 / 响铃期间反复提醒 / 来电窗口在另一个进程里（被当成第二个账号）。
+    for (scenario,minimal) in [("single",false),("single",true),("ringing",false),("ringing",true),("twoproc",false),("twoproc",true)] {
+        let mode=format!("{scenario}-{}",if minimal{"minimal"}else{"normal"});
+        let mut h=H::new();h.app.settings.wechat_notifications=true;h.app.settings.minimal=minimal;
+        let mut raster=crate::preview_raster::Raster::new(1280,380);
+        for frame in 0..=(16*60) {
+            let t=frame as f64/60.0;
+            match scenario {
+                "single" if frame==60=>h.app.receive_wechat_reminder_from(4242,0x1234),
+                "ringing" if frame>=60 && t<12.0 && frame%330==60=>h.app.receive_wechat_reminder_from(4242,0x1234),
+                "twoproc" if frame==60=>h.app.receive_wechat_reminder_from(4242,0x1234),
+                "twoproc" if frame==120=>h.app.receive_wechat_reminder_from(4343,0x5678),
+                _=>{}
+            }
+            let env=Env{t,clock:"09:41:00".into(),today:"2026-10-31".into(),date:"10月31日 周六".into(),..Default::default()};
+            let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(WIN_W,WIN_H))),time:Some(t),
+                viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};
+            let output=h.ctx.run(raw,|ctx|{
+                egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{let win=ui.max_rect();h.app.frame(ui,win,&env);});
+            });
+            raster.update_textures(&output.textures_delta);
+            if frame%60==0 {
+                raster.buf.fill([0.09,0.11,0.18,1.0]);
+                raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);
+                let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+                image::save_buffer(dest.join(format!("{mode}-{:04.1}s.png",t)),&rgba,1280,380,image::ColorType::Rgba8).unwrap();
+            }
+            raster.free_textures(&output.textures_delta);
+        }
+    }
+    eprintln!("来电预览：{}",dest.display());
 }
 #[test]
 fn todo_due_roundtrip_and_fires_only_once(){
@@ -5623,4 +5758,33 @@ fn shelf_menu_last_action_fits_inside_window_and_works(){
     assert!(h.app.open);
     h.click(label.center());
     assert!(h.app.shelf.items.is_empty());
+}
+
+#[test]
+fn wheel_short_clipboard_and_calendar_turn_pages(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    for count in [0,1,crate::pages::CLIP_ROWS]{
+        h.app.clipboard.lock().items.clear();
+        for i in 0..count{h.app.clipboard.lock().push(&i.to_string(),"09:00");}
+        for (delta,page) in [(-40.0,4),(40.0,2)]{
+            h.app.show_page(3);h.app.shelf_tab=1;h.hover(H::local(300.0,60.0),0.5);h.wheel(delta);
+            assert_eq!(h.app.page,page,"剪贴板未溢出应翻页，条数 {count}");
+        }
+    }
+    let day=chrono::NaiveDate::from_ymd_opt(2026,10,28).unwrap();
+    let start=day.and_hms_opt(10,0,0).unwrap().and_local_timezone(chrono::Local).earliest().unwrap().timestamp();
+    h.app.calendar.view.day=day;h.app.calendar.view.month=crate::calendar::month_start(day);h.app.calendar.view.loaded=Some(h.app.calendar.view.month);
+    for (count,ended,all_day) in [(0,false,false),(1,false,false),(5,false,false),(8,true,false),(4,false,true)]{
+        h.app.calendar.view.events=(0..count).map(|i|crate::mail::Meeting{all_day,title:format!("日程 {i}"),start:if ended{start-7200}else{start+i*60},end:Some(if ended{start-3600}else{start+3600}),at:String::new(),uid:format!("wheel-{i}")}).collect();
+        for (delta,page) in [(-40.0,0),(40.0,6)]{
+            h.app.show_page(7);h.hover(H::local(300.0,160.0),0.5);h.wheel(delta);
+            assert_eq!(h.app.page,page,"日历可见列表未溢出应翻页，条数 {count}");
+        }
+    }
+    h.app.calendar.view.events=(0..6).map(|i|crate::mail::Meeting{all_day:false,title:format!("日程 {i}"),start:start+i*60,end:Some(start+3600),at:String::new(),uid:format!("wheel-long-{i}")}).collect();
+    h.app.show_page(7);
+    for (delta,first) in [(40.0,0),(-40.0,1),(-40.0,1),(40.0,0),(40.0,0)]{
+        h.hover(H::local(300.0,160.0),0.5);h.wheel(delta);
+        assert_eq!(h.app.page,7,"日历溢出后边界也应留在本页");assert_eq!(h.app.calendar.view.first,first);
+    }
 }

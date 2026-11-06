@@ -396,13 +396,14 @@ fn plausible(v: &str) -> bool {
 pub struct Failure {
     pub status: Option<u16>,
     pub message: String,
+    request_url: Option<String>,
 }
 
 impl Failure {
     fn status(provider: Provider, code: u16) -> Self {
         let message = match code {
-            401 if provider.custom_server() => "用户名或密码不对，请核对账号和密码".to_string(),
-            401 => format!("用户名或密码不对，请回{}重新生成一次", provider.label()),
+            401 if provider.custom_server() => "验证账号失败（401），请核对用户名和密码".to_string(),
+            401 => format!("验证账号失败（401），请核对用户名和{}提供的专用密码", provider.label()),
             403 => "日历服务器拒绝访问（403），请核对同步地址、专用密码及日历授权".to_string(),
             404 => "服务器地址不对（404）".to_string(),
             405 => "当前地址不支持日历同步（405），请核对平台提供的 CalDAV 地址".to_string(),
@@ -411,15 +412,25 @@ impl Failure {
             500..=599 => format!("服务器出错（{code}），稍后再试"),
             _ => format!("服务器返回 {code}"),
         };
-        Self { status: Some(code), message }
+        Self { status: Some(code), message, request_url: None }
+    }
+
+    fn at_url(mut self, url: &url::Url) -> Self {
+        self.request_url = Some(url.to_string());
+        self
+    }
+
+    fn at_stage(mut self, stage: &str) -> Self {
+        if self.status != Some(401) { self.message = format!("{stage}失败，{}", self.message); }
+        self
     }
 
     fn transport(_detail: &str) -> Self {
-        Self { status: None, message: "连不上服务器，检查网络".into() }
+        Self { status: None, message: "连不上服务器，检查网络".into(), request_url: None }
     }
 
     fn text(message: impl Into<String>) -> Self {
-        Self { status: None, message: message.into() }
+        Self { status: None, message: message.into(), request_url: None }
     }
 }
 
@@ -476,9 +487,9 @@ fn dav_response(
                 target=target.join(r.header("Location").ok_or_else(||Failure::text("日历重定向缺少地址"))?)
                     .map_err(|_|Failure::text("日历重定向地址无效"))?;
             }
-            Ok(r) if r.status()>=300=>return Err(Failure::status(cfg.provider,r.status())),
+            Ok(r) if r.status()>=300=>return Err(Failure::status(cfg.provider,r.status()).at_url(&target)),
             Ok(r)=>return r.into_string().map(|xml|(xml,target.to_string())).map_err(|e|Failure::transport(&e.to_string())),
-            Err(ureq::Error::Status(code,_))=>return Err(Failure::status(cfg.provider,code)),
+            Err(ureq::Error::Status(code,_))=>return Err(Failure::status(cfg.provider,code).at_url(&target)),
             Err(e)=>return Err(Failure::transport(&e.to_string())),
         }
     }
@@ -549,7 +560,7 @@ fn fetch_range(cfg: &Config, password: &str, lo: chrono::DateTime<chrono::Utc>, 
     let agent = agent();
     // 每次都发现全部日历：已保存的地址可能指向空日历，会遮蔽同一账号下的其他日历。
     // 逐个查询，单个日历失败不影响其他日历，全部失败才报错。
-    let calendars=discover_calendars(&agent,cfg,password)?;
+    let calendars=discover_calendars(&agent,cfg,password).map_err(|e|e.at_stage("查找日历"))?;
     let href=calendars.first().cloned().ok_or_else(||Failure::text("没有找到可读取的日历"))?;
     let mut events=Vec::new();
     let mut first_error=None;
@@ -557,7 +568,7 @@ fn fetch_range(cfg: &Config, password: &str, lo: chrono::DateTime<chrono::Utc>, 
     for collection in &calendars {
         match fetch_collection(&agent,cfg,password,collection,lo,hi) {
             Ok(found)=>{ok=true;events.extend(found.events);}
-            Err(error)=>{first_error.get_or_insert(error);}
+            Err(error)=>{first_error.get_or_insert(error.at_stage("读取日程"));}
         }
     }
     if !ok {return Err(first_error.unwrap_or_else(||Failure::text("没有找到日历")));}
@@ -614,20 +625,13 @@ fn report_resource_refs(xml:&str,href:&str)->Result<String,Failure> {
 fn discover_calendars(agent: &ureq::Agent, cfg: &Config, password: &str) -> Result<Vec<String>, Failure> {
     let base = ensure_slash(cfg.base().trim());
     let root=path_of(&base)=="/";
-    match discover_at(agent,cfg,password,&base,"1") {
-        Ok(Some(calendar))=>return Ok(calendar),
-        Ok(None)=>{},
-        // 网站根目录不一定是 DAV 服务；这两个平台的根目录分别返回 405 / 403。
-        Err(error) if root && matches!(error.status,Some(403|404|405))=>{},
-        Err(error)=>return Err(error),
+    if let Some(calendar)=discover_at(agent,cfg,password,&base,"1")? {
+        return Ok(calendar);
     }
     if root {
         let well_known=join_url(&base,".well-known/caldav");
-        match discover_at(agent,cfg,password,&well_known,"0") {
-            Ok(Some(calendar))=>return Ok(calendar),
-            Ok(None)=>{},
-            Err(error) if matches!(error.status,Some(404|405))=>{},
-            Err(error)=>return Err(error),
+        if let Some(calendar)=discover_at(agent,cfg,password,&well_known,"0")? {
+            return Ok(calendar);
         }
         if let Some(calendar)=discover_at(agent,cfg,password,&join_url(&base,"calendars/"),"1")? {
             return Ok(calendar);
@@ -641,7 +645,20 @@ fn discover_at(agent:&ureq::Agent,cfg:&Config,password:&str,start:&str,depth:&st
     let mut visited=std::collections::HashSet::new();
     for _ in 0..8 {
         if !visited.insert(next.clone()){return Err(Failure::text("日历服务器返回了循环的发现地址"));}
-        let (xml,base)=dav_response(agent,"PROPFIND",&next,depth,PROPFIND_BODY,cfg,password)?;
+        let (xml,base)=match dav_response(agent,"PROPFIND",&next,depth,PROPFIND_BODY,cfg,password) {
+            Ok(response)=>response,
+            Err(error)=>{
+                // 仅跳过初始入口自身的错误，重定向或属性发现后的服务错误原样返回。
+                let initial=visited.len()==1 && error.request_url.as_deref()==Some(start);
+                let unavailable=match path_of(start) {
+                    "/"=>matches!(error.status,Some(400|403|404|405)),
+                    "/.well-known/caldav"=>matches!(error.status,Some(404|405)),
+                    _=>false,
+                };
+                if initial && unavailable {return Ok(None);}
+                return Err(error);
+            }
+        };
         visited.insert(base.clone());
         let calendars=calendar_collections(&xml,&base);
         if !calendars.is_empty(){return Ok(Some(calendars));}
@@ -1108,6 +1125,8 @@ mod tests {
     }
     fn read_discovery_request(stream:&mut std::net::TcpStream)->String {
         use std::io::Read;
+        // Windows 上从非阻塞监听接受的连接会继承非阻塞模式，请求未到时读取会直接报 WouldBlock。
+        stream.set_nonblocking(false).unwrap();
         stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let mut bytes=Vec::new();
         loop {
@@ -1123,9 +1142,9 @@ mod tests {
     }
     #[test]
     fn discovery_root_errors_follow_well_known_principal_and_home() {
-        use std::io::{Read,Write};
+        use std::io::Write;
         use std::net::TcpListener;
-        for (provider, code) in [(Provider::DingTalk,405),(Provider::WeCom,403)] {
+        for (provider, code) in [(Provider::DingTalk,405),(Provider::WeCom,403),(Provider::ICloud,400),(Provider::DingTalk,400),(Provider::Custom,400)] {
             let listener=TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let base=format!("http://{}/",listener.local_addr().unwrap());
@@ -1134,14 +1153,7 @@ mod tests {
                 let mut paths=Vec::new();
                 while stop_rx.try_recv().is_err() {
                     let Ok((mut stream,_))=listener.accept() else {std::thread::sleep(Duration::from_millis(5));continue;};
-                    // Windows 可让已接受的 socket 继承 listener 的非阻塞模式。
-                    stream.set_nonblocking(false).unwrap();
-                    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-                    let mut request=String::new();
-                    while !request.contains("\r\n\r\n") {
-                        let mut buf=[0;4096];let n=stream.read(&mut buf).unwrap();if n==0{break;}
-                        request.push_str(&String::from_utf8_lossy(&buf[..n]));
-                    }
+                    let request=read_discovery_request(&mut stream);
                     let path=request.split_whitespace().nth(1).unwrap().to_owned();paths.push(path.clone());
                     let (status,extra,body)=match path.as_str() {
                         "/"=>(code,"",""),
@@ -1160,6 +1172,87 @@ mod tests {
             stop_tx.send(()).unwrap();let paths=worker.join().unwrap();
             assert_eq!(result.unwrap(),format!("{base}dav/calendars/account/primary/"));
             assert_eq!(paths,vec!["/","/.well-known/caldav","/dav/principals/","/dav/principals/account/","/dav/calendars/account/"]);
+        }
+    }
+
+    #[test]
+    fn discovery_errors_at_resolved_service_preserve_status_and_stop() {
+        use std::{io::Write,net::TcpListener};
+        for code in [400,403,404,405] {
+            for well_known in [false,true] {
+                for redirect in [false,true] {
+                    let listener=TcpListener::bind("127.0.0.1:0").unwrap();
+                    listener.set_nonblocking(true).unwrap();
+                    let base=format!("http://{}/",listener.local_addr().unwrap());
+                    let (stop,done)=std::sync::mpsc::channel();
+                    let worker=std::thread::spawn(move || {
+                        let mut paths=Vec::new();
+                        while done.try_recv().is_err() {
+                            let Ok((mut stream,_))=listener.accept() else {std::thread::sleep(Duration::from_millis(5));continue;};
+                            let request=read_discovery_request(&mut stream);
+                            let path=request.split_whitespace().nth(1).unwrap().to_owned();
+                            paths.push(path.clone());
+                            let principal=r#"<d:multistatus><d:response><d:href>/</d:href><d:propstat><d:prop><d:current-user-principal><d:href>/account/</d:href></d:current-user-principal></d:prop></d:propstat></d:response></d:multistatus>"#;
+                            let (status,extra,body)=match path.as_str() {
+                                "/" if well_known=>(405,"",""),
+                                "/"|"/.well-known/caldav" if redirect=>(302,"Location: /account/\r\n",""),
+                                "/"|"/.well-known/caldav"=>(207,"",principal),
+                                "/account/"=>(code,"",""),
+                                _=>(404,"",""),
+                            };
+                            write!(stream,"HTTP/1.1 {status} Test\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+                        }
+                        paths
+                    });
+                    let cfg=Config{provider:Provider::ICloud,username:"synthetic".into(),href:None,server:Some(base)};
+                    let result=fetch_month(&cfg,"synthetic-password",NaiveDate::from_ymd_opt(2026,11,1).unwrap());
+                    stop.send(()).unwrap();
+                    let paths=worker.join().unwrap();
+                    let error=result.err().unwrap();
+                    assert_eq!(error.status,Some(code),"well_known={well_known} redirect={redirect} paths={paths:?}");
+                    let expected=if well_known {vec!["/","/.well-known/caldav","/account/"]} else {vec!["/","/account/"]};
+                    assert_eq!(paths,expected,"实际日历服务失败后应保留错误");
+                    assert!(error.message.contains("查找日历"),"{}",error.message);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_calendar_path_errors_do_not_probe_other_entries() {
+        use std::{io::Write,net::TcpListener};
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();
+        let base=format!("http://{}/dav/",listener.local_addr().unwrap());
+        let worker=std::thread::spawn(move || {
+            let (mut stream,_)=listener.accept().unwrap();
+            assert!(read_discovery_request(&mut stream).starts_with("PROPFIND /dav/ "));
+            write!(stream,"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            drop(stream);listener
+        });
+        let cfg=Config{provider:Provider::Custom,username:"synthetic".into(),href:None,server:Some(base)};
+        assert_eq!(discover(&agent(),&cfg,"synthetic-password").unwrap_err().status,Some(400));
+        let listener=worker.join().unwrap();listener.set_nonblocking(true).unwrap();
+        assert!(listener.accept().is_err());
+    }
+
+    #[test]
+    fn report_errors_identify_the_failed_stage() {
+        use std::{io::Write,net::TcpListener};
+        for code in [400,401,403,404,405,429,500] {
+            let listener=TcpListener::bind("127.0.0.1:0").unwrap();
+            let base=format!("http://{}/",listener.local_addr().unwrap());
+            let worker=std::thread::spawn(move || {
+                serve_calendar_discovery(&listener);
+                let (mut stream,_)=listener.accept().unwrap();
+                assert!(read_discovery_request(&mut stream).starts_with("REPORT /calendar/ "));
+                write!(stream,"HTTP/1.1 {code} Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            });
+            let cfg=Config{provider:Provider::Custom,username:"synthetic".into(),href:None,server:Some(base)};
+            let error=fetch_month(&cfg,"synthetic-password",NaiveDate::from_ymd_opt(2026,11,1).unwrap()).err().unwrap();
+            worker.join().unwrap();
+            assert_eq!(error.status,Some(code));
+            assert!(error.message.contains(if code==401 {"验证账号失败"} else {"读取日程失败"}),"{}",error.message);
+            assert!(error.message.contains(&code.to_string()),"{}",error.message);
         }
     }
 
@@ -1536,10 +1629,10 @@ mod tests {
 
     #[test]
     fn error_messages_are_human() {
-        assert_eq!(Failure::status(Provider::Feishu, 401).message, "用户名或密码不对，请回飞书重新生成一次");
-        assert_eq!(Failure::status(Provider::WeCom, 401).message, "用户名或密码不对，请回企业微信重新生成一次");
-        assert_eq!(Failure::status(Provider::Exchange, 401).message, "用户名或密码不对，请核对账号和密码");
-        assert_eq!(Failure::status(Provider::Custom, 401).message, "用户名或密码不对，请核对账号和密码");
+        assert_eq!(Failure::status(Provider::Feishu, 401).message, "验证账号失败（401），请核对用户名和飞书提供的专用密码");
+        assert_eq!(Failure::status(Provider::WeCom, 401).message, "验证账号失败（401），请核对用户名和企业微信提供的专用密码");
+        assert_eq!(Failure::status(Provider::Exchange, 401).message, "验证账号失败（401），请核对用户名和密码");
+        assert_eq!(Failure::status(Provider::Custom, 401).message, "验证账号失败（401），请核对用户名和密码");
         for provider in Provider::ALL {assert_eq!(Provider::parse(provider.key()),provider);}
         assert!(Provider::Exchange.exchange() && Provider::WeCom.exchange() && !Provider::Custom.exchange());
         assert!(Provider::Exchange.custom_server() && Provider::Exchange.server().is_empty());

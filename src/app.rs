@@ -1302,18 +1302,8 @@ impl App {
             return;
         }
         self.mail.accounts = vec![
-            Account {
-                custom: None,
-                email: "tang@qq.com".into(),
-                provider: Provider::Qq,
-                enabled: false,
-            },
-            Account {
-                custom: None,
-                email: "hi@icloud.com".into(),
-                provider: Provider::ICloud,
-                enabled: false,
-            },
+            Account { custom: None, email: "demo@qq.com".into(), provider: Provider::Qq, enabled: false },
+            Account { custom: None, email: "demo@icloud.com".into(), provider: Provider::ICloud, enabled: false },
         ];
         for a in &self.mail.accounts {
             self.mail.status.insert(a.email.clone(), Status::Ready);
@@ -1367,8 +1357,7 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, (from, subject, time, code, summary, meeting))| Item {
-                received_unix: None,
-                account: "tang@qq.com".into(),
+                received_unix: None, account: "demo@qq.com".into(),
                 from: (*from).into(),
                 subject: (*subject).into(),
                 time: (*time).into(),
@@ -1390,7 +1379,7 @@ impl App {
                 uid: 900 - i as u32,
             })
             .collect();
-        self.mail.note = "tang@qq.com：连接成功".into();
+        self.mail.note = "demo@qq.com：连接成功".into();
         self.page = 5;
         self.dots_target();
     }
@@ -1697,7 +1686,7 @@ impl App {
         self.island_lyric_layout=Some(galley);
     }
 
-    fn effective_minimal(&self)->bool {self.settings.minimal || self.browser_minimal_active}
+    pub(crate) fn effective_minimal(&self)->bool {self.settings.minimal || self.browser_minimal_active}
     pub(crate) fn pet_enabled(&self)->bool {self.settings.pet && !self.effective_minimal() && !self.side()}
     pub(crate) fn pet_space(&self)->f32 {if self.pet_enabled(){44.0}else{0.0}}
     fn lyric_focus_space(&self)->f32 {if self.pomo.running && self.page_on_dock(1){crate::focus_bar::LYRIC_WIDTH+10.0}else{0.0}}
@@ -2033,11 +2022,11 @@ impl App {
                 let mail_list=self.page==5 && !self.mail.accounts.is_empty() && self.mail.open_uid.is_none() && self.mail_list_bounds().contains(cursor);
                 if mail_body || mail_list {self.wheel_delta=0.0;}
                 else if let Some(next) = self.wheel_step(scroll) {
-                        let calendar_len=if self.page==CALENDAR_PAGE {self.calendar_entries(self.calendar.view.day).len()}else{0};
+                    let calendar_max=if self.page==CALENDAR_PAGE {self.calendar_scroll_max(env)}else{0};
                         let calendar_body=self.page==CALENDAR_PAGE && Rect::from_min_max(Pos2::new(163.0,52.0),Pos2::new(378.0,208.0)).contains(cursor);
                         let clipboard_tab=self.page==3 && self.shelf_tab==1;
                         let list=match self.page {
-                            CALENDAR_PAGE if calendar_body=>Some((&mut self.calendar.view.first,calendar_len.saturating_sub(4))),
+                            CALENDAR_PAGE if calendar_body=>Some((&mut self.calendar.view.first,calendar_max)),
                             4 if Rect::from_min_max(Pos2::new(196.0,31.0),Pos2::new(377.0,124.0)).contains(cursor)
                                 =>Some((&mut self.todo_first,self.todos.items.len().saturating_sub(3))),
                             3 if clipboard_tab
@@ -2046,16 +2035,16 @@ impl App {
                                 =>Some((&mut self.shelf_first,self.shelf.items.len().saturating_sub(5))),
                             _=>None,
                         };
+                        let content_scrolls=(clipboard_tab || calendar_body) && list.as_ref().is_some_and(|(_,max)|*max>0);
                         let scrolled=list.is_some_and(|(first,max)|{
                             let target=if next {(*first+1).min(max)}else{first.saturating_sub(1)};
                             let changed=target!=*first;*first=target;changed
                         });
-                        // 剪贴板内滚轮只浏览记录，到达边界时停在当前页。
-                        if !scrolled && !clipboard_tab && !calendar_body {
+                        // 列表溢出时滚动内容；未溢出时滚轮切换功能页。
+                        if !scrolled && !content_scrolls {
                             self.wheel_navigate(next);
                         }
                         ctx.input_mut(|i|{i.raw_scroll_delta=Vec2::ZERO;i.smooth_scroll_delta=Vec2::ZERO;});
-                }
             }
         } else {self.wheel_delta=0.0;}
         let want = self.dock_dragging || !self.side_player_is_folded() &&
@@ -2072,10 +2061,10 @@ impl App {
         let messenger_rect=self.messenger_badge_rect(win,panel);
         let appear=self.messenger_appear();
         let outside_badge=messenger_rect.filter(|_|appear>0.02);
-        let body=messenger_rect.filter(|_|outside_badge.is_none()).map_or(panel,|badge|panel.union(badge));
         let pc = anim::clamp01(p);
         let painter = ui.painter_at(ui.max_rect().expand(40.0));
         let feather = 1.0 / ctx.pixels_per_point();
+        let body=messenger_rect.filter(|_|outside_badge.is_none()).map_or(panel,|badge|panel.union(badge));
         let minimal_pill = self.effective_minimal() && !self.side_player_is_folded()
             && !self.island_lyrics_available() && self.notice.is_none() && self.t>=self.notification_bell_until && pc < 0.02;
         let flare = if minimal_pill || pill { 0.0 } else { lerp(5.0, FLARE, pc) };
@@ -2413,6 +2402,8 @@ impl App {
             let x=if left {panel.left()-UNREAD_GAP*appear-width}else{panel.right()+UNREAD_GAP*appear};
             return Some(Rect::from_min_size(Pos2::new(x,panel.top()+inset),Vec2::new(width,height*appear)));
         }
+        // 极简刘海：横幅照常弹出，收起后只留细线，未读不常挂在线条上；展开岛体时在面板旁出现。
+        if self.effective_minimal(){return None;}
         let scale=self.messenger_stack_appear();
         if scale<0.02 || self.open && (self.calendar.draft.is_some() || self.task_dialog.is_some()){return None;}
         let side_column=self.side() && self.notice.is_none();
