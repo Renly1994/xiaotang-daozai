@@ -12,6 +12,11 @@ pub mod resources;
 pub mod anim;
 pub mod app;
 pub mod bt;
+// 【新增】HID 独立采集与设备管理页反馈，不改变现有蓝牙公共数据结构。
+pub mod hid;
+mod hid_ui;
+// 【新增】本机、蓝牙、HID 共用的电量视图、设备偏好与岛内列表页。
+mod device_battery;
 pub mod calendar;
 mod calendar_ui;
 mod local_calendar;

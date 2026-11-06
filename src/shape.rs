@@ -406,4 +406,3 @@ pub(crate) fn shade_mesh(
     }
     mesh
 }
-

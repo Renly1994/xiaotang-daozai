@@ -2,6 +2,10 @@
 
 岛仔原创代码采用 MIT。第三方依赖、字体、图标及品牌标识遵循各自许可；MIT 不授予第三方商标权。完整归属及许可文本见 [THIRD_PARTY_NOTICES.txt](../THIRD_PARTY_NOTICES.txt)。
 
+## HID 电量依赖
+
+HID 电量新增 `hidapi 2.6.3`（MIT，仅 Windows，`windows-native` 后端），用于枚举和已适配协议的通信，无需分发额外 hidapi DLL。标准电池字段通过 Windows HID parser 解析。协议来源及扩展方法见 [HID-BATTERY.md](HID-BATTERY.md)。
+
 ## 本地补丁
 
 - `vendor/eframe`：基于 0.31.1，记录当前视口，避免 Windows WGL 在同一窗口重复切换上下文。

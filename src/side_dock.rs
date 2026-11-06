@@ -39,7 +39,7 @@ impl App {
     /// 竖向胶囊里依次显示的内容。
     pub(crate) fn side_items(&self) -> Vec<SideItem> {
         let mut items = vec![SideItem::Clock];
-        if self.settings.show_battery && self.resident_power.0.is_some() { items.push(SideItem::Battery); }
+        if self.island_battery_visible() { items.push(SideItem::Battery); }
         if self.media.is_music() { items.push(SideItem::Music); }
         if self.pomo.running { items.push(SideItem::Focus); }
         items.extend(self.quota_side_items().into_iter().map(|(index, h)| SideItem::Quota(index, h)));
@@ -127,7 +127,8 @@ impl App {
                     c.text(cx, mid - 1.0, &hour, 13.5, W::Bold, theme::WHITE, H::Center);
                     c.text(cx, mid + 13.0, &minute, 13.5, W::Bold, theme::WHITE, H::Center);
                 }
-                SideItem::Battery => paint::battery(c, cx, mid, env.battery, env.charging, 0.72),
+                // 【修改】合并侧边停靠后也使用所选设备，避免台式机画出未知电池或错误充电状态。
+                SideItem::Battery => paint::battery(c, cx, mid, self.resident_power.0, self.resident_power.1, 0.72),
                 SideItem::Music => paint::playback_bars(c, cx, mid, self.t, self.media.playing, theme::WHITE),
                 SideItem::Focus => {
                     let minutes = (self.pomo.remaining / 60.0).ceil().max(0.0) as u32;

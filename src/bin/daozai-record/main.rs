@@ -448,6 +448,8 @@ fn main() {
             volume: Some((62, false)),
             bt: Vec::new(),
             bt_ready: true,
+            // 【新增】录制器使用合成快照，不访问真实 HID 设备。
+            hid: Default::default(),
             screen: None,
             backdrop: None,
             glass_blur: false,

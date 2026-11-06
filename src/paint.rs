@@ -384,6 +384,8 @@ pub fn chevron(c: &Card, x: f32, y: f32, dir: f32, hover: f32, press: f32) {
 pub fn battery(c: &Card, cx: f32, cy: f32, pct: Option<u8>, charging: bool, k: f32) {
     let r = 8.2 * k;
     let w = 2.6 * k;
+    // 【修改】未知电量仅显示灰环，不将缺失读数误画成满电或充电闪电。
+    if pct.is_none() {c.ring(cx,cy,r,w,Color32::from_gray(110));return;}
     let level = pct.unwrap_or(100) as f32 / 100.0;
     let col = if charging {
         theme::CHARGE

@@ -49,7 +49,8 @@ fn pill_shadow(painter:&egui::Painter,rect:Rect,radius:f32,strength:f32){
         painter.rect_filled(r,radius+grow*0.8,Color32::from_black_alpha((255.0*a*strength) as u8));
     }
 }
-pub(crate) const PAGE_NAMES: [&str; 8] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程"];
+// 【新增】设备电量与音乐、专注等页面使用同一套导航和可见性管理。
+pub(crate) const PAGE_NAMES: [&str; 9] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "设备电量"];
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
@@ -105,6 +106,8 @@ pub struct Env {
     pub bt: Vec<crate::bt::Device>,
     /// 蓝牙服务是否已经完成首次扫描。
     pub bt_ready: bool,
+    /// 【新增】独立 HID 服务快照；Arc 避免每帧复制描述符与设备列表。
+    pub hid: std::sync::Arc<crate::hid::Snapshot>,
     /// 岛所在屏幕（与 `win` 同一坐标系，逻辑点）；用于让通知详情留在屏幕内。
     pub screen: Option<Rect>,
     /// 毛玻璃皮肤：岛体四周采样得到的背景色（sRGB 0..1）。
@@ -180,6 +183,8 @@ pub enum Cmd {
     CalendarMonth(chrono::NaiveDate),
     /// 断开并删除日历配置（凭据由界面删除）。
     CalendarForget,
+    /// 【新增】由外壳唤醒 HID 线程；界面本身不进行设备通信。
+    HidRefresh,
     /// 选择 .ics 文件导入本机日程。
     CalendarImport,
 }
@@ -584,7 +589,7 @@ pub struct App {
     page_dir: f32,
     page_t0: f64,
     slide: Spring,
-    dots: [Spring; 8],
+    dots: [Spring; 9],
     wheel_delta: f32,
     wheel_at: f64,
     wheel_page_at: f64,
@@ -702,6 +707,9 @@ pub struct App {
     pub(crate) calendar: CalendarState,
     pub(crate) quota: crate::quota_ui::State,
     pub(crate) updates: crate::updates::State,
+    /// 【新增】三类设备的只读视图与用户主动生成的反馈预览。
+    pub(crate) hid_ui: crate::hid_ui::State,
+    pub(crate) device_battery: crate::device_battery::State,
     pub(crate) resident: bar::Motion,
     pub(crate) resident_power: (Option<u8>,bool),
 }
@@ -803,6 +811,8 @@ impl App {
             calendar: CalendarState::load(),
             quota: crate::quota_ui::State::load(),
             updates: Default::default(),
+            hid_ui: Default::default(),
+            device_battery: Default::default(),
             resident: Default::default(), resident_power:(None,false),
         }
     }
@@ -1191,8 +1201,11 @@ impl App {
         }
     }
 
-    /// v0.5.4：把系统音量与蓝牙设备状态同步进界面；只在连接/断开时提示一次。
+    /// 【修改】同步音量、蓝牙通知与 HID 视图；蓝牙仍只在连接/断开时提示一次。
     fn sync_device(&mut self, env: &Env) {
+        // 【修改】设备列表独立同步；关闭蓝牙通知时仍可查看三类设备的电量。
+        self.hid_ui.sync(env);
+        self.device_battery.sync(env,&self.settings);
         if self.t >= self.volume_quiet_until {
             if let Some(v) = env.volume {
                 self.volume_ui = Some(v);
@@ -1226,7 +1239,7 @@ impl App {
 
     pub fn show_page(&mut self,page:usize) {
         if !self.settings.visible_pages[page] {
-            self.settings_tab=[1,2,3,5,4,7,11,8][page];
+            self.settings_tab=[1,2,3,5,4,7,11,8,12][page];
             self.open_settings();
             return;
         }
@@ -1347,8 +1360,10 @@ impl App {
                 else {"间奏"}
             } else {""};
         let ink=if current.is_some(){theme::WHITE}else{theme::GRAY};
+        // 【修改】电量和计时器同时常驻时缩短歌词区域，保持单行且不超过展开宽度。
+        let text_width=self.lyric_content_width()-80.0;
         let layout=|text:String| {
-            let mut job=egui::text::LayoutJob::simple(text,theme::font(11.0,W::Semibold),ink,LYRIC_BAR_W-80.0);
+            let mut job=egui::text::LayoutJob::simple(text,theme::font(11.0,W::Semibold),ink,text_width);
             job.halign=egui::Align::Center;
             job.wrap.break_anywhere=true;
             ctx.fonts(|fonts|fonts.layout_job(job))
@@ -1373,7 +1388,10 @@ impl App {
     pub(crate) fn pet_enabled(&self)->bool {self.settings.pet && !self.effective_minimal() && !self.side()}
     pub(crate) fn pet_space(&self)->f32 {if self.pet_enabled(){44.0}else{0.0}}
     fn lyric_focus_space(&self)->f32 {if self.pomo.running{crate::focus_bar::LYRIC_WIDTH+10.0}else{0.0}}
-    fn lyric_bar_width(&self)->f32 {LYRIC_BAR_W+if self.pet_enabled(){48.0}else{0.0}+self.lyric_focus_space()}
+    /// 【新增】歌词模式单独预留电量位置，不能依赖会被整体淡出的普通顶栏。
+    fn lyric_battery_space(&self)->f32 {if self.island_battery_visible(){32.0}else{0.0}}
+    fn lyric_bar_width(&self)->f32 {(LYRIC_BAR_W+if self.pet_enabled(){48.0}else{0.0}+self.lyric_focus_space()+self.lyric_battery_space()).min(PW)}
+    fn lyric_content_width(&self)->f32 {self.lyric_bar_width()-self.lyric_focus_space()-self.lyric_battery_space()-if self.pet_enabled(){48.0}else{0.0}}
     fn notice_size(&self,a:&Alert)->(f32,f32) {
         let (width,height)=if a.meeting.is_some(){(360.0,136.0)}else if a.source==crate::extras::AlertSource::Internal && a.title=="蓝牙设备"{(HUD_W,48.0)}else if a.is_hud(){(HUD_W,38.0)}else{(334.0,44.0)};
         (width,height)
@@ -1413,7 +1431,7 @@ impl App {
     }
 
     pub(crate) fn expanded_height(&self)->f32 {
-        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
+        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==crate::device_battery::PAGE {crate::device_battery::HEIGHT}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
     }
 
     // ---------------------------------------------------------------
@@ -1469,14 +1487,15 @@ impl App {
         if self.compact_notices(){self.notice_width.step(dt);}else{self.notice_width.snap(0.0);self.notice_details=false;}
         self.update_media(env,&ctx);
         let bell=self.t<self.notification_bell_until&&!self.compact_notices();
-        self.resident_power=(env.battery,env.charging);
-        let mut layout=Layout::new(self.settings.show_battery&&env.battery.is_some(),self.quota_bar_indices().len(),self.media.is_music()&&!bell,self.pomo.running,bell,self.pet_enabled());
+        // 【修改】移除仅依赖本机电池的显示判断，三类设备共用所选电量。
+        self.resident_power=self.device_battery.power(&self.settings);
+        let mut layout=Layout::new(self.island_battery_visible(),self.quota_bar_indices().len(),self.media.is_music()&&!bell,self.pomo.running,bell,self.pet_enabled());
         layout.reorder(&self.settings.resident_order);
         for (position,extra) in self.quota_balance_layout(&ctx){layout.balance_tail(position,extra);}
         if self.settings.clock_period!=0 { layout.widen_clock(40.0); }
         if self.pet_enabled() {
             if let Some(a)=self.notice.as_ref().filter(|_|!self.compact_notices()&&!self.open){layout.x[bar::PET]=Some(22.0-(self.notice_size(a).0+self.pet_space())/2.0);}
-            else if self.island_lyrics_active() {layout.x[bar::PET]=Some(60.0-self.lyric_bar_width()/2.0);}
+            else if self.island_lyrics_active() {layout.x[bar::PET]=Some(60.0+self.lyric_battery_space()-self.lyric_bar_width()/2.0);}
         }
         self.resident.step(layout,dt,ctx.style().animation_time>0.0&&bar::animations_enabled());
         if self.opts.fetch_lyrics {
@@ -1556,8 +1575,11 @@ impl App {
                         self.wheel_delta=0.0;
                         let calendar_len=if self.page==CALENDAR_PAGE {self.calendar_entries(self.calendar.view.day).len()}else{0};
                         let calendar_body=self.page==CALENDAR_PAGE && Rect::from_min_max(Pos2::new(163.0,52.0),Pos2::new(378.0,208.0)).contains(cursor);
+                        let battery_max=self.device_battery.visible_count(&self.settings).saturating_sub(4);
                         let clipboard_tab=self.page==3 && self.shelf_tab==1;
                         let list=match self.page {
+                            crate::device_battery::PAGE if Rect::from_min_max(Pos2::new(39.0,38.0),Pos2::new(379.0,216.0)).contains(cursor)
+                                =>Some((&mut self.device_battery.first,battery_max)),
                             CALENDAR_PAGE if calendar_body=>Some((&mut self.calendar.view.first,calendar_len.saturating_sub(4))),
                             4 if Rect::from_min_max(Pos2::new(196.0,31.0),Pos2::new(377.0,124.0)).contains(cursor)
                                 =>Some((&mut self.todo_first,self.todos.items.len().saturating_sub(3))),
@@ -2182,14 +2204,17 @@ impl App {
             let width=self.w.pos.max(content_width);
             let left=local_cx-width/2.0;
             let center_y=BAR_H/2.0;
+            let battery_space=self.lyric_battery_space();
+            // 【新增】电量与封面、歌词、小眼睛、专注计时共存；复用同一设备读数和开关。
+            if battery_space>0.0 {paint::battery(&c,left+18.0,center_y,self.resident_power.0,self.resident_power.1,1.0);}
             if let Some((image,texture))=&self.music_artwork {
                 let [width,height]=image.size;
                 let uv_size=if width>height {egui::vec2(height as f32/width as f32,1.0)}else{egui::vec2(1.0,width as f32/height as f32)};
                 let uv=Rect::from_center_size(Pos2::new(0.5,0.5),uv_size);
-                c.painter.add(egui::epaint::RectShape::filled(c.rect(left+12.0,center_y-10.0,20.0,20.0),5.0*c.s,Color32::WHITE).with_texture(texture.id(),uv));
+                c.painter.add(egui::epaint::RectShape::filled(c.rect(left+12.0+battery_space,center_y-10.0,20.0,20.0),5.0*c.s,Color32::WHITE).with_texture(texture.id(),uv));
             } else {
-                c.fill(left+12.0,center_y-10.0,20.0,20.0,5.0,theme::CARD);
-                paint::note(&c,left+22.0,center_y,13.0,theme::WHITE);
+                c.fill(left+12.0+battery_space,center_y-10.0,20.0,20.0,5.0,theme::CARD);
+                paint::note(&c,left+22.0+battery_space,center_y,13.0,theme::WHITE);
             }
             let index=lyric.unwrap_or(0);
             let id=egui::Id::new("island-lyric-line");
@@ -2199,7 +2224,7 @@ impl App {
             }
             let shown=c.ui.ctx().animate_value_with_time(id,index as f32,0.18);
             let fade=1.0-(index as f32-shown).abs().min(1.0);
-            let position=c.pos(left+content_width-LYRIC_BAR_W/2.0,center_y-galley.size().y/2.0+(1.0-fade)*3.0);
+            let position=c.pos(left+content_width-self.lyric_content_width()/2.0,center_y-galley.size().y/2.0+(1.0-fade)*3.0);
             c.painter.galley(position,galley,if lyric.is_some(){theme::WHITE}else{theme::GRAY});
             paint::playback_bars(&c,left+content_width-21.0,center_y,self.t,self.media.playing,theme::WHITE);
             if self.pomo.running {
@@ -2212,7 +2237,7 @@ impl App {
         let base=&header;
         let m = anim::ease_in_out(smoothstep(0.0, 0.85, p));
         let clock = self.settings.clock_text(&env.clock);
-        let show_battery=self.settings.show_battery && env.battery.is_some();
+        let show_battery=self.island_battery_visible();
 
         // 顶栏终点布局：[电池][日期][时钟] 作为一组整体居中
         let date_w = base.text_w(&env.date, size::DATE, W::Regular);
@@ -2233,7 +2258,7 @@ impl App {
         // 电池：位置/大小连续插值
         let bk = lerp(1.0, 0.8, m);
         let bpos = (lerp(pb.0, hb.0, m), lerp(pb.1, hb.1, m));
-        if show_battery {paint::battery(&base.faded(lerp(layout.clearance(bar::BATTERY),1.0,m)), bpos.0, bpos.1, env.battery, env.charging, bk);}
+        if show_battery {paint::battery(&base.faded(lerp(layout.clearance(bar::BATTERY),1.0,m)), bpos.0, bpos.1, self.resident_power.0, self.resident_power.1, bk);}
 
         // 时钟：两个字号沿同一路径交叉淡化，避免逐帧换字号
         let cpos = (lerp(pcx, hc, m), lerp(21.0, 23.0, m));
@@ -2292,6 +2317,7 @@ impl App {
         }
         self.pet.last_idle = idle;
         self.pet.hovered = env.cursor.is_some_and(|p| (p.x-cx).abs() <= BAR_W/2.0+24.0 && (0.0..70.0).contains(&p.y));
+        // 【修改】小眼睛仅提示本机电池或断网，所选外设低电量由自身电量环表示。
         self.pet.worried = self.settings.show_battery && env.battery.is_some_and(|v|v<=20) && !env.charging || env.network == Some(false);
         let allowed = self.pet_enabled();
         if !allowed { self.pet.reaction = None; self.pet.waking_until = 0.0; }
@@ -2314,7 +2340,7 @@ impl App {
         let (hover,press)=c.hover_t(&settings);
         c.circle(394.0,18.0,13.0,Color32::from_white_alpha((hover*24.0) as u8));
         paint::gear(&c.scaled(394.0,18.0,0.8*(1.0-press*0.08)),394.0,18.0,paint::mix(theme::GRAY,theme::WHITE,hover));
-        if settings.clicked(){self.settings_tab=[1,2,3,5,4,7,11,8][self.page];self.open_settings();}
+        if settings.clicked(){self.settings_tab=[1,2,3,5,4,7,11,8,12][self.page];self.open_settings();}
         if self.subpage==Some(self.page) {
             c.text(15.0,25.0,"‹",19.0,W::Bold,theme::WHITE,H::Left);
             c.text(37.0,25.0,if self.page==2{"饮水设置"}else{"专注设置"},size::TITLE,W::Bold,theme::WHITE,H::Left);
@@ -2356,6 +2382,7 @@ impl App {
             4 => ("待办", "清单", theme::GREEN),
             5 => ("邮箱", "", theme::CYAN),
             6 => ("AI", "额度", theme::SOFT_GREEN),
+            crate::device_battery::PAGE => ("设备", "电量", theme::GREEN),
             _ => ("岛仔", "设置", theme::WHITE),
         };
         let wa = c.text(15.0, base, a, size::TITLE, W::Bold, theme::WHITE, H::Left);
@@ -2413,6 +2440,7 @@ impl App {
             5 => self.page_mail(c, env, cmds),
             6 => self.page_quota(c),
             CALENDAR_PAGE => self.page_calendar(c,env),
+            crate::device_battery::PAGE => self.page_device_battery(c),
             _ => self.page_settings(c),
         }
     }

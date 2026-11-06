@@ -53,6 +53,8 @@ rrule = "0.14.0"
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "x11"] }
 
 [target.'cfg(windows)'.dependencies]
+# 【新增】HID 枚举与有界输入读取；使用 Rust 原生 Windows 后端，不额外分发 HID DLL。
+hidapi = { version = "=2.6.3", default-features = false, features = ["windows-native"] }
 clipboard-win = "5.4.3"
 wgpu = { version = "24", default-features = false, features = ["dx12"] }
 memmap2 = "0.9.12"
@@ -90,6 +92,7 @@ windows = { version = "0.58", features = [
   "Win32_System_Ole", "Win32_UI_Shell_Common", "Networking_Connectivity",
   "Win32_Devices_DeviceAndDriverInstallation",
   "Win32_Devices_Properties",
+  "Win32_Devices_HumanInterfaceDevice",
   "Win32_Devices_Bluetooth",
   "Devices_Bluetooth", "Devices_Enumeration",
 ] }

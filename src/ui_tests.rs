@@ -59,7 +59,9 @@ fn v0649_settings_and_mail_accounts_survive_upgrade(){
     for _ in 0..2 {
         crate::model::Settings::load().save();
         let saved=std::fs::read_to_string(directory.join("settings.txt")).unwrap();
-        for line in legacy.lines(){assert!(saved.lines().any(|value|value==line),"升级保存不能改变旧设置：{line}");}
+        for line in legacy.lines().filter(|line|!line.starts_with("visible_pages=")&&!line.starts_with("page_order=")){assert!(saved.lines().any(|value|value==line),"升级保存不能改变旧设置：{line}");}
+        assert!(saved.lines().any(|line|line=="visible_pages=101111111"));
+        assert!(saved.lines().any(|line|line=="page_order=5,2,0,1,3,4,6,7,8"));
     }
     std::fs::write(directory.join("mail-accounts.json"),br#"[{"email":"OldUser@qq.com","provider":"qq","enabled":true},{"email":"old@icloud.com","provider":"icloud","enabled":false}]"#).unwrap();
     let accounts=crate::mail::load_accounts();
@@ -270,7 +272,7 @@ fn settings_keep_dark_buttons_when_system_theme_changes() {
 #[test]
 fn expanded_settings_routes_preserve_inline_controls(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-    for (page,tab) in [1,2,3,5,4,7,11,8].into_iter().enumerate(){
+    for (page,tab) in [1,2,3,5,4,7,11,8,12].into_iter().enumerate(){
         let mut h=H::new();h.app.show_page(page);h.hover(H::local(200.0,40.0),1.0);
         h.click(H::local(394.0,18.0));
         assert!(h.app.settings_open,"页面 {page} 应打开设置窗口");
@@ -337,6 +339,7 @@ struct H {
     animating:bool,
     shapes:Vec<egui::epaint::ClippedShape>,
     bt: Vec<crate::bt::Device>,
+    hid: std::sync::Arc<crate::hid::Snapshot>,
     media: crate::smtc::NowPlaying,
     power: (Option<u8>, bool),
     network: Option<bool>,
@@ -353,7 +356,7 @@ impl H {
         std::env::set_var("DAOZAI_DATA_DIR", &dir);
         let ctx = egui::Context::default();
         let app = App::new(&ctx, Options { fetch_lyrics: false, pet_idle: 1e9 });
-        Self { ctx, app, t: 0.0, cursor: None,cmds:vec![],region:Rect::NOTHING,hit:Rect::NOTHING,animating:false,shapes:Vec::new(), bt:Vec::new(),media:Default::default(),power:(None,false),network:None,system_idle:None,browser_at_top:None,file_drop_zone:None,hovered_files:vec![],dropped_files:vec![] }
+        Self { ctx, app, t: 0.0, cursor: None,cmds:vec![],region:Rect::NOTHING,hit:Rect::NOTHING,animating:false,shapes:Vec::new(), bt:Vec::new(),hid:Default::default(),media:Default::default(),power:(None,false),network:None,system_idle:None,browser_at_top:None,file_drop_zone:None,hovered_files:vec![],dropped_files:vec![] }
     }
     fn frame(&mut self, events: Vec<egui::Event>) {
         self.t += 1.0 / 60.0;
@@ -373,6 +376,7 @@ impl H {
             date: "10月28日 周三".into(),
             cursor: self.cursor,
             bt: self.bt.clone(),
+            hid: self.hid.clone(),
             bt_ready: true,
             media:self.media.clone(),
             battery:self.power.0,
@@ -1283,7 +1287,7 @@ fn wheel_navigation_reaches_every_page_in_both_directions(){
     h.app.shelf.items.clear();h.app.todos.items.clear();
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
     h.hover(H::local(210.0,18.0),0.3);
-    for (delta,pages) in [(-40.0,[1,2,3,4,5,6,7,0]),(40.0,[7,6,5,4,3,2,1,0])] {
+    for (delta,pages) in [(-40.0,[1,2,3,4,5,6,7,8,0]),(40.0,[8,7,6,5,4,3,2,1,0])] {
         for page in pages {
             h.wheel(delta);
             assert_eq!(h.app.page,page,"滚轮翻页不能被空的置物架或待办卡住");
@@ -1339,9 +1343,9 @@ fn wheel_handles_small_deltas_without_skipping_pages_on_bursts(){
 }
 
 #[test]
-fn navigation_wraps_between_eight_pages_and_notification_settings_remain_accessible() {
+fn navigation_wraps_between_nine_pages_and_notification_settings_remain_accessible() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.click(H::local(21.0,68.0));assert_eq!(h.app.page,7);
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.click(H::local(21.0,68.0));assert_eq!(h.app.page,8);
     h.hover(H::local(300.0,60.0),0.8);h.click(H::local(398.0,68.0));assert_eq!(h.app.page,0);
     h.app.open_settings_category(3);assert!(h.app.settings_open);assert_eq!(h.app.settings_tab,6);
 }
@@ -1491,7 +1495,7 @@ fn quota_accounts_switch_independently_and_hide_with_the_page() {
 fn page_visibility_is_saved_and_sets_the_starting_page() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    assert_eq!(h.app.settings.visible_pages,[true;8]);
+    assert_eq!(h.app.settings.visible_pages,[true;9]);
     assert!(h.app.settings.show_battery);
     h.app.settings.show_battery=false;
     h.app.set_page_visible(0,false);
@@ -1499,17 +1503,17 @@ fn page_visibility_is_saved_and_sets_the_starting_page() {
     h.app.settings.save();
     let settings=crate::model::Settings::load();
     assert!(!settings.show_battery);
-    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true]);
+    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true,true]);
     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
     assert_eq!(restarted.page(),1);
     assert_eq!(restarted.settings.visible_pages,settings.visible_pages);
     assert!(!restarted.settings.show_battery);
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=000000\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,false]);
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,false,false]);
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=1000000\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,true],"旧版页面开关应保留，并开启新增的日程页");
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,true,true],"旧版页面开关应保留，并开启新增的日程页");
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=invalid\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true;8]);
+    assert_eq!(crate::model::Settings::load().visible_pages,[true;9]);
 }
 
 #[test]
@@ -1549,7 +1553,7 @@ fn battery_module_can_disable_only_the_power_warning() {
 fn page_visibility_skips_hidden_pages_in_every_navigation_control() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    for page in [1,3,4,6,7] {h.app.set_page_visible(page,false);}
+    for page in [1,3,4,6,7,8] {h.app.set_page_visible(page,false);}
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
     for expected in [2,5,0] {
         h.click(H::local(398.0,68.0));
@@ -1578,7 +1582,7 @@ fn page_visibility_moves_away_from_hidden_page_and_keeps_one_page() {
     h.app.set_page_visible(4,false);
     assert_eq!(h.app.page,0);
     assert!(!h.app.is_editing());
-    for page in [0,1,3,5,6,7] {h.app.set_page_visible(page,false);}
+    for page in [0,1,3,5,6,7,8] {h.app.set_page_visible(page,false);}
     assert_eq!(h.app.page,2);
     h.app.set_page_visible(2,false);
     assert!(h.app.settings.visible_pages[2],"不能关闭最后一个页面");
@@ -3312,7 +3316,7 @@ fn ui_alignment_layout_gallery(){
             raster.free_textures(&out.textures_delta);
         }
     }}
-    for width in [600.0,690.0]{for tab in 0..12{
+    for width in [600.0,690.0]{for tab in 0..13{
         let mut h=fixture();h.app.settings_tab=tab;h.app.open_settings();h.ctx.set_embed_viewports(false);
         let size=egui::vec2(width,if width==600.0{450.0}else{560.0});let ppp=1.25;
         let output=std::sync::Arc::new(Mutex::new(None));let capture=output.clone();
@@ -3600,13 +3604,13 @@ fn calendar_sync_result_does_not_enqueue_another_sync() {
 fn page_order_persists_and_controls_navigation() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    h.app.settings.page_order=[5,2,0,1,3,4,6,7];
+    h.app.settings.page_order=[5,2,0,1,3,4,6,7,8];
     h.app.settings.save();
     let settings=crate::model::Settings::load();
-    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7]);
+    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7,8]);
     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
     assert_eq!(restarted.page(),5);
-    for page in [1,3,4,6,7] {h.app.set_page_visible(page,false);}
+    for page in [1,3,4,6,7,8] {h.app.set_page_visible(page,false);}
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
     for expected in [5,2,0] {
         h.click(H::local(398.0,68.0));
@@ -3619,7 +3623,7 @@ fn page_order_persists_and_controls_navigation() {
     assert_eq!(h.app.page,5);
     for invalid in ["0,0,1,2,3,4,5,6","8,1,2,3,4,5,6,7","0,1","invalid"] {
         std::fs::write(crate::model::config_dir().join("settings.txt"),format!("page_order={invalid}\n")).unwrap();
-        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7]);
+        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7,8]);
     }
 }
 
@@ -3646,9 +3650,9 @@ fn page_order_drag_applies_on_release_and_saves() {
     draw(&mut h,vec![egui::Event::PointerMoved(from),button(from,true)]);
     draw(&mut h,vec![egui::Event::PointerMoved(from+egui::vec2(0.0,10.0))]);
     draw(&mut h,vec![egui::Event::PointerMoved(to)]);
-    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7]);
+    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7,8]);
     draw(&mut h,vec![button(to,false)]);
-    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7]);
+    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7,8]);
     assert_eq!(crate::model::Settings::load().page_order,h.app.settings.page_order);
 }
 
@@ -3672,7 +3676,7 @@ fn settings_theme_follows_system_and_preserves_island_style() {
                 viewports:std::iter::once((id,egui::ViewportInfo{native_pixels_per_point:Some(1.0),..Default::default()})).collect(),..Default::default()};
             *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
         });
-        for tab in 0..12 {
+        for tab in 0..13 {
             h.app.settings_tab=tab;
             // AI 额度的添加账号表单默认收起，点「＋ 添加账号」才展开；展开后再检查表单行对齐。
             h.app.quota.connect_open=tab==11;
@@ -3761,6 +3765,328 @@ fn about_support_preview() {
             raster.free_textures(&root.textures_delta);raster.free_textures(&child.textures_delta);
         }
     } }
+}
+
+/// 【新增】设备管理及反馈模块的合成截图；不收集真实设备或账号信息。
+#[test]
+#[ignore = "按需导出设备管理页截图，需指定 DAOZAI_HID_PREVIEW_DIR"]
+fn device_management_feedback_preview() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_HID_PREVIEW_DIR").expect("请指定截图目录"));
+    std::fs::create_dir_all(&dest).unwrap();
+    let mut h=H::new();h.app.open_settings();h.app.settings_tab=12;h.ctx.set_embed_viewports(false);
+    let descriptor=crate::hid::Descriptor{vid:0x3554,pid:0xfb3e,usage_page:0xff02,usage:2,input_len:17,output_len:17,..Default::default()};
+    let devices=vec![crate::hid::Device{id:"synthetic-mouse".into(),name:"无线鼠标".into(),descriptor:descriptor.clone(),protocol:"compx-17",transport:"2.4G",slot:None,battery:Some(crate::hid::Battery{percent:76,charging:Some(false),millivolts:Some(4010)}),failure:None},crate::hid::Device{id:"synthetic-unknown".into(),name:"待适配无线键盘".into(),descriptor:crate::hid::Descriptor{vid:0x1234,pid:0x5678,..descriptor},protocol:"unknown",transport:"HID",slot:None,battery:None,failure:Some(crate::hid::Failure::Unsupported)}];
+    let env=Env{battery:None,bt:vec![crate::bt::Device{id:"synthetic-bt".into(),name:"蓝牙耳机".into(),battery:Some(71),kind:crate::bt::DeviceKind::Headphones}],hid:std::sync::Arc::new(crate::hid::Snapshot{devices,generation:1,..Default::default()}),..Default::default()};
+    h.app.hid_ui.sync(&env);h.app.device_battery.sync(&env,&h.app.settings);
+    let output=std::sync::Arc::new(std::sync::Mutex::new(None));let capture=output.clone();
+    egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
+        let id=viewport.ids.this;
+        let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(690.0,1100.0))),viewports:std::iter::once((id,egui::ViewportInfo{native_pixels_per_point:Some(1.0),..Default::default()})).collect(),..Default::default()};
+        *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
+    });
+    let mut raster=crate::preview_raster::Raster::new(690,1100);
+    for dark in [true,false] {
+        h.app.settings.settings_theme=if dark{crate::settings_theme::SettingsTheme::Dark}else{crate::settings_theme::SettingsTheme::Light};
+        for frame in 0..4 {
+            let root=h.ctx.run(Default::default(),|ctx|h.app.settings_ui(ctx,false));let child=output.lock().unwrap().take().unwrap();
+            raster.update_textures(&root.textures_delta);raster.update_textures(&child.textures_delta);
+            if frame==3 {
+                for label in ["岛上电量","设备与兼容性反馈","刷新设备","生成反馈报告"] {
+                    let shape=child.shapes.iter().find(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()==label)).expect("反馈入口应可见");
+                    assert!(shape.clip_rect.contains_rect(shape.shape.visual_bounding_rect()),"反馈入口不应裁切：{label}");
+                }
+                raster.buf.fill([0.0,0.0,0.0,1.0]);raster.draw(&h.ctx.tessellate(child.shapes,child.pixels_per_point),child.pixels_per_point);
+                let mut rgba=vec![];raster.to_rgba8(&mut rgba);image::save_buffer(dest.join(format!("device-management-{}.png",if dark{"dark"}else{"light"})),&rgba,690,1100,image::ColorType::Rgba8).unwrap();
+            }
+            raster.free_textures(&root.textures_delta);raster.free_textures(&child.textures_delta);
+        }
+    }
+}
+
+/// 【新增】旧配置缺少 HID 键时使用默认值，显式关闭后重启仍保持关闭。
+#[test]
+fn hid_battery_setting_preserves_old_config_and_persists_disabled() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let h=H::new();assert!(h.app.settings.hid_battery);
+    let mut settings=h.app.settings.clone();settings.hid_battery=false;settings.save();
+    assert!(!crate::model::Settings::load().hid_battery);
+}
+
+/// 【新增】验证真实帧的电量入口、列表滚动、别名和显示开关，与后台通知无关。
+#[test]
+fn device_battery_page_uses_external_levels_and_saved_preferences() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.bluetooth_notifications=false;
+    h.bt=(0..6).map(|i|crate::bt::Device{id:format!("bt-{i}"),name:format!("耳机 {i}"),battery:Some(71-i),kind:crate::bt::DeviceKind::Headphones}).collect();
+    h.app.settings.battery_devices.insert("bt:bt-0".into(),("我的耳机".into(),false));
+    h.app.settings.battery_devices.insert("bt:bt-1".into(),("工作键盘".into(),true));
+    h.app.settings.battery_device="bt:bt-0".into();h.app.settings.save();
+    let saved=crate::model::Settings::load();assert_eq!(saved.battery_device,"bt:bt-0");
+    assert_eq!(saved.battery_devices,h.app.settings.battery_devices);
+    h.app.show_page(8);h.hover(H::local(210.0,80.0),1.0);
+    assert_eq!(h.app.resident_power,(Some(71),false),"列表隐藏不应影响固定的岛上电量");
+    assert!(h.app.alerts.is_empty(),"关闭蓝牙通知时仍能读取电量且不弹通知");
+    let has=|h:&H,label:&str|h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()==label&&s.clip_rect.contains(t.visual_bounding_rect().center())));
+    assert!(has(&h,"工作键盘"));assert!(!has(&h,"我的耳机"));
+    h.wheel(-40.0);assert_eq!(h.app.page,8);assert_eq!(h.app.device_battery.first,1);
+    h.hover(H::local(210.0,80.0),0.3);assert!(has(&h,"耳机 5"));
+    h.bt.clear();h.frame(vec![]);assert_eq!(h.app.resident_power,(None,false));
+    assert!(has(&h,"暂无显示的设备"));
+    h.bt.push(crate::bt::Device{id:"bt-1".into(),name:"耳机 1".into(),battery:Some(50),kind:crate::bt::DeviceKind::Keyboard});
+    h.frame(vec![]);assert!(has(&h,"工作键盘"),"重连应继续使用别名");
+    assert_eq!(h.app.device_battery.first,0);
+}
+
+#[test]
+fn device_battery_hid_reading_reaches_collapsed_and_expanded_indicator() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.app.settings.pet=false;
+    h.hid=std::sync::Arc::new(crate::hid::Snapshot{generation:1,devices:vec![crate::hid::Device{id:"vgn".into(),name:"VGN 鼠标".into(),descriptor:Default::default(),protocol:"compx-17",transport:"2.4G",slot:None,battery:Some(crate::hid::Battery{percent:20,charging:Some(false),millivolts:None}),failure:None}],..Default::default()});
+    for expanded in [false,true] {
+        if expanded {h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);}else{for _ in 0..60{h.frame(vec![]);}}
+        assert_eq!(h.app.resident_power,(Some(20),false));
+        assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="20")),"无本机电池时 HID 电量也应显示在顶栏");
+    }
+    h.app.settings.show_battery=false;for _ in 0..60{h.frame(vec![]);}
+    assert!(!h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="20")));
+}
+
+/// 【新增】回归真实使用组合：歌词、封面、小眼睛和计时器同时开启时，电量不能被提前隐藏。
+#[test]
+fn device_battery_remains_visible_with_lyrics_cover_pet_and_timer() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for pet in [false,true] {for focus in [false,true] {for hid in [false,true] {
+        let mut h=H::new();h.app.settings.pet=pet;h.app.settings.island_lyrics=true;
+        h.bt=vec![crate::bt::Device{id:"headphones".into(),name:"耳机".into(),battery:Some(71),kind:crate::bt::DeviceKind::Headphones}];
+        h.hid=std::sync::Arc::new(crate::hid::Snapshot{generation:1,devices:vec![crate::hid::Device{id:"vgn".into(),name:"鼠标".into(),descriptor:Default::default(),protocol:"compx-17",transport:"2.4G",slot:None,battery:Some(crate::hid::Battery{percent:20,charging:Some(false),millivolts:None}),failure:None}],..Default::default()});
+        h.app.settings.battery_device=if hid{"hid:vgn"}else{"bt:headphones"}.into();
+        h.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),playing:true,position:7.0,duration:120.0,artwork:Some(std::sync::Arc::new(egui::ColorImage::new([32,32],egui::Color32::from_rgb(70,120,220)))),..Default::default()};
+        h.app.set_lyrics("Track","Artist",120.0,crate::lyrics::parse_lrc("[00:05]晚风吹过了山岗\n[00:15]下一句"));
+        h.app.pomo.running=focus;h.app.pomo.remaining=1200.0;
+        for _ in 0..120{h.frame(vec![]);}
+        let visible=|h:&H,label:&str|h.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()==label&&t.opacity_factor>0.95&&s.clip_rect.contains_rect(t.visual_bounding_rect())=>Some(t.visual_bounding_rect()),_=>None});
+        let battery=visible(&h,if hid{"20"}else{"71"}).expect("开启岛上歌词后，所选外设电量仍应实际可见");
+        let lyric=visible(&h,"晚风吹过了山岗").expect("电量不能替换歌词");
+        assert!(h.hit.contains_rect(battery));assert!(!battery.intersects(lyric));
+        assert!(!h.app.pet.worried,"外设低电量不应触发本机表情警告");
+        assert!(h.app.current_width()<=PW+0.1,"电量、歌词、表情和计时不能撑出展开宽度");
+        let texture=h.app.music_artwork.as_ref().unwrap().1.id();
+        let cover=h.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Rect(r)if r.brush.as_ref().is_some_and(|b|b.fill_texture_id==texture)=>Some(r.rect),_=>None}).expect("封面应保留");
+        assert!(!battery.intersects(cover));
+        let width=h.app.current_width();h.app.settings.show_battery=false;for _ in 0..90{h.frame(vec![]);}
+        assert!(visible(&h,if hid{"20"}else{"71"}).is_none());assert!(h.app.current_width()<width-0.8);
+    }}}
+}
+
+#[test]
+fn device_battery_external_low_level_does_not_replace_host_power_warning() {
+    use crate::extras::PetState;
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.bt=vec![crate::bt::Device{id:"mouse".into(),name:"鼠标".into(),battery:Some(10),kind:crate::bt::DeviceKind::Mouse}];
+    h.app.settings.battery_device="bt:mouse".into();h.frame(vec![]);
+    assert_eq!(h.app.resident_power.0,Some(10));assert_eq!(h.app.pet_state(),PetState::Awake);
+    h.power=(Some(10),false);h.bt[0].battery=Some(90);h.frame(vec![]);
+    assert_eq!(h.app.pet_state(),PetState::Worried,"本机低电量仍应提示，即使选择的外设电量充足");
+    h.power=(Some(10),true);h.frame(vec![]);assert_eq!(h.app.pet_state(),PetState::Awake);
+    h.network=Some(false);h.frame(vec![]);assert_eq!(h.app.pet_state(),PetState::Worried);
+}
+
+/// 【新增】无设备时的常驻灰环覆盖普通顶栏、歌词和左右停靠，总开关仍能隐藏它。
+#[test]
+fn device_battery_pinned_unknown_ring_is_gray_in_all_headers() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for (dock,lyrics) in [(crate::model::Dock::Top,false),(crate::model::Dock::Top,true),(crate::model::Dock::Left,false),(crate::model::Dock::Right,false)] {
+        let mut h=H::new();h.app.settings.pet=false;h.app.settings.battery_pinned=true;h.app.settings.dock=dock;
+        h.app.settings.island_lyrics=lyrics;
+        if lyrics {h.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),playing:true,position:7.0,duration:120.0,..Default::default()};h.app.set_lyrics("Track","Artist",120.0,crate::lyrics::parse_lrc("[00:05]歌词与灰环共存"));}
+        let frame=|h:&mut H| {
+            h.t+=1.0/60.0;let size=if dock.is_side(){egui::vec2(crate::side_dock::SIDE_W,crate::side_dock::SIDE_H)}else{egui::vec2(WIN_W,WIN_H)};
+            let env=Env{t:h.t,clock:"09:41:00".into(),today:"2026-11-06".into(),media:h.media.clone(),..Default::default()};
+            let out=h.ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,size)),time:Some(h.t),..Default::default()},|ctx|{egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx,|ui|{h.app.frame(ui,Rect::from_min_size(ui.max_rect().min,size),&env);});});h.shapes=out.shapes;
+        };
+        let gray_ring=|h:&H|h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Circle(c)if c.stroke.color==egui::Color32::from_gray(110)&&c.stroke.width>1.0&&c.radius>5.0&&s.clip_rect.contains_rect(c.visual_bounding_rect())));
+        for _ in 0..90{frame(&mut h);}assert_eq!(h.app.resident_power.0,None);assert!(gray_ring(&h),"{dock:?} / 歌词 {lyrics} 无设备应保留灰环");
+        h.app.settings.show_battery=false;for _ in 0..90{frame(&mut h);}assert!(!gray_ring(&h));
+    }
+}
+
+#[test]
+fn device_battery_pinned_and_refresh_settings_persist_and_old_defaults_stay_compatible() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let h=H::new();let mut s=h.app.settings.clone();
+    assert!(!s.battery_pinned);assert!(s.hid_refresh_seconds.is_empty());assert_eq!(crate::hid::DEFAULT_REFRESH_SECS,5);
+    s.battery_pinned=true;s.hid_refresh_seconds.insert("hid:a".into(),7);s.hid_refresh_seconds.insert("hid:b".into(),300);s.save();
+    let saved=crate::model::Settings::load();assert!(saved.battery_pinned);assert_eq!(saved.hid_refresh_seconds,s.hid_refresh_seconds);
+    std::fs::write(crate::model::config_dir().join("settings.txt"),"hid_refresh_seconds={\"hid:a\":0,\"hid:b\":99999}\n").unwrap();
+    let saved=crate::model::Settings::load();assert_eq!(saved.hid_refresh_seconds["hid:a"],1);assert_eq!(saved.hid_refresh_seconds["hid:b"],3600);
+}
+
+/// 【新增】上游新增左右停靠后，竖排电量和展开设备页仍需使用同一外设读数。
+#[test]
+fn device_battery_upstream_side_dock_uses_selected_device_and_renders_list() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for dock in [crate::model::Dock::Left,crate::model::Dock::Right] {
+        let mut h=H::new();h.app.settings.dock=dock;h.app.settings.battery_device="bt:mouse".into();
+        h.bt=vec![crate::bt::Device{id:"mouse".into(),name:"无线鼠标".into(),battery:Some(23),kind:crate::bt::DeviceKind::Mouse}];
+        let frame=|h:&mut H|{
+            h.t+=1.0/60.0;let size=egui::vec2(crate::side_dock::SIDE_W,crate::side_dock::SIDE_H);
+            let env=Env{t:h.t,clock:"09:41:00".into(),today:"2026-11-06".into(),bt:h.bt.clone(),bt_ready:true,..Default::default()};
+            let mut result=None;let output=h.ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,size)),time:Some(h.t),..Default::default()},|ctx|{
+                egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx,|ui|result=Some(h.app.frame(ui,Rect::from_min_size(ui.max_rect().min,size),&env)));
+            });h.shapes=output.shapes;result.unwrap()
+        };
+        for _ in 0..90{frame(&mut h);}
+        let visible=|h:&H,label:&str|h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()==label&&t.opacity_factor>0.95&&s.clip_rect.contains_rect(t.visual_bounding_rect())));
+        assert_eq!(h.app.resident_power,(Some(23),false));assert!(visible(&h,"23"),"{dock:?} 停靠不能仍绘制本机电池");
+        h.app.show_page(8);for _ in 0..90{frame(&mut h);}
+        assert!(visible(&h,"无线鼠标")&&visible(&h,"23%"));assert_eq!(h.app.expanded_height(),crate::device_battery::HEIGHT);
+        h.app.settings.show_battery=false;h.t+=5.0;for _ in 0..90{frame(&mut h);}
+        assert!(!h.app.side_items().contains(&crate::side_dock::SideItem::Battery));
+    }
+}
+
+#[test]
+fn device_battery_upstream_settings_keep_skin_dock_clipboard_and_device_preferences() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let h=H::new();let mut settings=h.app.settings.clone();
+    settings.skin=crate::model::Skin::Cream;settings.island_shape=crate::model::IslandShape::Pill;
+    settings.island_size=140;settings.dock=crate::model::Dock::Right;settings.clipboard_history=false;
+    settings.wechat_notifications=true;settings.wechat_tray_open=true;
+    settings.battery_device="bt:mouse".into();settings.battery_devices.insert("bt:mouse".into(),("我的鼠标".into(),true));settings.save();
+    let loaded=crate::model::Settings::load();assert_eq!(format!("{loaded:?}"),format!("{settings:?}"));
+}
+
+#[test]
+fn device_battery_upstream_light_skins_recolor_device_icons() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for skin in [crate::model::Skin::Cream,crate::model::Skin::GlassLight] {
+        let mut h=H::new();h.app.settings.skin=skin;h.app.show_page(8);
+        h.bt=vec![crate::bt::Device{id:"mouse".into(),name:"我的鼠标".into(),battery:Some(71),kind:crate::bt::DeviceKind::Mouse}];
+        h.hover(H::local(210.0,85.0),1.5);
+        let icon=h.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Mesh(mesh)if mesh.texture_id!=egui::TextureId::default()&&(mesh.calc_bounds().width()-21.0).abs()<0.1=>Some(mesh),_=>None}).expect("设备 SVG 图标应可见");
+        assert!(icon.vertices.iter().all(|v|v.color.r()<100&&v.color.g()<100&&v.color.b()<100),"{skin:?} 设备图标应随白底皮肤变为深色");
+    }
+}
+
+#[test]
+fn device_management_switch_and_dropdown_control_the_island_and_sync_page_management() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.bt=vec![crate::bt::Device{id:"headphones".into(),name:"蓝牙耳机".into(),battery:Some(71),kind:crate::bt::DeviceKind::Headphones}];
+    h.hid=std::sync::Arc::new(crate::hid::Snapshot{generation:1,devices:vec![crate::hid::Device{id:"receiver".into(),name:"2.4G 鼠标".into(),descriptor:Default::default(),protocol:"compx-17",transport:"2.4G",slot:None,battery:Some(crate::hid::Battery{percent:20,charging:Some(false),millivolts:None}),failure:None}],..Default::default()});
+    h.frame(vec![]);h.app.open_settings();h.app.settings_tab=12;h.ctx.set_embed_viewports(false);
+    fn draw(h:&mut H,events:Vec<egui::Event>){
+        let output=std::sync::Arc::new(Mutex::new(None));let capture=output.clone();h.t+=0.02;let time=h.t;
+        egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
+            let id=viewport.ids.this;let raw=egui::RawInput{viewport_id:id,time:Some(time),events:events.clone(),screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(690.0,1100.0))),viewports:std::iter::once((id,egui::ViewportInfo::default())).collect(),..Default::default()};
+            *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
+        });
+        let _=h.ctx.run(Default::default(),|ctx|h.app.settings_ui(ctx,false));h.shapes=output.lock().unwrap().take().unwrap().shapes;
+    }
+    fn click(h:&mut H,label:&str){
+        for _ in 0..3{draw(h,vec![]);}
+        let mut at=h.shapes.iter().rev().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()==label&&s.clip_rect.contains(t.visual_bounding_rect().center())=>Some(t.visual_bounding_rect().center()),_=>None}).unwrap_or_else(||panic!("找不到设置选项：{label}"));
+        if matches!(label,"电量"|"岛上电量"|"常驻岛上") {
+            at=h.shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Rect(r)if (r.rect.width()-34.0).abs()<0.1&&(r.rect.height()-20.0).abs()<0.1=>Some(r.rect.center()),_=>None})
+                .min_by(|a,b|(a.y-at.y).abs().total_cmp(&(b.y-at.y).abs())).expect("标题旁应有可点击开关");
+        }
+        for pressed in [true,false]{draw(h,vec![egui::Event::PointerMoved(at),egui::Event::PointerButton{pos:at,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()}]);}
+    }
+    click(&mut h,"岛上电量");assert!(!h.app.settings.show_battery);
+    click(&mut h,"常驻岛上");assert!(h.app.settings.battery_pinned&&h.app.settings.show_battery);
+    click(&mut h,"常驻岛上");assert!(!h.app.settings.battery_pinned);
+    click(&mut h,"岛上电量");assert!(!h.app.settings.show_battery);
+    h.app.settings_tab=10;click(&mut h,"电量");assert!(h.app.settings.show_battery);
+    h.app.settings_tab=12;click(&mut h,"自动选择（本机优先）");
+    click(&mut h,"蓝牙耳机 · 蓝牙 · 71%");assert_eq!(h.app.settings.battery_device,"bt:headphones");
+    click(&mut h,"5s");click(&mut h,"30s");assert_eq!(h.app.settings.hid_refresh_seconds["hid:receiver"],30);
+    click(&mut h,"30s");click(&mut h,"自定义");click(&mut h,"30s");
+    draw(&mut h,vec![egui::Event::Key{key:egui::Key::A,physical_key:None,pressed:true,repeat:false,modifiers:egui::Modifiers{ctrl:true,command:true,..Default::default()}},egui::Event::Text("7".into())]);
+    draw(&mut h,vec![egui::Event::Key{key:egui::Key::Enter,physical_key:None,pressed:true,repeat:false,modifiers:Default::default()}]);
+    assert_eq!(crate::model::Settings::load().hid_refresh_seconds["hid:receiver"],7,"自定义刷新间隔应保存到本地");
+    click(&mut h,"蓝牙耳机");draw(&mut h,vec![egui::Event::Text("我的通勤耳机".into())]);
+    assert_eq!(crate::model::Settings::load().battery_devices["bt:headphones"].0,"我的通勤耳机");
+    h.app.settings_tab=9;for _ in 0..3{draw(&mut h,vec![]);}
+    assert!(!h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="设备与兼容性反馈")),"关于页应移除反馈模块");
+    h.frame(vec![]);assert_eq!(h.app.resident_power,(Some(71),false));
+}
+
+#[test]
+fn device_page_migrates_legacy_orders_without_losing_visibility() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let _h=H::new();
+    std::fs::create_dir_all(crate::model::config_dir()).unwrap();
+    for count in 6..=9 {
+        let old=(0..count).rev().map(|p|p.to_string()).collect::<Vec<_>>().join(",");
+        std::fs::write(crate::model::config_dir().join("settings.txt"),format!("page_order={old}\nvisible_pages={}\n", "1".repeat(count))).unwrap();
+        let s=crate::model::Settings::load();assert_eq!(&s.page_order[..count],(0..count).rev().collect::<Vec<_>>());
+        assert_eq!(&s.page_order[count..],(count..9).collect::<Vec<_>>());assert_eq!(s.visible_pages,[true;9]);
+    }
+}
+
+#[test]
+#[ignore="按需导出设备电量列表截图，需指定 DAOZAI_HID_PREVIEW_DIR"]
+fn device_battery_page_preview(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_HID_PREVIEW_DIR").expect("需指定截图目录"));std::fs::create_dir_all(&dest).unwrap();
+    h.app.settings.pet=false;h.app.show_page(8);
+    let bt=vec![crate::bt::Device{id:"phone".into(),name:"我的 iPhone".into(),battery:Some(70),kind:crate::bt::DeviceKind::Phone},crate::bt::Device{id:"airpods".into(),name:"AirPods Pro".into(),battery:Some(100),kind:crate::bt::DeviceKind::Earbuds}];
+    let mouse=crate::hid::Device{id:"mouse".into(),name:"VGN 无线鼠标".into(),descriptor:Default::default(),protocol:"compx-17",transport:"2.4G",slot:None,battery:Some(crate::hid::Battery{percent:20,charging:Some(false),millivolts:None}),failure:None};
+    let snapshot=std::sync::Arc::new(crate::hid::Snapshot{devices:vec![mouse],generation:1,..Default::default()});
+    let mut raster=crate::preview_raster::Raster::new(1280,540);
+    for frame in 0..90{
+        let t=frame as f64/60.0;let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(WIN_W,WIN_H))),time:Some(t),viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};
+        let env=Env{t,clock:"09:41:00".into(),today:"2026-11-05".into(),cursor:Some(H::local(200.0,80.0)),battery:Some(79),charging:true,bt:bt.clone(),bt_ready:true,hid:snapshot.clone(),..Default::default()};
+        let out=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx,|ui|{let win=ui.max_rect();h.app.frame(ui,win,&env);});});
+        raster.update_textures(&out.textures_delta);
+        if frame==89 {
+            for label in ["本机","我的 iPhone","AirPods Pro","VGN 无线鼠标","20%"]{
+                let shape=out.shapes.iter().find(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()==label)).expect("设备行应存在");
+                assert!(shape.clip_rect.contains_rect(shape.shape.visual_bounding_rect()),"设备行不应被裁切：{label}");
+            }
+            raster.buf.fill([0.07,0.09,0.13,1.0]);raster.draw(&h.ctx.tessellate(out.shapes,out.pixels_per_point),out.pixels_per_point);let mut rgba=vec![];raster.to_rgba8(&mut rgba);
+            image::save_buffer(dest.join("device-battery-page.png"),&rgba,1280,540,image::ColorType::Rgba8).unwrap();
+        }
+        raster.free_textures(&out.textures_delta);
+    }
+}
+
+/// 【新增】歌词模式电量共存截图；仅使用合成设备，便于核对警告表情及拥挤布局。
+#[test]
+#[ignore="按需导出歌词与电量共存截图，需指定 DAOZAI_HID_PREVIEW_DIR"]
+fn device_battery_lyrics_preview(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_HID_PREVIEW_DIR").expect("需指定截图目录"));std::fs::create_dir_all(&dest).unwrap();
+    for focus in [false,true] {
+        let mut h=H::new();h.app.settings.pet=true;h.app.settings.island_lyrics=true;h.app.settings.battery_device="hid:vgn".into();
+        h.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),playing:true,position:7.0,duration:120.0,artwork:Some(std::sync::Arc::new(egui::ColorImage::new([32,32],egui::Color32::from_rgb(70,120,220)))),..Default::default()};
+        h.app.set_lyrics("Track","Artist",120.0,crate::lyrics::parse_lrc("[00:05]晚风吹过了山岗\n[00:15]下一句"));
+        h.app.pomo.running=focus;h.app.pomo.remaining=1200.0;
+        let snapshot=std::sync::Arc::new(crate::hid::Snapshot{generation:1,devices:vec![crate::hid::Device{id:"vgn".into(),name:"无线鼠标".into(),descriptor:Default::default(),protocol:"compx-17",transport:"2.4G",slot:None,battery:Some(crate::hid::Battery{percent:20,charging:Some(false),millivolts:None}),failure:None}],..Default::default()});
+        let mut raster=crate::preview_raster::Raster::new(1280,140);
+        for frame in 0..90 {
+            let t=frame as f64/60.0;let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(WIN_W,WIN_H))),time:Some(t),viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};
+            let env=Env{t,clock:"09:41:00".into(),today:"2026-11-06".into(),media:h.media.clone(),hid:snapshot.clone(),..Default::default()};
+            let out=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx,|ui|{let win=ui.max_rect();h.app.frame(ui,win,&env);});});raster.update_textures(&out.textures_delta);
+            if frame==89 {
+                assert!(!h.app.pet.worried);assert!(out.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="20"&&t.opacity_factor>0.95&&s.clip_rect.contains_rect(t.visual_bounding_rect()))));
+                raster.buf.fill([0.07,0.09,0.13,1.0]);raster.draw(&h.ctx.tessellate(out.shapes,out.pixels_per_point),out.pixels_per_point);let mut rgba=vec![];raster.to_rgba8(&mut rgba);
+                image::save_buffer(dest.join(if focus{"device-battery-lyrics-focus.png"}else{"device-battery-lyrics.png"}),&rgba,1280,140,image::ColorType::Rgba8).unwrap();
+            }
+            raster.free_textures(&out.textures_delta);
+        }
+    }
+}
+
+#[test]
+#[ignore="按需导出无设备的常驻灰环，需指定 DAOZAI_HID_PREVIEW_DIR"]
+fn device_battery_pinned_preview(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.app.settings.battery_pinned=true;h.app.settings.pet=false;
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_HID_PREVIEW_DIR").expect("需指定截图目录"));std::fs::create_dir_all(&dest).unwrap();
+    let mut raster=crate::preview_raster::Raster::new(1280,140);
+    for frame in 0..90 {
+        let t=frame as f64/60.0;let env=Env{t,clock:"09:41:00".into(),today:"2026-11-06".into(),..Default::default()};
+        let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(WIN_W,WIN_H))),time:Some(t),viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};
+        let out=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx,|ui|{let win=ui.max_rect();h.app.frame(ui,win,&env);});});raster.update_textures(&out.textures_delta);
+        if frame==89 {raster.buf.fill([0.07,0.09,0.13,1.0]);raster.draw(&h.ctx.tessellate(out.shapes,out.pixels_per_point),out.pixels_per_point);let mut rgba=vec![];raster.to_rgba8(&mut rgba);image::save_buffer(dest.join("device-battery-pinned.png"),&rgba,1280,140,image::ColorType::Rgba8).unwrap();}
+        raster.free_textures(&out.textures_delta);
+    }
 }
 
 
@@ -4091,7 +4417,7 @@ fn compact_canvas_preserves_panel_and_notice_pixels(){
         }
         rgba
     }
-    for page in std::iter::once(None).chain((0..8).map(Some)) {
+    for page in std::iter::once(None).chain((0..crate::app::PAGE_NAMES.len()).map(Some)) {
         for notice in [false,true] {
             assert_eq!(draw(1280.0,page,notice),draw(960.0,page,notice),"缩减透明余量不能改变页面 {page:?} 和通知 {notice} 的像素");
         }
@@ -4181,7 +4507,7 @@ fn compact_font_atlas_preserves_panel_and_notice_pixels(){
         }
         rgba
     }
-    for page in std::iter::once(None).chain((0..8).map(Some)) {
+    for page in std::iter::once(None).chain((0..crate::app::PAGE_NAMES.len()).map(Some)) {
         for notice in [false,true] {
             let reference=draw(16384,page,notice);
             for limit in [4096,2048] {let other=draw(limit,page,notice);
@@ -4204,7 +4530,7 @@ fn compact_font_atlas_preserves_settings_pixels_at_multiple_scales(){
             *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
         });
         let mut raster=crate::preview_raster::Raster::new((690.0*scale)as usize,(560.0*scale)as usize);let mut result=Vec::new();
-        for tab in 0..12 {h.app.settings_tab=tab;
+        for tab in 0..13 {h.app.settings_tab=tab;
             for frame in 0..3 {
                 let root=h.ctx.run(egui::RawInput{max_texture_side:Some(limit),viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(scale),..Default::default()})).collect(),..Default::default()},|ctx|h.app.settings_ui(ctx,false));
                 let mut child=output.lock().unwrap().take().unwrap();

@@ -1,4 +1,4 @@
-//! 五个页面：音乐 → 专注 → 饮水 → 置物 → 待办。
+//! 音乐、专注、饮水、置物、待办、邮箱等页面；设备电量列表位于 device_battery 模块。
 //! 坐标全部是面板局部逻辑点（419×140），文字 y 是基线。
 
 use crate::anim::{self, lerp, smoothstep, Spring};
