@@ -628,7 +628,7 @@ mod tests {
 
     #[test]
     fn settings_groups_keep_every_page_reachable() {
-        let groups = ["常规", "音乐与歌词", "专注与饮水", "专注与饮水", "待办与置物", "待办与置物", "通知、邮箱与日程", "通知、邮箱与日程", "通知、邮箱与日程", "关于", "页面管理", "AI 额度"];
+        let groups = ["常规", "音乐与歌词", "专注与饮水", "专注与饮水", "待办与置物", "待办与置物", "通知、邮箱与日程", "通知、邮箱与日程", "通知、邮箱与日程", "关于", "页面管理", "AI 额度", "设备电量"];
         for (tab, expected) in groups.iter().enumerate() {
             let matches: Vec<_> = SETTINGS_GROUPS.iter().filter(|(_,start,end)| (*start..=*end).contains(&tab)).collect();
             assert_eq!(matches.len(), 1, "页面 {tab} 必须且只能属于一个分组");
@@ -875,6 +875,30 @@ pub(crate) fn setting_row(ui:&mut egui::Ui,title:&str,description:&str,value:&mu
     ui.add_space(2.0);
 }
 
+/// 设备列表专用行：与 `setting_row` 相同，但说明前多一个状态圆点。
+fn device_setting_row(ui:&mut egui::Ui,title:&str,description:&str,online:bool,value:&mut bool){
+    let ctx=&ui.ctx().clone();
+    ui.add_space(2.0);
+    ui.horizontal(|ui|{
+        let text_w=(ui.available_width()-SETTINGS_SWITCH_W-SETTINGS_ROW_GAP).max(120.0);
+        ui.vertical(|ui|{
+            ui.set_width(text_w);
+            ui.spacing_mut().item_spacing.y=2.0;
+            ui.add(egui::Label::new(egui::RichText::new(title).size(13.0).color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41)))).wrap());
+            ui.horizontal(|ui|{
+                ui.spacing_mut().item_spacing.x=5.0;
+                let (dot_rect,_)=ui.allocate_exact_size(egui::vec2(7.0,7.0),egui::Sense::hover());
+                let color=if online {settings_color(ctx,theme::GREEN,Color32::from_rgb(30,150,80))}else{settings_color(ctx,Color32::from_gray(150),Color32::from_gray(165))};
+                ui.painter().circle_filled(dot_rect.center(),3.5,color);
+                ui.add(egui::Label::new(egui::RichText::new(description).size(11.5).color(settings_color(ctx,Color32::from_gray(175),Color32::from_gray(90)))).wrap());
+            });
+        });
+        ui.add_space((ui.available_width()-SETTINGS_SWITCH_W-ui.spacing().item_spacing.x).max(0.0));
+        switch(ui,value);
+    });
+    ui.add_space(2.0);
+}
+
 /// 设置页统一的分段选择器（灰色底框 + 选中块）。返回值为是否发生了切换。
 pub(crate) fn settings_segmented<T:PartialEq+Copy>(ui:&mut egui::Ui,value:&mut T,options:&[(T,&str)],item_w:f32)->bool{
     let ctx=&ui.ctx().clone();
@@ -933,6 +957,82 @@ pub(crate) fn settings_label(ui:&mut egui::Ui,text:&str){
     ui.label(egui::RichText::new(text).size(11.5).color(settings_color(ctx,Color32::from_gray(185),Color32::from_gray(70))));
     ui.add_space(2.0);
 }
+
+/// 设备图标：纯矢量自绘（鼠标 / 耳机 / 键盘 / 其他），不引入位图。
+fn device_glyph(c:&Card,kind:crate::devices::Kind,cx:f32,cy:f32,size:f32,color:Color32) {
+    let s=size;
+    match kind {
+        crate::devices::Kind::Mouse=>{
+            let (w,h)=(s*0.56,s*0.86);
+            c.fill(cx-w/2.0,cy-h/2.0,w,h,(w*0.42).max(1.0),color);
+            c.fill(cx-s*0.045,cy-s*0.34,s*0.09,s*0.20,s*0.04,Color32::from_black_alpha(85));
+        }
+        crate::devices::Kind::Headphones=>{
+            c.arc(cx,cy-s*0.02,s*0.36,std::f32::consts::PI,std::f32::consts::TAU,s*0.11,color);
+            let (cup_w,cup_h)=(s*0.20,s*0.30);
+            c.fill(cx-s*0.44,cy-s*0.05,cup_w,cup_h,cup_w*0.45,color);
+            c.fill(cx+s*0.24,cy-s*0.05,cup_w,cup_h,cup_w*0.45,color);
+        }
+        crate::devices::Kind::Keyboard=>{
+            c.stroke(cx-s*0.46,cy-s*0.24,s*0.92,s*0.48,s*0.10,s*0.085,color);
+            for row in 0..2 {for column in 0..4 {
+                c.fill(cx-s*0.30+column as f32*s*0.19,cy-s*0.08+row as f32*s*0.14,s*0.10,s*0.07,s*0.02,color);
+            }}
+        }
+        crate::devices::Kind::Other=>{
+            c.stroke(cx-s*0.32,cy-s*0.30,s*0.64,s*0.60,s*0.12,s*0.085,color);
+            c.circle(cx,cy,s*0.09,color);
+        }
+    }
+}
+
+/// 岛体 / 设置页共用的设备电量徽标；`battery == None` 时整圈灰 + 斜线。
+pub(crate) fn device_badge(c:&Card,cx:f32,cy:f32,style:crate::model::DeviceIconStyle,kind:crate::devices::Kind,battery:Option<u8>) {
+    use std::f32::consts::{FRAC_PI_2,TAU};
+    let level=battery.map(|value|value.min(100) as f32/100.0);
+    let dim=level.is_none();
+    let tint=if dim{Color32::from_gray(122)}else{Color32::from_rgb(232,232,236)};
+    match style {
+        crate::model::DeviceIconStyle::Ring=>{
+            let (radius,width)=(10.5,2.8);
+            c.ring(cx,cy,radius,width,crate::paint::alpha(theme::GRAY,0.22));
+            if let Some(level)=level {
+                if level>=0.995 {c.ring(cx,cy,radius,width,theme::GREEN);}
+                else if level>0.005 {c.arc(cx,cy,radius,-FRAC_PI_2,-FRAC_PI_2+TAU*level,width,theme::GREEN);}
+            }
+            device_glyph(c,kind,cx,cy,11.0,tint);
+            if dim {c.seg((cx-7.5,cy+7.5),(cx+7.5,cy-7.5),1.4,Color32::from_gray(125));}
+        }
+        crate::model::DeviceIconStyle::Capsule=>{
+            // 只显示数字（不带 `%`）；宽度按三位数（100）留足，避免被截断。
+            let (w,h)=(38.0,21.0);
+            c.fill(cx-w/2.0,cy-h/2.0,w,h,h/2.0,Color32::from_white_alpha(16));
+            device_glyph(c,kind,cx-9.5,cy,12.0,tint);
+            let text=battery.map(|value|value.min(100).to_string()).unwrap_or_else(||"—".into());
+            c.centered_text(cx+6.5,cy,&text,10.0,W::Bold,if dim{Color32::from_gray(130)}else{Color32::WHITE},H::Center);
+        }
+    }
+}
+
+pub(crate) fn device_overflow(c:&Card,cx:f32,cy:f32,extra:usize) {
+    c.centered_text(cx,cy,&format!("+{extra}"),9.0,W::Semibold,theme::GRAY,H::Center);
+}
+
+/// 设置页的风格预览：可选中的小舞台，点击即切换风格。
+fn device_style_preview(ui:&mut egui::Ui,style:crate::model::DeviceIconStyle,selected:bool)->bool {
+    let ctx=&ui.ctx().clone();
+    let (rect,response)=ui.allocate_exact_size(egui::vec2(124.0,48.0),egui::Sense::click());
+    // 预览固定使用岛体的深色底，保证浅色设置主题下也能看清实际效果。
+    ui.painter().rect_filled(rect,8.0,Color32::from_rgb(22,22,24));
+    if selected {
+        ui.painter().rect_stroke(rect,8.0,egui::Stroke::new(1.5_f32,settings_color(ctx,Color32::from_rgb(70,150,255),Color32::from_rgb(45,105,165))),egui::StrokeKind::Middle);
+    }
+    let c=Card::new(ui,rect.min,rect);
+    device_badge(&c,rect.width()/2.0,19.0,style,crate::devices::Kind::Mouse,Some(78));
+    ui.painter().text(egui::pos2(rect.center().x,rect.bottom()-5.0),egui::Align2::CENTER_BOTTOM,style.label(),egui::FontId::proportional(11.0),Color32::from_gray(200));
+    response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
 fn support_author(ui:&mut egui::Ui){
     let id=egui::Id::new("support-author-open");
     let open=ui.ctx().data(|data|data.get_temp::<bool>(id).unwrap_or(false));
@@ -1032,12 +1132,63 @@ fn setting_choices(ui:&mut egui::Ui,title:&str,value:&mut u32,values:[u32;3],uni
     let options:Vec<(u32,&str)>=values.iter().zip(labels.iter()).map(|(v,l)|(*v,l.as_str())).collect();
     settings_control_row_right(ui,title,|ui|{settings_segmented(ui,value,&options,62.0);});
 }
-const SETTINGS_GROUPS: [(&str,usize,usize);8] = [
+const SETTINGS_GROUPS: [(&str,usize,usize);9] = [
     ("常规",0,0), ("页面管理",10,10), ("音乐与歌词",1,1), ("专注与饮水",2,3),
-    ("待办与置物",4,5), ("通知、邮箱与日程",6,8), ("AI 额度",11,11), ("关于",9,9),
+    ("待办与置物",4,5), ("设备电量",12,12), ("通知、邮箱与日程",6,8), ("AI 额度",11,11), ("关于",9,9),
 ];
 
 impl App {
+    fn set_device_display(&mut self,key:&str,on:bool) {
+        let list=&mut self.settings.device_battery_show;
+        if on {if !list.iter().any(|entry|entry==key){list.push(key.to_string());}}
+        else {list.retain(|entry|entry!=key);}
+    }
+    fn device_battery_settings(&mut self,ui:&mut egui::Ui) {
+        let ctx=&ui.ctx().clone();
+        ui.add(egui::Label::new(egui::RichText::new("在岛上查看鼠标、耳机和键盘的电量；数据每两秒刷新一次。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75)))).wrap());
+        if !self.settings.device_battery {
+            settings_hint(ui,"总开关已关闭：这里仍可管理设备，打开「常规 → 岛体显示 → 设备电量」后才会出现在岛上。");
+        }
+        settings_label(ui,"已连接设备");
+        settings_card(ui,|ui|{
+            if self.devices.is_empty() {
+                ui.add(egui::Label::new(egui::RichText::new("暂未发现蓝牙鼠标、耳机、键盘或已知的 2.4G 接收器。").size(12.0).color(settings_color(ctx,Color32::from_gray(175),Color32::from_gray(90)))).wrap());
+                return;
+            }
+            let mut changes:Vec<(String,bool)>=Vec::new();
+            let mut list=self.devices.clone();
+            crate::devices::sort_devices(&mut list);
+            for (index,device) in list.iter().enumerate() {
+                if index>0 {ui.separator();}
+                let mut show=self.settings.device_battery_show.iter().any(|key|key==&device.key);
+                let before=show;
+                let name=device.display_name();
+                let description=device.description();
+                if device.online {
+                    device_setting_row(ui,&name,&description,true,&mut show);
+                }else{
+                    // 离线设备灰显且不可切换；圆点随整行一起降透明度。
+                    ui.add_enabled_ui(false,|ui|{device_setting_row(ui,&name,&description,false,&mut show);});
+                }
+                if show!=before {changes.push((device.key.clone(),show));}
+            }
+            for (key,show) in changes {self.set_device_display(&key,show);}
+        });
+        settings_hint(ui,"读取通路：蓝牙先走 BLE GATT（180F / 2A19），失败再查 PnP 缓存且只采信 24 小时内更新过的值；2.4G 走接收器的 HID 厂商协议（目前支持小米 2717:50FC）。");
+        settings_label(ui,"图标风格");
+        settings_card(ui,|ui|{
+            let mut style=self.settings.device_icon_style;
+            settings_control_row_right(ui,"岛体样式",|ui|{settings_segmented(ui,&mut style,&[(crate::model::DeviceIconStyle::Ring,"圆环"),(crate::model::DeviceIconStyle::Capsule,"胶囊")],62.0);});
+            ui.add_space(4.0);
+            ui.horizontal(|ui|{
+                if device_style_preview(ui,crate::model::DeviceIconStyle::Ring,style==crate::model::DeviceIconStyle::Ring) {style=crate::model::DeviceIconStyle::Ring;}
+                if device_style_preview(ui,crate::model::DeviceIconStyle::Capsule,style==crate::model::DeviceIconStyle::Capsule) {style=crate::model::DeviceIconStyle::Capsule;}
+            });
+            self.settings.device_icon_style=style;
+        });
+        settings_hint(ui,"新设备默认关闭；关闭总开关后此处选择保留。");
+    }
+
     pub fn settings_ui(&mut self,ctx:&egui::Context,autostart:bool){
         if !self.settings_open{release_support_codes(ctx);}
         self.updates.poll(ctx);
@@ -1078,6 +1229,7 @@ impl App {
                     let icon=match start {
                         0=>egui::include_image!("../assets/settings-icons/system/general.svg"),
                         11=>egui::include_image!("../assets/settings-icons/system/quota.svg"),
+                        12=>egui::include_image!("../assets/settings-icons/system/quota.svg"),
                         10=>egui::include_image!("../assets/settings-icons/system/pages.svg"),
                         1=>egui::include_image!("../assets/settings-icons/system/music.svg"),
                         2=>egui::include_image!("../assets/settings-icons/system/focus.svg"),
@@ -1113,8 +1265,8 @@ impl App {
                     }
                 }
                 ui.visuals_mut().selection.bg_fill=settings_color(ctx,Color32::from_rgb(45,105,165),Color32::from_rgb(209,226,248));
-                let titles=["常规","音乐与歌词","专注","饮水","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度"];
-                ui.label(egui::RichText::new(titles[self.settings_tab.min(11)]).size(18.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
+                let titles=["常规","音乐与歌词","专注","饮水","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度","设备电量"];
+                ui.label(egui::RichText::new(titles[self.settings_tab.min(12)]).size(18.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
                 if let Some((_,start,end))=SETTINGS_GROUPS.iter().find(|(_,start,end)|(*start..=*end).contains(&self.settings_tab)) {
                     if start!=end {
                         ui.add_space(7.0);
@@ -1137,6 +1289,7 @@ impl App {
                     // 右侧给滚动条留出空隙，卡片和开关不会被它压住。
                     ui.set_width((ui.available_width()-12.0).max(240.0));
                     match self.settings_tab {
+                    12=>self.device_battery_settings(ui),
                     11=>self.quota_settings(ui),
                     10=>{
                         ui.label(egui::RichText::new("选择需要的页面和状态组件。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
@@ -1150,7 +1303,7 @@ impl App {
                         });
                         settings_label(ui,"功能页面");
                         settings_card(ui,|ui|{
-                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程"];
+                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","全部在线设备的电量总览，悬停展开读取诊断"];
                             ui.label(egui::RichText::new("拖动左侧手柄调整顺序，松开后自动应用到岛。").size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             #[derive(Clone)]
                             struct PageDrag(usize);
@@ -1273,6 +1426,7 @@ impl App {
                             ui.label(egui::RichText::new(format!("当前：{position}。展开面板和通知始终留在屏幕内；换屏或调整大小后保持相对位置。")).size(11.0).color(ui.visuals().weak_text_color()));
                             ui.separator();
                             settings_control_row_right(ui,"时间制式",|ui|{settings_segmented(ui,&mut self.settings.clock_12h,&[(false,"24 小时"),(true,"12 小时")],72.0);});
+                            setting_row(ui,"显示秒","时钟带秒，与 12 / 24 小时制和时段文字同时生效",&mut self.settings.clock_show_seconds);
                             settings_control_row_right(ui,"时段文字",|ui|{settings_segmented(ui,&mut self.settings.clock_period,&[(0,"不显示"),(1,"上午 / 下午"),(2,"详细时段")],72.0);});
                             settings_hint(ui,"详细时段：凌晨、上午、中午、下午、傍晚、晚上");
                             ui.separator();
@@ -1284,6 +1438,12 @@ impl App {
                             let mut pet=self.settings.pet;
                             setting_row(ui,"岛仔吉祥物","收起时常驻，播放音乐时一起唱歌",&mut pet);
                             if pet!=self.settings.pet {self.set_pet(pet);}
+                            ui.separator();
+                            setting_row(ui,"设备电量","在岛上显示鼠标、耳机和键盘的电量",&mut self.settings.device_battery);
+                            ui.add_space(4.0);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
+                                if ui.button("管理设备…").clicked(){self.settings_tab=12;}
+                            });
                         });
                         self.avoidance.settings(ui,&mut self.settings);
                         settings_label(ui,"声音与显示");
