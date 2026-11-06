@@ -28,6 +28,66 @@ pub enum MediaKind {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PlayMode {
+    #[default]
+    Unknown,
+    Random,
+    Order,
+    Heart,
+    Cycle,
+    OneCycle,
+}
+
+impl PlayMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            PlayMode::Unknown => "播放模式",
+            PlayMode::Random => "随机播放",
+            PlayMode::Order => "顺序播放",
+            PlayMode::Heart => "心动模式",
+            PlayMode::Cycle => "列表循环",
+            PlayMode::OneCycle => "单曲循环",
+        }
+    }
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => PlayMode::Random,
+            2 => PlayMode::Order,
+            3 => PlayMode::Heart,
+            4 => PlayMode::Cycle,
+            5 => PlayMode::OneCycle,
+            _ => PlayMode::Unknown,
+        }
+    }
+}
+
+/// 最近一次读到的播放模式（目前只有网易云能读）。
+static PLAY_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static MODE_ERROR: Mutex<Option<String>> = Mutex::new(None);
+/// 界面侧已知的总时长（毫秒），给「按秒定位」在日志还没读到元数据时兜底。
+static KNOWN_DURATION_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn play_mode() -> PlayMode {
+    PlayMode::from_u8(PLAY_MODE.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+pub fn set_play_mode(mode: PlayMode) {
+    PLAY_MODE.store(mode as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn set_mode_error(message: impl Into<String>) {
+    if let Ok(mut slot) = MODE_ERROR.lock() {
+        *slot = Some(message.into());
+    }
+}
+
+/// 取走一次待提示的模式切换错误，避免重复弹提示。
+pub fn take_mode_error() -> Option<String> {
+    MODE_ERROR.lock().ok().and_then(|mut slot| slot.take())
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct NowPlaying {
     pub title: String,
@@ -44,6 +104,8 @@ pub struct NowPlaying {
     pub duration: f64,
     pub artwork: Option<Arc<eframe::egui::ColorImage>>,
     pub playback_type: MediaKind,
+    /// 播放模式；只有能读到的客户端（网易云）才不是 Unknown。
+    pub play_mode: PlayMode,
 }
 
 impl NowPlaying {
@@ -372,7 +434,7 @@ fn read_session(session:&windows::Media::Control::GlobalSystemMediaTransportCont
     let album=media_text(props.AlbumTitle())?;
     if !has_position{sampled_at=None;}
     let playback_type=match playback_type.map(|kind|kind.0){Some(1)=>MediaKind::Music,Some(2)=>MediaKind::Video,_=>MediaKind::Unknown};
-    Some(NowPlaying { title, artist, album, source, song_id:None, playing, position, sampled_at, event_time_ms, duration, artwork:None, playback_type })
+    Some(NowPlaying { title, artist, album, source, song_id:None, playing, position, sampled_at, event_time_ms, duration, artwork:None, playback_type, play_mode:PlayMode::Unknown })
 }
 
 #[cfg(not(windows))]
@@ -445,6 +507,279 @@ pub fn control(cmd: Transport,source:&str) {
 #[cfg(not(windows))]
 pub fn control(_cmd: Transport,_source:&str) {}
 
+/// 该播放来源是否支持读取/切换播放模式（目前只有网易云）。
+pub fn supports_play_mode(source:&str)->bool {source.eq_ignore_ascii_case("cloudmusic.exe")}
+
+/// 切到下一个播放模式（随机 → 顺序 → 心动 → 列表循环 → 单曲循环）。目前只支持网易云。
+#[cfg(windows)]
+pub fn cycle_play_mode()->bool {netease_playback::cycle_play_mode()}
+
+#[cfg(not(windows))]
+pub fn cycle_play_mode()->bool {false}
+
+/// 播放来源的可读名称：用于悬停提示与「已切换」文案。
+pub fn app_label(source:&str)->String {
+    let source=source.trim();
+    if source.is_empty(){return "播放器".into();}
+    let lower=source.to_lowercase();
+    let known=[
+        ("cloudmusic","网易云音乐"),
+        ("qqmusic","QQ音乐"),
+        ("kugou","酷狗音乐"),
+        ("kuwo","酷我音乐"),
+        ("sodamusic","汽水音乐"),
+        ("汽水音乐","汽水音乐"),
+        ("spotify","Spotify"),
+        ("musicbee","MusicBee"),
+        ("foobar","foobar2000"),
+        ("aimp","AIMP"),
+        ("potplayer","PotPlayer"),
+        ("vlc","VLC"),
+        ("msedge","Edge 浏览器"),
+        ("chrome","Chrome"),
+        ("firefox","Firefox"),
+        ("brave","Brave"),
+        ("opera","Opera"),
+    ];
+    for (key,name) in known {
+        if lower.contains(key){return name.into();}
+    }
+    // 未知来源：去掉路径与 .exe，保留原名。
+    let file=source.rsplit(['\\','/']).next().unwrap_or(source);
+    if file.len()>4 && file[file.len()-4..].eq_ignore_ascii_case(".exe") {file[..file.len()-4].to_string()} else {file.to_string()}
+}
+
+/// 封面这一下是开关：客户端已经在最前面就收起来，否则切到前面。
+/// 浮岛窗口带 `WS_EX_NOACTIVATE`，点它不会抢前台，所以点下的瞬间
+/// `GetForegroundWindow()` 就是「客户端现在是不是在最前面」的真实答案。
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+enum WindowToggle { Show, Hide }
+fn toggle_action(visible:bool,in_front:bool)->WindowToggle {
+    if visible && in_front {WindowToggle::Hide}else{WindowToggle::Show}
+}
+
+/// 由浮岛藏起来的主窗口（按来源记住）：再点一次封面直接还原，
+/// 不用重新枚举——窗口藏起来后打分排序可能选中别的窗口（歌词窗等）。
+#[cfg(windows)]
+static HIDDEN_WINDOW: Mutex<Option<(String,isize)>> = Mutex::new(None);
+
+/// 取回上次被藏起来的窗口；来源不匹配或窗口已销毁就当作没有。
+#[cfg(windows)]
+fn take_hidden(source:&str)->Option<windows::Win32::Foundation::HWND> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+    let mut slot=HIDDEN_WINDOW.lock().ok()?;
+    let (stored,value)=slot.as_ref()?;
+    if !stored.eq_ignore_ascii_case(source) {return None;}
+    let window=HWND(*value as *mut core::ffi::c_void);
+    *slot=None;
+    unsafe{IsWindow(window).as_bool().then_some(window)}
+}
+
+#[cfg(windows)]
+fn remember_hidden(source:&str,window:windows::Win32::Foundation::HWND) {
+    if let Ok(mut slot)=HIDDEN_WINDOW.lock() {*slot=Some((source.to_string(),window.0 as isize));}
+}
+
+/// 判断窗口是不是「已经在最前面」：必须可见、没最小化，并且就是当前前台窗口
+/// （或它的弹出子窗口）。隐藏后系统仍会把它报成前台窗口，所以可见性必须一起看。
+#[cfg(windows)]
+fn is_in_front(window:windows::Win32::Foundation::HWND)->bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GA_ROOT,GetAncestor,GetForegroundWindow,IsIconic,IsWindowVisible};
+    unsafe{
+        if !IsWindowVisible(window).as_bool() || IsIconic(window).as_bool() {return false;}
+        let foreground=GetForegroundWindow();
+        foreground==window || GetAncestor(foreground,GA_ROOT)==window
+    }
+}
+
+/// 收起来：直接 `SW_HIDE`，等同于客户端自己的「关闭到托盘」，播放不中断。
+#[cfg(windows)]
+fn hide_window(window:windows::Win32::Foundation::HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE,ShowWindow};
+    unsafe{let _=ShowWindow(window,SW_HIDE);}
+}
+
+/// 把正在播放的客户端切到前台；没在运行就尝试启动。返回给用户的提示文案。
+/// 只做「切窗口 / 拉起进程」这些毫秒级动作，不在这里阻塞等待。
+#[cfg(windows)]
+pub fn activate(source:&str)->String {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let label=app_label(source);
+    let candidates=exe_candidates(source);
+    if let Some(window)=take_hidden(source) {
+        focus_window(window);
+        return format!("已切换到{label}");
+    }
+    if let Some(window)=candidates.iter().find_map(|exe|find_app_window(exe)) {
+        let visible=unsafe{windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(window).as_bool()};
+        match toggle_action(visible,is_in_front(window)) {
+            WindowToggle::Hide=>{
+                hide_window(window);
+                remember_hidden(source,window);
+                return format!("已隐藏{label}");
+            }
+            WindowToggle::Show=>{
+                focus_window(window);
+                return format!("已切换到{label}");
+            }
+        }
+    }
+    let launch=|target:&str| unsafe {
+        let wide:Vec<u16>=target.encode_utf16().chain(std::iter::once(0)).collect();
+        let op:Vec<u16>="open\0".encode_utf16().collect();
+        let result=ShellExecuteW(None,PCWSTR(op.as_ptr()),PCWSTR(wide.as_ptr()),PCWSTR::null(),PCWSTR::null(),SW_SHOWNORMAL);
+        result.0 as usize>32
+    };
+    // 1) 直接按 exe 名拉起（ShellExecute 会查 App Paths 与 PATH）。
+    for exe in &candidates {
+        if launch(exe){return format!("正在打开{label}");}
+    }
+    // 2) 开始菜单快捷方式：很多客户端只有 lnk，没有注册 App Paths。
+    if let Some(lnk)=start_menu_shortcut(&label,&candidates) {
+        if launch(&lnk.to_string_lossy()) {return format!("正在打开{label}");}
+    }
+    // 3) UWP / 已注册 AUMID 的应用走应用列表。
+    if launch(&format!("shell:AppsFolder\\{source}")) {return format!("正在打开{label}");}
+    format!("没找到{label}，请先手动打开一次")
+}
+
+/// 播放器来源对应的可执行文件名：按应用音量要拿它去比音频会话。
+pub fn player_exe(source:&str)->String {
+    #[cfg(windows)]
+    {
+        exe_candidates(source).into_iter().next().unwrap_or_default()
+    }
+    #[cfg(not(windows))]
+    {
+        let _=source;
+        String::new()
+    }
+}
+
+/// 由 SMTC 来源推导可执行文件名候选。
+#[cfg(windows)]
+fn exe_candidates(source:&str)->Vec<String> {
+    let source=source.trim();
+    if source.is_empty()||source.contains('!'){return Vec::new();}
+    if source.to_lowercase().ends_with(".exe"){return vec![source.to_string()];}
+    let aliases=[
+        ("汽水音乐","SodaMusic.exe"),
+        ("网易云音乐","cloudmusic.exe"),
+        ("酷狗音乐","KuGou.exe"),
+        ("酷我音乐","KwMusic.exe"),
+    ];
+    for (key,exe) in aliases {
+        if source==key{return vec![exe.to_string()];}
+    }
+    vec![format!("{source}.exe")]
+}
+
+#[cfg(windows)]
+unsafe fn process_file_name(pid:u32)->Option<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess,QueryFullProcessImageNameW,PROCESS_NAME_WIN32,PROCESS_QUERY_LIMITED_INFORMATION};
+    let process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,false,pid).ok()?;
+    let mut path=[0u16;1024];let mut length=path.len() as u32;
+    let result=QueryFullProcessImageNameW(process,PROCESS_NAME_WIN32,PWSTR(path.as_mut_ptr()),&mut length);
+    let _=CloseHandle(process);
+    if result.is_err(){return None;}
+    let full=String::from_utf16_lossy(&path[..length as usize]);
+    Some(full.rsplit('\\').next().unwrap_or(&full).to_string())
+}
+
+/// 找该进程的顶层窗口：按「有标题栏 > 可见 > 面积大 > 有标题」打分，避免选中 IME / GDI+ 这类工具窗口。
+#[cfg(windows)]
+fn find_app_window(exe:&str)->Option<windows::Win32::Foundation::HWND> {
+    use windows::Win32::Foundation::{BOOL,HWND,LPARAM};
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    use windows::Win32::UI::WindowsAndMessaging::{EnumWindows,GetWindowLongW,GetWindowRect,GetWindowTextLengthW,GetWindowThreadProcessId,GWL_EXSTYLE,GWL_STYLE,IsWindowVisible,WS_CAPTION,WS_EX_NOACTIVATE,WS_EX_TOOLWINDOW};
+    struct Search<'a>{exe:&'a str,best:Option<(u16,HWND)>}
+    unsafe extern "system" fn visit(hwnd:HWND,param:LPARAM)->BOOL {
+        let search=&mut *(param.0 as *mut Search);
+        if search.best.is_some_and(|(score,_)|score>=12){return BOOL(0);}
+        let extended=GetWindowLongW(hwnd,GWL_EXSTYLE) as u32;
+        if extended & (WS_EX_TOOLWINDOW.0|WS_EX_NOACTIVATE.0)!=0{return BOOL(1);}
+        let mut pid=0u32;
+        GetWindowThreadProcessId(hwnd,Some(&mut pid));
+        if pid==0||pid==GetCurrentProcessId(){return BOOL(1);}
+        if !process_file_name(pid).is_some_and(|name|name.eq_ignore_ascii_case(search.exe)){return BOOL(1);}
+        let mut score=0u16;
+        if GetWindowTextLengthW(hwnd)>0{score+=2;}
+        if IsWindowVisible(hwnd).as_bool(){score+=4;}
+        if GetWindowLongW(hwnd,GWL_STYLE) as u32 & WS_CAPTION.0!=0{score+=4;}
+        let mut rect=windows::Win32::Foundation::RECT::default();
+        if GetWindowRect(hwnd,&mut rect).is_ok() {
+            if rect.right-rect.left>300 && rect.bottom-rect.top>200 {score+=2;}
+        }
+        if search.best.is_none_or(|(old,_)|score>old){search.best=Some((score,hwnd));}
+        BOOL(1)
+    }
+    let mut search=Search{exe,best:None};
+    unsafe{let _=EnumWindows(Some(visit),LPARAM(&mut search as *mut Search as isize));}
+    search.best.map(|(_,hwnd)|hwnd)
+}
+
+/// 把窗口带到前台：先常规恢复，被前台锁挡住时临时挂接输入线程再抢一次。
+#[cfg(windows)]
+fn focus_window(hwnd:windows::Win32::Foundation::HWND) {
+    use windows::Win32::System::Threading::{AttachThreadInput,GetCurrentThreadId};
+    use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+    use windows::Win32::UI::WindowsAndMessaging::{BringWindowToTop,GetForegroundWindow,GetWindowThreadProcessId,IsIconic,SetForegroundWindow,ShowWindow,SW_RESTORE,SW_SHOW};
+    unsafe{
+        // 托盘里收起的窗口没有最小化标志，两种恢复都试一遍。
+        if IsIconic(hwnd).as_bool(){let _=ShowWindow(hwnd,SW_RESTORE);}
+        else{let _=ShowWindow(hwnd,SW_SHOW);}
+        let _=SetForegroundWindow(hwnd);
+        if GetForegroundWindow()==hwnd {return;}
+        let foreground=GetForegroundWindow();
+        let foreground_thread=GetWindowThreadProcessId(foreground,None);
+        let current=GetCurrentThreadId();
+        if foreground_thread!=0 && foreground_thread!=current {
+            let _=AttachThreadInput(current,foreground_thread,true);
+            let _=BringWindowToTop(hwnd);
+            let _=SetForegroundWindow(hwnd);
+            let _=SetFocus(hwnd);
+            let _=AttachThreadInput(current,foreground_thread,false);
+        }
+    }
+}
+
+/// 在开始菜单里按名称找快捷方式：`exe` 精确同名优先，其次包含可读名称。
+#[cfg(windows)]
+fn start_menu_shortcut(label:&str,candidates:&[String])->Option<std::path::PathBuf> {
+    let roots=[
+        std::env::var_os("APPDATA").map(|dir|std::path::PathBuf::from(dir).join(r"Microsoft\Windows\Start Menu\Programs")),
+        std::env::var_os("PROGRAMDATA").map(|dir|std::path::PathBuf::from(dir).join(r"Microsoft\Windows\Start Menu\Programs")),
+    ];
+    let stems:Vec<String>=candidates.iter().map(|exe|{
+        let lower=exe.to_lowercase();
+        if lower.ends_with(".exe"){exe[..exe.len()-4].to_string()}else{exe.clone()}
+    }).collect();
+    let mut stack:Vec<(std::path::PathBuf,u32)>=roots.into_iter().flatten().map(|dir|(dir,0)).collect();
+    let mut loose=None;
+    while let Some((dir,depth))=stack.pop() {
+        if depth>3{continue;}
+        let Ok(entries)=std::fs::read_dir(&dir) else{continue};
+        for entry in entries.flatten() {
+            let path=entry.path();
+            if path.is_dir(){stack.push((path,depth+1));continue;}
+            let Some(name)=path.file_stem().and_then(|name|name.to_str()) else{continue};
+            if path.extension().is_none_or(|ext|!ext.eq_ignore_ascii_case("lnk")){continue;}
+            if stems.iter().any(|stem|name.eq_ignore_ascii_case(stem)){return Some(path);}
+            if loose.is_none() && !label.is_empty() && name.contains(label){loose=Some(path);}
+        }
+    }
+    loose
+}
+
+#[cfg(not(windows))]
+pub fn activate(_source:&str)->String {"当前系统不支持唤起播放器".into()}
+
 /// 跳转在工作线程执行；专用回退必须回读实际位置，避免播放器接口假成功。
 #[cfg(windows)]
 pub fn seek(seconds:f64,source:&str)->bool {
@@ -452,6 +787,12 @@ pub fn seek(seconds:f64,source:&str)->bool {
     static LOCK:Mutex<()>=Mutex::new(());
     let Ok(_lock)=LOCK.lock()else{return false;};
     if matches!(source.to_ascii_lowercase().as_str(),"kugou"|"kugou.exe") && kugou_control::seek(seconds){return true;}
+    // 网易云不上报系统时间轴（EndTime 恒为 0），SMTC 的定位调用静默无效，
+    // 改由原生通道点它的进度条；时长拿不到就用最近一次记录的兜底。
+    if source.eq_ignore_ascii_case("cloudmusic.exe") {
+        let fallback=KNOWN_DURATION_MS.load(std::sync::atomic::Ordering::Relaxed) as f64/1000.0;
+        if netease_playback::seek(seconds,fallback) {return true;}
+    }
     let _apartment=init_winrt();
     use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager as Manager;
     let session=media_result(Manager::RequestAsync).and_then(|mgr|mgr.GetSessions().ok())
@@ -687,10 +1028,17 @@ pub fn spawn_poller(state: Shared,ctx:eframe::egui::Context)->Poller {
             #[cfg(not(windows))]
             let native_pending=false;
             let mut np=choose_media_for_source(system,native,&selected_source,native_pending).unwrap_or_default();
+            if np.duration>0.0 {KNOWN_DURATION_MS.store((np.duration*1000.0) as u64,std::sync::atomic::Ordering::Relaxed);}
             memory.update(&mut np,std::time::Instant::now());
             if !np.source.is_empty(){selected_source=np.source.clone();}
             #[cfg(windows)]
             netease.fill_artwork(&mut np);
+            // 播放模式目前只有网易云读得到，其他客户端保持 Unknown。
+            if np.source.eq_ignore_ascii_case("cloudmusic.exe") {
+                #[cfg(windows)]
+                netease_playback::probe_play_mode_once();
+                np.play_mode=play_mode();
+            }
             playback_clock.update(&mut np);
             if np.title.is_empty() {
                 artwork.clear(true);
@@ -698,6 +1046,8 @@ pub fn spawn_poller(state: Shared,ctx:eframe::egui::Context)->Poller {
             if let Ok(mut cur) = state.lock() {
                 let changed=cur.title!=np.title || cur.artist!=np.artist || cur.playing!=np.playing
                     || cur.source!=np.source || cur.song_id!=np.song_id || cur.duration!=np.duration
+                    // 播放模式也要算变化，否则切完模式界面不重绘，图标得等下次别的原因重画才更新。
+                    || cur.play_mode!=np.play_mode
                     || cur.artwork.as_ref().zip(np.artwork.as_ref()).map_or(cur.artwork.is_some()!=np.artwork.is_some(),|(old,new)|!Arc::ptr_eq(old,new));
                 *cur = np;
                 if changed{ctx.request_repaint();}
@@ -804,6 +1154,24 @@ mod tests {
         let image=image::DynamicImage::new_rgba8(4097,1);
         let mut bytes=std::io::Cursor::new(Vec::new());image.write_to(&mut bytes,image::ImageFormat::Png).unwrap();
         assert!(decode_artwork(bytes.get_ref()).is_none(),"超大尺寸封面应在解码前拒绝");
+    }
+
+    #[test]
+    fn cover_click_hides_only_when_the_client_is_already_in_front(){
+        assert_eq!(toggle_action(true,true),WindowToggle::Hide,"已经盖在最前面：再点一下收起");
+        assert_eq!(toggle_action(true,false),WindowToggle::Show,"被别的窗口挡住：先切到前面");
+        assert_eq!(toggle_action(false,false),WindowToggle::Show,"收在托盘（不可见）：先显示出来");
+        assert_eq!(toggle_action(false,true),WindowToggle::Show,"不可见时即使被报成前台窗口也不能再去隐藏");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn remembered_hidden_window_only_answers_its_own_source(){
+        use windows::Win32::Foundation::HWND;
+        remember_hidden("cloudmusic.exe",HWND(1 as *mut core::ffi::c_void));
+        assert!(take_hidden("QQMusic.exe").is_none(),"别的来源不能拿走这个句柄");
+        assert!(take_hidden("cloudmusic.exe").is_none(),"句柄无效时应被丢弃");
+        assert!(take_hidden("cloudmusic.exe").is_none(),"取过一次就该清空，避免下次误用");
     }
 
     #[test]

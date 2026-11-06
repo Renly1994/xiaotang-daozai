@@ -148,6 +148,12 @@ fn unread_step(_horizontal: bool) -> f32 { 22.0 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Cmd {
     Media(Transport),
+    /// 把正在播放的客户端切到前台（没运行就尽量启动）。
+    ActivatePlayer(String),
+    /// 启动清单里选中的播放器：显示名 + 可执行文件路径。
+    LaunchPlayer(String, PathBuf),
+    /// 切到下一个播放模式（目前支持网易云）。
+    CyclePlayMode,
     Open(PathBuf),
     ViewMessenger(Unread),
     OpenUrl(String),
@@ -169,6 +175,10 @@ pub enum Cmd {
     SetVolume(u32),
     /// 切换系统静音。
     ToggleMute,
+    /// 把正在播放的客户端自己的音量设为 0..100。
+    SetPlayerVolume(u32),
+    /// 切换正在播放的客户端的静音。
+    TogglePlayerMute,
     /// v0.5.5：账号清单变了，让外壳重新同步收信线程。
     MailSync,
     /// 测试某个邮箱的连接（授权码只在内存里传给工作线程）。
@@ -639,6 +649,9 @@ pub struct App {
     pub(crate) music_artwork: Option<(std::sync::Arc<egui::ColorImage>,egui::TextureHandle)>,
 
     forced_open_until:f64,
+    /// 浮岛自己发起的动作（切播放器、定位、切模式）之后的一小段时间里，
+    /// 由这些动作引来的前台事件不算「用户切走了」，别把悬停锁上。
+    hover_hold_until:f64,
     pub settings_open:bool,
     pub displays:Vec<crate::display_layout::Display>,
     browser_at_top:bool,
@@ -693,6 +706,17 @@ pub struct App {
     pub(crate) volume_quiet_until: f64,
     /// 音量条填充的缓动量（0..1），让数值变化有「量感」。
     pub(crate) volume_a: f32,
+    /// 正在播放的客户端自己的音量（音量滑条弹层）。只在 `player_volume_for` 对上当前来源时可信。
+    pub(crate) player_volume: Option<crate::appaudio::AppVolume>,
+    pub(crate) player_volume_for: String,
+    /// 音量滑条弹层的关闭时刻：每次交互都往后推，静置一会儿自己收。
+    pub(crate) volume_popup_until: f64,
+    /// 「暂无音乐」时点封面弹出的播放器清单：打开时刻（`None` 表示收起）。
+    pub(crate) player_menu: Option<f64>,
+    /// 清单滚动量（装了很多客户端时只显示前几行）。
+    pub(crate) player_menu_scroll: f32,
+    /// 最近一次扫出来的本机播放器，打开清单时刷新。
+    pub(crate) players: Vec<crate::players::Player>,
     /// 上一次看到的蓝牙设备，用来只在连接/断开时提示一次。
     pub(crate) bt_shown: Vec<crate::bt::Device>,
     bt_initialized: bool,
@@ -780,7 +804,7 @@ impl App {
             media_anchor: (String::new(), 0.0, 0.0, false),
             media: NowPlaying::default(),
             music_artwork: None,
-            forced_open_until:0.0, settings_open:false, displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_tab:0, settings_category:0, wechat_status:String::new(), notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
+            forced_open_until:0.0, hover_hold_until:0.0, settings_open:false, displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_tab:0, settings_category:0, wechat_status:String::new(), notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
             listener_status: "尚未连接".into(),
             notification_bell_until: 0.0, notification_bell_at: -10.0, notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, pending_messengers:Vec::new(), messenger_scroll:0.0, alerts: Default::default(), history: Default::default(), pending: vec![],
             todo_first: 0, pet: Default::default(), last_drink: None,
@@ -797,6 +821,12 @@ impl App {
             volume_ui: None,
             volume_quiet_until: 0.0,
             volume_a: 0.0,
+            player_volume: None,
+            player_volume_for: String::new(),
+            volume_popup_until: 0.0,
+            player_menu: None,
+            player_menu_scroll: 0.0,
+            players: Vec::new(),
             bt_shown: Vec::new(),
             bt_initialized: false,
             mail: MailState { accounts: mail::load_accounts(), ..Default::default() },
@@ -1236,9 +1266,38 @@ impl App {
         self.w.tune(OPEN_W.0,OPEN_W.1);self.h.tune(OPEN_H.0,OPEN_H.1);
         self.w.target=PW;self.h.target=self.expanded_height();
     }
-    pub fn open_settings(&mut self){
-        self.settings_open=true;
-        self.settings_focus_requested=true;
+    /// 拖动/点击进度条这类「点完还要接着操作」的动作，别被一次前台事件顺手收起。
+    pub fn keep_open(&mut self,seconds:f64){
+        self.open=true;
+        self.hover_lock=false;
+        self.leave_since=None;
+        self.forced_open_until=self.forced_open_until.max(self.t+seconds);
+        self.hover_hold_until=self.hover_hold_until.max(self.t+seconds);
+    }
+
+    /// 当前来源的播放器音量；来源对不上时当作未知，别把上一个客户端的读数套上去。
+    pub fn player_volume_of(&self,source:&str)->Option<crate::appaudio::AppVolume> {
+        if self.player_volume_for.eq_ignore_ascii_case(source) {self.player_volume}else{None}
+    }
+    pub fn set_player_volume(&mut self,source:&str,volume:crate::appaudio::AppVolume) {
+        self.player_volume=Some(volume);
+        self.player_volume_for=source.to_string();
+    }
+    /// 音量滑条弹层是否还开着（静置几秒后自己收）。
+    pub fn volume_popup_open(&self)->bool {self.t<self.volume_popup_until}
+    /// 打开或续期音量弹层。
+    pub fn open_volume_popup(&mut self,seconds:f64) {self.volume_popup_until=self.t+seconds;}
+    pub fn close_volume_popup(&mut self) {self.volume_popup_until=0.0;}
+    /// 「暂无音乐」时的播放器清单是否开着。
+    pub fn player_menu_open(&self)->bool {self.player_menu.is_some()}
+    /// 打开清单：顺手重扫一遍，刚装好的客户端不用重启就能出现在里面。
+    pub fn open_player_menu(&mut self) {
+        self.players=crate::players::scan();
+        self.player_menu_scroll=0.0;
+        self.player_menu=Some(self.t);
+    }
+    pub fn close_player_menu(&mut self) {self.player_menu=None;}
+    pub fn open_settings(&mut self){        self.settings_open=true;        self.settings_focus_requested=true;
     }
     pub fn open_settings_category(&mut self,category:usize){
         self.settings_category=category.min(3);
@@ -1276,8 +1335,11 @@ impl App {
     }
 
     pub fn foreground_changed(&mut self) {
-        self.hover_lock=true;
         if self.adding && self.buf.trim().is_empty(){self.cancel_edit();}
+        // 刚点过封面/时间条/模式按钮时，前台一定会变（客户端上来了或者被收起），
+        // 这时候锁上悬停会让面板当着用户的面收走，没法接着点第二下。
+        if self.t<self.hover_hold_until {return;}
+        self.hover_lock=true;
     }
 
     /// 带过渡地切到某页。`dir` > 0 表示内容从右侧进入。
@@ -1545,7 +1607,9 @@ impl App {
                 let mail_body=self.page==5 && self.mail.open_uid.is_some()
                     && Rect::from_min_max(Pos2::new(46.0,104.0),Pos2::new(374.0,194.0)).contains(cursor);
                 let mail_list=self.page==5 && !self.mail.accounts.is_empty() && self.mail.open_uid.is_none() && self.mail_list_bounds().contains(cursor);
-                if mail_body || mail_list {self.wheel_delta=0.0;}
+                // 音量滑条弹层开着时滚轮用来微调音量，别顺手翻页。
+                let volume_popup=self.page==0 && self.volume_popup_open();
+                if mail_body || mail_list || volume_popup {self.wheel_delta=0.0;}
                 else {
                     // 累积高精度滚轮的小幅输入；停顿或反向时丢弃上一段余量。
                     if self.t-self.wheel_at>0.18 || self.wheel_delta*scroll<0.0 {self.wheel_delta=0.0;}

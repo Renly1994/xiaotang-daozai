@@ -458,6 +458,49 @@ pub fn speaker(c:&Card,cx:f32,cy:f32,muted:bool,color:Color32) {
     }
 }
 
+fn mode_arrow(c:&Card,x:f32,y:f32,angle:f32,size:f32,width:f32,color:Color32) {
+    for side in [-0.62f32,0.62] {
+        let a=angle+PI+side;
+        c.seg((x,y),(x+size*a.cos(),y+size*a.sin()),width,color);
+    }
+}
+
+/// 播放模式图标（随机 / 顺序 / 心动 / 列表循环 / 单曲循环）。
+pub fn play_mode(c:&Card,cx:f32,cy:f32,mode:crate::smtc::PlayMode,color:Color32) {
+    use crate::smtc::PlayMode;
+    let r=7.2;
+    let w=1.35;
+    match mode {
+        PlayMode::Random => {
+            c.seg((cx-r,cy-r*0.72),(cx+r*0.7,cy+r*0.72),w,color);
+            c.seg((cx-r,cy+r*0.72),(cx+r*0.7,cy-r*0.72),w,color);
+            mode_arrow(c,cx+r*0.85,cy+r*0.86,0.62,3.4,w,color);
+            mode_arrow(c,cx+r*0.85,cy-r*0.86,-0.62,3.4,w,color);
+        }
+        PlayMode::Order => {
+            c.seg((cx-r*0.85,cy),(cx+r*0.8,cy),w,color);
+            mode_arrow(c,cx+r*0.9,cy,0.0,3.8,w,color);
+            c.seg((cx-r*0.85,cy-5.2),(cx-r*0.1,cy-5.2),w,alpha(color,0.55));
+            c.seg((cx-r*0.85,cy+5.2),(cx-r*0.1,cy+5.2),w,alpha(color,0.55));
+        }
+        PlayMode::Cycle|PlayMode::OneCycle => {
+            c.arc(cx,cy,r,-2.35,1.55,w,color);
+            let end=1.55f32;
+            mode_arrow(c,cx+r*end.cos(),cy+r*end.sin(),end+FRAC_PI_2,3.4,w,color);
+            if mode==PlayMode::OneCycle {
+                c.text(cx,cy+3.3,"1",8.0,W::Bold,color,H::Center);
+            }
+        }
+        PlayMode::Heart => {
+            let lobe=r*0.5;
+            c.circle(cx-r*0.44,cy-lobe*0.36,lobe,color);
+            c.circle(cx+r*0.44,cy-lobe*0.36,lobe,color);
+            c.poly(&[(cx-r*0.94,cy-lobe*0.3),(cx+r*0.94,cy-lobe*0.3),(cx,cy+r*0.95)],color);
+        }
+        PlayMode::Unknown => {}
+    }
+}
+
 pub fn note(c: &Card, cx: f32, cy: f32, size: f32, color: Color32) {
     let s = size;
     c.circle(cx - s * 0.24, cy + s * 0.28, s * 0.14, color);

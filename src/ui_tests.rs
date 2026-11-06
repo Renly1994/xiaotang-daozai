@@ -760,15 +760,38 @@ fn kugou_position_advances_without_duration_and_respects_pause_and_seek(){
 }
 
 #[test]
-fn music_speaker_button_toggles_mute(){
+fn music_volume_slider_follows_hover_and_speaker_click_mutes(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    h.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),duration:120.0,..Default::default()};
-    h.app.volume_ui=Some((45,false));
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    h.app.show_page(0);
+    h.media=crate::smtc::NowPlaying{source:"cloudmusic.exe".into(),title:"Track".into(),artist:"Artist".into(),
+        position:10.0,duration:221.0,..Default::default()};
+    h.hover(H::local(300.0,60.0),0.8);
+    assert!(h.app.open);
+    h.app.show_lyrics=false;
+    h.frame(vec![]);
+    // 鼠标移到喇叭上：竖条自己浮出来（跟网易云一样），不用点。
+    h.hover(H::local(363.0,70.0),0.3);
+    assert!(h.app.volume_popup_open(),"鼠标停在喇叭上应自动浮出音量竖条");
+    // 点喇叭本身 = 静音，不是改音量。
+    h.cmds.clear();
     h.click(H::local(367.0,118.0));
-    assert!(h.cmds.contains(&crate::app::Cmd::ToggleMute));
-    assert_eq!(h.app.volume_ui,Some((45,true)));
+    assert!(h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::TogglePlayerMute)),"点喇叭应静音");
+    assert!(!h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::SetPlayerVolume(_))),"点喇叭不该改音量");
+    // 竖条：按点击位置设音量（上大下小），而且不能顺带把进度条定位了。
+    h.cmds.clear();
+    h.click(H::local(363.0,62.0));
+    let volume=h.cmds.iter().find_map(|cmd|match cmd{crate::app::Cmd::SetPlayerVolume(v)=>Some(*v),_=>None});
+    assert!(matches!(volume,Some(64..=72)),"竖条 68% 附近应设置播放器音量，实际 {volume:?}");
+    assert!(!h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::Media(crate::smtc::Transport::Seek(_)))),
+        "拖音量条不能变成定位音乐");
+    h.cmds.clear();
+    h.click(H::local(363.0,46.0));
+    let top=h.cmds.iter().find_map(|cmd|match cmd{crate::app::Cmd::SetPlayerVolume(v)=>Some(*v),_=>None});
+    assert!(matches!(top,Some(95..=100)),"竖条顶端应接近满音量，实际 {top:?}");
+    // 光标移开一会儿就收起来。
+    h.hover(H::local(200.0,60.0),0.7);
+    assert!(!h.app.volume_popup_open(),"光标离开后竖条应自动收起");
 }
 
 #[test]
@@ -3976,6 +3999,120 @@ fn mail_report_save_and_failure_paths() {
 }
 
 #[test]
+fn clicking_music_cover_switches_to_source_player(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.show_page(0);
+    h.media=crate::smtc::NowPlaying{source:"cloudmusic.exe".into(),title:"在云端".into(),artist:"郭顶".into(),duration:221.0,..Default::default()};
+    h.hover(H::local(300.0,60.0),0.8);
+    assert!(h.app.open,"悬停后应展开面板");
+    for with_lyrics in [false,true] {
+        h.app.show_lyrics=with_lyrics;h.frame(vec![]);h.cmds.clear();
+        h.click(H::local(60.0,40.0));
+        assert!(h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::ActivatePlayer(source) if source=="cloudmusic.exe")),
+            "点击封面/曲名区域应唤起来源客户端（歌词展示={with_lyrics}）");
+        // 长标题的尾部也在卡片里：点击范围必须跟着卡片宽度走，不能只到标题中段。
+        h.cmds.clear();
+        h.click(H::local(if with_lyrics {214.0} else {334.0},40.0));
+        assert!(h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::ActivatePlayer(source) if source=="cloudmusic.exe")),
+            "标题尾部也应可点（歌词展示={with_lyrics}）");
+        // 顶栏的日期/时钟不能被这块热区盖住，点到时间不应触发跳转。
+        h.cmds.clear();
+        h.click(H::local(210.0,16.0));
+        assert!(!h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::ActivatePlayer(_))),
+            "可点范围不能盖住顶部时间（歌词展示={with_lyrics}）");
+    }
+    // 没有歌曲时这块区域不接点击，避免误触。
+    h.media=Default::default();h.app.show_lyrics=false;h.frame(vec![]);h.cmds.clear();
+    h.click(H::local(60.0,40.0));
+    assert!(!h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::ActivatePlayer(_))),"无歌曲时不应触发");
+}
+
+#[test]
+fn empty_music_cover_lists_installed_players_and_launches_the_picked_one(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.show_page(0);
+    h.media=Default::default();
+    h.hover(H::local(300.0,60.0),0.8);
+    assert!(h.app.open,"悬停后应展开面板");
+    assert!(!h.app.player_menu_open(),"清单默认是收起的");
+    h.frame(vec![]);h.cmds.clear();
+    h.click(H::local(60.0,40.0));
+    assert!(h.app.player_menu_open(),"没有歌曲时点封面应弹出播放器清单");
+    assert!(!h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::LaunchPlayer(..))),"只是打开清单，不该顺手启动播放器");
+    // 用两个确定的候选项替换本机扫描结果，点击坐标才有意义。
+    h.app.players=vec![
+        crate::players::Player{name:"网易云音乐".into(),exe:"cloudmusic.exe".into(),path:r"C:\fake\cloudmusic.exe".into()},
+        crate::players::Player{name:"QQ音乐".into(),exe:"QQMusic.exe".into(),path:r"C:\fake\QQMusic.exe".into()},
+    ];
+    h.frame(vec![]);h.cmds.clear();
+    h.click(H::local(200.0,42.0));
+    assert!(h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::LaunchPlayer(name,path)
+        if name=="网易云音乐" && path.to_string_lossy()==r"C:\fake\cloudmusic.exe")),"点第一行应启动对应的播放器");
+    assert!(!h.app.player_menu_open(),"选完就收起清单");
+    // 点封面可以反复开关，方便挑错再来一次。
+    h.frame(vec![]);h.cmds.clear();h.click(H::local(60.0,40.0));
+    assert!(h.app.player_menu_open(),"收起后应能再次打开");
+    h.frame(vec![]);h.click(H::local(60.0,40.0));
+    assert!(!h.app.player_menu_open(),"再点一次封面收起清单");
+    // 一旦有歌在放，清单让位给曲目信息。
+    h.click(H::local(60.0,40.0));
+    assert!(h.app.player_menu_open());
+    h.media=crate::smtc::NowPlaying{source:"cloudmusic.exe".into(),title:"在云端".into(),artist:"郭顶".into(),duration:221.0,..Default::default()};
+    h.frame(vec![]);
+    assert!(!h.app.player_menu_open(),"开始播放后清单必须自动收起");
+}
+
+#[test]
+fn source_app_label_reads_naturally(){
+    use crate::smtc::app_label;
+    assert_eq!(app_label("cloudmusic.exe"),"网易云音乐");
+    assert_eq!(app_label("QQMusic.exe"),"QQ音乐");
+    assert_eq!(app_label("KuGou.exe"),"酷狗音乐");
+    assert_eq!(app_label("SodaMusic.exe"),"汽水音乐");
+    assert_eq!(app_label("msedge.exe"),"Edge 浏览器");
+    assert_eq!(app_label("Spotify.exe"),"Spotify");
+    assert_eq!(app_label("SomePlayer.exe"),"SomePlayer");
+    assert_eq!(app_label(""),"播放器");
+}
+
+#[test]
+fn music_mode_button_cycles_only_when_mode_is_known(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.show_page(0);
+    h.media=crate::smtc::NowPlaying{source:"cloudmusic.exe".into(),title:"在云端".into(),artist:"郭顶".into(),
+        duration:221.0,play_mode:crate::smtc::PlayMode::Random,..Default::default()};
+    h.hover(H::local(300.0,60.0),0.8);
+    assert!(h.app.open);
+    h.cmds.clear();
+    h.click(H::local(118.0,118.0));
+    assert!(h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::CyclePlayMode)),"读得到模式时应能点按切换");
+    // 网易云还没读到模式时仍要显示入口，点一下完成首次读取并切换。
+    h.media.play_mode=crate::smtc::PlayMode::Unknown;
+    h.frame(vec![]);h.cmds.clear();
+    h.click(H::local(118.0,118.0));
+    assert!(h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::CyclePlayMode)),"网易云应给出可点入口");
+    // 其他播放器且模式未知时不显示按钮。
+    h.media.source="Spotify.exe".into();h.media.play_mode=crate::smtc::PlayMode::Unknown;
+    h.frame(vec![]);h.cmds.clear();
+    h.click(H::local(118.0,118.0));
+    assert!(!h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::CyclePlayMode)),"不支持模式的播放器不应显示按钮");
+}
+
+#[test]
+fn play_mode_labels_are_readable(){
+    use crate::smtc::PlayMode;
+    assert_eq!(PlayMode::Random.label(),"随机播放");
+    assert_eq!(PlayMode::Order.label(),"顺序播放");
+    assert_eq!(PlayMode::Heart.label(),"心动模式");
+    assert_eq!(PlayMode::Cycle.label(),"列表循环");
+    assert_eq!(PlayMode::OneCycle.label(),"单曲循环");
+    assert_eq!(PlayMode::default(),PlayMode::Unknown);
+}
+
+#[test]
 fn hover_tooltips_fit_native_region_and_release_it_after_leaving(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     for shelf in [false,true] {
@@ -4412,6 +4549,44 @@ fn bluetooth_switch_clears_notices_and_restarts_with_fresh_baseline(){
     assert!(h.app.notice.as_ref().is_none_or(|a|a.title!="蓝牙设备"));
     h.bt.clear();h.frame(vec![]);
     assert!(h.app.notice.as_ref().is_some_and(|a|a.title=="蓝牙设备") || h.app.alerts.iter().any(|a|a.title=="蓝牙设备"));
+}
+
+/// 手动出图：无音乐时点封面弹出的播放器清单长什么样。
+/// `DAOZAI_PICK_PREVIEW=<png 路径>` 时生成，便于改完坐标先看一眼再实机验证。
+#[test]
+#[ignore = "只在需要出预览图时手动跑"]
+fn render_player_menu_preview(){
+    let Ok(dest)=std::env::var("DAOZAI_PICK_PREVIEW") else{return};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.show_page(0);
+    h.media=Default::default();
+    h.app.open_player_menu();
+    h.app.players=vec![
+        crate::players::Player{name:"网易云音乐".into(),exe:"cloudmusic.exe".into(),path:r"C:\Program Files\NetEase\CloudMusic\cloudmusic.exe".into()},
+        crate::players::Player{name:"QQ音乐".into(),exe:"QQMusic.exe".into(),path:r"C:\Program Files (x86)\Tencent\QQMusic\QQMusic.exe".into()},
+        crate::players::Player{name:"酷狗音乐".into(),exe:"KuGou.exe".into(),path:r"C:\Program Files (x86)\KuGou\KuGou.exe".into()},
+    ];
+    h.cursor=Some(H::local(200.0,42.0));
+    let mut raster=crate::preview_raster::Raster::new(1280,380);
+    for frame in 0..150 {
+        let t=frame as f64/60.0;
+        let env=Env{t,clock:"09:41:00".into(),today:"2026-11-04".into(),date:"11月4日 周三".into(),cursor:h.cursor,..Default::default()};
+        let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(WIN_W,WIN_H))),time:Some(t),
+            viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};
+        let output=h.ctx.run(raw,|ctx|{
+            egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{let win=ui.max_rect();h.app.frame(ui,win,&env);});
+        });
+        raster.update_textures(&output.textures_delta);
+        if frame==149 {
+            raster.buf.fill([0.10,0.10,0.12,1.0]);
+            raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);
+            let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+            let image=image::RgbaImage::from_raw(1280,380,rgba).unwrap();
+            image::imageops::crop_imm(&image,200,0,880,290).to_image().save(&dest).unwrap();
+        }
+        raster.free_textures(&output.textures_delta);
+    }
 }
 
 #[test]
