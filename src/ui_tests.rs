@@ -3972,7 +3972,7 @@ fn mail_report_save_and_failure_paths() {
     let _cleanup=Cleanup(email.clone());
     h.app.mail.form.email=email.clone();h.app.mail.form.password="synthetic-test-secret".into();
     click(&mut h,"保存并开始监控");
-    assert_eq!(h.app.mail.accounts.len(),1);assert!(h.app.mail.form.password.is_empty());
+    assert_eq!(h.app.mail.accounts.len(),1,"邮件账户未保存：{}",h.app.mail.note);assert!(h.app.mail.form.password.is_empty());
     assert_eq!(crate::mail::load_accounts()[0].email,email);
     assert_eq!(crate::mail::secrets::load(&email).unwrap(),"synthetic-test-secret");
     h.app.mail_event(crate::mail::Event::Status{account:email.clone(),status:crate::mail::Status::Failed("模拟认证失败".into())});frame(&mut h,vec![]);
@@ -4353,9 +4353,14 @@ fn compact_font_atlas_preserves_settings_pixels_at_multiple_scales(){
                 raster.update_textures(&root.textures_delta);raster.update_textures(&child.textures_delta);
                 if frame==2 {
                     // 常驻预览读取真实时钟，排除跨分钟变化；固定时钟已由主界面对照覆盖。
-                    if tab==10{child.shapes.retain(|s|!matches!(&s.shape,egui::Shape::Text(t) if t.galley.text().len()==5 && t.galley.text().as_bytes()[2]==b':'));}
+                    if tab==10{child.shapes.retain(|s|!matches!(&s.shape,egui::Shape::Text(t) if {
+                        let text=t.galley.text();let bounds=t.visual_bounding_rect();
+                        text.len()==5&&text.as_bytes()[2]==b':'
+                            || text.len()==2&&text.bytes().all(|b|b.is_ascii_digit())&&bounds.center().y>100.0
+                    }));}
                     raster.buf.fill([0.0,0.0,0.0,1.0]);raster.draw(&h.ctx.tessellate(child.shapes,child.pixels_per_point),child.pixels_per_point);
-                    let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);result.push(rgba);
+                    let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+                    result.push(rgba);
                 }
                 raster.free_textures(&root.textures_delta);raster.free_textures(&child.textures_delta);
             }
@@ -4650,8 +4655,12 @@ fn deepseek_resident_preview_does_not_overlap_icons(){
         let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().show(ctx,|ui|{h.app.resident_order_settings(ui);});});raster.update_textures(&output.textures_delta);
         if frame==7{
             let circles:Vec<_>=output.shapes.iter().filter_map(|shape|if let egui::Shape::Circle(c)=&shape.shape{Some(c)}else{None}).collect();
-            let whale=output.shapes.iter().find_map(|shape|if let egui::Shape::Mesh(mesh)=&shape.shape{let rect=mesh.calc_bounds();((rect.width()-24.0).abs()<0.1).then_some(rect)}else{None}).expect("DeepSeek 图标");
+            let meshes:Vec<_>=output.shapes.iter().filter_map(|shape|if let egui::Shape::Mesh(mesh)=&shape.shape{Some(mesh.calc_bounds())}else{None}).collect();
             let claude=circles.iter().find(|c|c.stroke.color==egui::Color32::from_rgb(255,116,26)&&c.radius>9.0).expect("Claude 圆环");
+            // 顶部预览会按可用宽度缩放，DeepSeek 图片不再固定为 24 点。
+            let whale=meshes.iter().copied().find(|rect|rect.center().y<100.0 && rect.width()>10.0 && rect.width()<24.0
+                && (rect.width()-rect.height()).abs()<1.0 && rect.left()>claude.center.x+claude.radius+4.0)
+                .unwrap_or_else(||panic!("DeepSeek 图标未在 Claude 圆环右侧显示：{meshes:?}; Claude={:?}",claude));
             assert!(whale.left()>claude.center.x+claude.radius+4.0,"DeepSeek 不应覆盖前一枚图标");
             if let Some(dest)=std::env::var_os("DAOZAI_DEEPSEEK_PREVIEW_DIR"){
                 raster.buf.fill([0.1,0.1,0.1,1.0]);raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);image::save_buffer(std::path::PathBuf::from(dest).join("resident-preview.png"),&rgba,1200,380,image::ColorType::Rgba8).unwrap();
@@ -5471,19 +5480,22 @@ fn messenger_notifications_side_docks_keep_one_column(){
     for dock in [crate::model::Dock::Left,crate::model::Dock::Right]{
         let mut h=H::new();h.app.settings.dock=dock;h.app.settings.wechat_notifications=true;h.app.settings.read_notifications=true;
         h.app.receive_wechat_reminder();h.app.receive_notification("QQ".into(),"QQ".into(),"测试".into());
-        for _ in 0..720{h.frame(vec![]);}
-        let win=Rect::from_min_size(Pos2::ZERO,Vec2::new(WIN_W,WIN_H));
+        // 侧边窗按 SIDE_W × SIDE_H 绘制；WIN_H 只有 270 点，会把 460 点面板裁出屏幕。
+        for _ in 0..720{side_frame(&mut h,None);}
+        let win=Rect::from_min_size(Pos2::ZERO,Vec2::new(crate::side_dock::SIDE_W,crate::side_dock::SIDE_H));
         let stack=h.ctx.read_response(egui::Id::new(("card",true,"messenger-stack"))).unwrap().rect;
         let bar=h.app.island_rect(win,h.app.w.pos,h.app.h.pos);
         assert!((stack.center().x-bar.center().x).abs()<1.0 && stack.top()>=bar.bottom()-0.5,"收起时叠放在竖胶囊下方");
-        h.click(stack.center());for _ in 0..90{h.frame(vec![]);}
+        let point=stack.center();
+        for pressed in [true,false]{side_frame_events(&mut h,Some(point),vec![egui::Event::PointerButton{pos:point,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()}]);}
+        for _ in 0..90{side_frame(&mut h,Some(point));}
         let rect=|name|h.ctx.read_response(egui::Id::new(("card",true,name))).unwrap().rect;
         let a=rect("微信");let b=rect("QQ");
         assert_eq!(a.center().x,b.center().x);assert!(a.bottom()<=b.top()+0.01);
         let panel=h.app.island_rect(win,h.app.expanded_width(),h.app.expanded_height());
         if dock==crate::model::Dock::Left {assert!(a.left()>=panel.right()+crate::app::UNREAD_GAP-0.5,"左停靠：胶囊在面板右侧");}
         else {assert!(a.right()<=panel.left()-crate::app::UNREAD_GAP+0.5,"右停靠：胶囊在面板左侧");}
-        assert!((a.top()-panel.top()-2.0).abs()<1.0 && h.app.unread_top_inset()==0.0,"侧边停靠时顶端与面板对齐");
+        assert!((a.top()-panel.top()-2.0).abs()<1.0 && h.app.unread_top_inset()==0.0,"侧边停靠时顶端与面板对齐：dock={dock:?}, a={a:?}, panel={panel:?}, inset={}",h.app.unread_top_inset());
     }
 }
 

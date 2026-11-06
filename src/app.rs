@@ -2702,7 +2702,9 @@ impl App {
                 paint::note(&c,left+22.0,center_y,13.0,theme::WHITE);
             }
             let index=lyric.unwrap_or(0);
-            let id=egui::Id::new(("island-lyric-line",&self.ly.key));
+            // 一个岛只展示当前一首歌；不要把每首歌的 key 放进 egui 动画 ID，
+            // 否则长时间切歌会让 Context 为历史歌曲永久保留动画状态。
+            let id=egui::Id::new("island-lyric-line");
             if !self.ly.island_animation_started {
                 c.ui.ctx().animate_value_with_time(id,index as f32,0.0);
                 self.ly.island_animation_started=true;
