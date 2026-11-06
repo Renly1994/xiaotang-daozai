@@ -68,6 +68,8 @@ windows = { version = "0.58", features = [
   "Win32_Security_Cryptography",
   "Win32_System_Power",
   "Win32_System_Registry",
+  "Win32_Devices_DeviceAndDriverInstallation",
+  "Win32_Devices_Properties",
   "Win32_System_SystemInformation",
   "Win32_System_Threading",
   "Win32_System_Diagnostics_ToolHelp",
@@ -92,7 +94,10 @@ windows = { version = "0.58", features = [
   "Win32_Devices_DeviceAndDriverInstallation",
   "Win32_Devices_Properties",
   "Win32_Devices_Bluetooth",
+  "Win32_Devices_HumanInterfaceDevice",
+  "Win32_System_IO",
   "Devices_Bluetooth", "Devices_Enumeration",
+  "Devices_Bluetooth_GenericAttributeProfile",
 ] }
 # v0.5.5 邮件：IMAP 走系统 TLS，凭据进 Windows 凭据管理器。
 imap = "2.4"

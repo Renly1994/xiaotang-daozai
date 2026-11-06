@@ -66,6 +66,11 @@ struct Shell {
     bt_rx: Option<daozai::bt::Service>,
     bt: Vec<daozai::bt::Device>,
     bt_ready: bool,
+    /// 外设电量：USB 接收器采集服务与合并后的设备表。
+    devices_rx: Option<daozai::devices::Service>,
+    usb_devices: Vec<daozai::devices::Device>,
+    devices: daozai::devices::Tracker,
+    device_list: Vec<daozai::devices::Device>,
     volume_quiet: PollClock,
     /// v0.5.5：邮件收信服务（工作线程），以及上次同步给它的账号/开关快照。
     mail: daozai::mail::Service,
@@ -161,6 +166,10 @@ impl Shell {
             bt_rx: None,
             bt: Vec::new(),
             bt_ready: false,
+            devices_rx: Some(daozai::devices::spawn()),
+            usb_devices: Vec::new(),
+            devices: Default::default(),
+            device_list: Vec::new(),
             volume_quiet: PollClock::default(),
             mail: daozai::mail::Service::start(),
             mail_sig: (false, 0, Vec::new()),
@@ -250,6 +259,7 @@ impl Shell {
             volume: self.system_state.volume,
             bt: self.bt.clone(),
             bt_ready: self.bt_ready,
+            devices: self.device_list.clone(),
             screen,
             backdrop,
             glass_blur,
@@ -362,16 +372,24 @@ impl eframe::App for Shell {
             } else {
                 self.backdrop=None;
             }
-            if self.app.settings.bluetooth_notifications {
+            let mut devices_changed=false;
+            // 蓝牙扫描同时服务于「蓝牙提醒」和「设备电量」；设置页打开时也保持扫描，
+            // 这样总开关关闭时仍能看到并管理设备。
+            let want_bt=self.app.settings.bluetooth_notifications||self.app.settings.device_battery||self.app.settings_open;
+            if want_bt {
                 if self.bt_rx.is_none() {self.bt_rx=Some(daozai::bt::spawn());}
-            } else {
-                self.bt_rx=None;
+            } else if self.bt_rx.take().is_some() {
                 self.bt.clear();
                 self.bt_ready=false;
+                devices_changed=true;
             }
             if let Some(service)=&self.bt_rx {
-                while let Ok(found)=service.rx.try_recv(){ self.bt=found; self.bt_ready=true; }
+                while let Ok(found)=service.rx.try_recv(){ self.bt=found; self.bt_ready=true; devices_changed=true; }
             }
+            if let Some(service)=&self.devices_rx {
+                while let Ok(found)=service.rx.try_recv(){ self.usb_devices=found; devices_changed=true; }
+            }
+            if devices_changed {self.device_list=self.devices.update(&self.bt,&self.usb_devices);}
             let wechat_enabled=self.app.settings.wechat_notifications && self.app.settings.notifications;
             if self.wechat.as_ref().is_some_and(|listener|!listener.registered()){self.wechat=None;}
             if !wechat_enabled {
