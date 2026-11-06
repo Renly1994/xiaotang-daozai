@@ -78,7 +78,52 @@ fn start(v:&Value)->Result<Snapshot,String>{
     if snapshot.windows.is_empty(){return Err("当前 ZCode 账号暂无有效体验额度".into());}
     Ok(snapshot)
 }
+const APIKEY_SLOT:&str="apikey";
+#[cfg(windows)]
+fn credential(slot:&str)->Result<keyring::Entry,String>{keyring::Entry::new("Daozai.ZCode",slot).map_err(|e|format!("无法打开 Windows 凭据管理器：{e}"))}
+#[cfg(windows)]
+fn load_key(slot:&str)->Result<String,String>{credential(slot)?.get_password().map_err(|_|"没有保存的 API 密钥".into())}
+#[cfg(not(windows))]
+fn load_key(_slot:&str)->Result<String,String>{Err("仅 Windows 支持保存 API 密钥".into())}
+/// 编码套餐直连：credentials.json 缺少 Coding Plan api-key、且体验额度为空时，
+/// 用智谱开放平台 API 密钥查 open.bigmodel.cn（密钥存 Windows 凭据管理器，不写配置文件）。
+fn fetch_keyring(agent:&ureq::Agent)->Result<Snapshot,String>{
+    let key=load_key(APIKEY_SLOT)?;
+    let stamp=|t:chrono::DateTime<chrono::Utc>|t.to_rfc3339_opts(chrono::SecondsFormat::Secs,true).replace(':',"%3A");
+    let url=format!("https://open.bigmodel.cn/api/monitor/usage/quota/limit?startTime={}&endTime={}",stamp(chrono::Utc::now()-std::time::Duration::from_secs(86400)),stamp(chrono::Utc::now()));
+    let v=read(agent,&url,&key,None)?;
+    finalize_keyring(&v)
+}
+/// 网关对业务错误返回 HTTP 200 + success:false，这里统一映射为用户可读错误。
+fn finalize_keyring(v:&Value)->Result<Snapshot,String>{
+    if !success(&v){let message=v["msg"].as_str().or_else(||v["message"].as_str()).unwrap_or("额度服务返回错误");return Err(format!("ZCode API 密钥查询失败：{message}"));}
+    let mut snapshot=coding(v)?;
+    if snapshot.plan=="Coding Plan"{if let Some(level)=v["data"]["level"].as_str().filter(|s|!s.trim().is_empty()){snapshot.plan=level.to_owned();}}
+    Ok(snapshot)
+}
+/// API 密钥独立授权：账号只存凭据管理器引用，配置文件不落明文。
+pub(crate) fn connect_keyring(config:&mut super::Config,key:&str,alias:&str)->Result<(),String>{connect_keyring_slot(config,APIKEY_SLOT,key,alias)}
+fn connect_keyring_slot(config:&mut super::Config,slot:&str,key:&str,alias:&str)->Result<(),String>{
+    let trimmed=key.trim();
+    if trimmed.len()<8{return Err("请输入完整的 API 密钥".into());}
+    #[cfg(windows)]{credential(slot)?.set_password(trimmed).map_err(|e|format!("无法安全保存密钥：{e}"))?;}
+    #[cfg(not(windows))] let _=(slot,trimmed);
+    let existing=config.accounts.iter_mut().find(|a|a.provider==super::Provider::ZCode&&a.slot.as_deref()==Some(slot));
+    if let Some(a)=existing{
+        a.enabled=true;a.source=PathBuf::new();if !alias.trim().is_empty(){a.alias=alias.trim().into();}
+        config.selected=a.id.clone();return Ok(());
+    }
+    let id=format!("ZCode-{slot}");let pinned=config.accounts.is_empty();if pinned{config.selected=id.clone();}
+    let alias=if alias.trim().is_empty(){"ZCode · API 密钥".into()}else{alias.trim().into()};
+    config.selected=id.clone();config.accounts.push(Account{id,provider:super::Provider::ZCode,alias,source:PathBuf::new(),slot:Some(slot.into()),enabled:true,pinned});Ok(())
+}
+pub(crate) fn forget(a:&Account){
+    #[cfg(windows)]
+    if a.slot.as_deref()==Some(APIKEY_SLOT){if let Ok(entry)=credential(APIKEY_SLOT){let _=entry.delete_credential();}}
+    #[cfg(not(windows))] {let _=a;}
+}
 pub(super) fn fetch(agent:&ureq::Agent,a:&Account)->Result<Snapshot,String>{
+    if a.source.as_os_str().is_empty(){return fetch_keyring(agent);}
     let root=super::login_json(&a.source)?;let l=login(&root)?;
     if a.slot.as_ref()!=Some(&l.slot){return Err("ZCode 已切换账号，请重新识别本机账号".into());}
     let key=format!("account-provider:coding-plan:account:{}-individual-coding-plan:account:{}:api-key",l.family,l.subject);
@@ -119,5 +164,40 @@ mod tests{
         let c=coding(&serde_json::json!({"data":{"limits":[{"type":"TOKENS_LIMIT","percentage":31,"unit":3,"number":5,"nextResetTime":1900000000000i64}]}})).unwrap();
         assert_eq!(c.windows[0].remaining,69.0);assert_eq!(c.windows[0].reset,Some(1900000000));
         let s=start(&serde_json::json!({"data":{"balances":[{"total_units":"800","remaining_units":"200","available_units":"100"}]}})).unwrap();assert_eq!(s.windows[0].remaining,25.0);
+    }
+    #[cfg(windows)]
+    #[test]fn api_key_connect_round_trips_through_windows_credentials(){
+        use crate::quota::{Config,Provider};
+        // 测试使用独立槽位，绝不触碰真实用户的 APIKEY_SLOT 凭据。
+        const TEST_SLOT:&str="unittest";
+        struct Cleanup;impl Drop for Cleanup{fn drop(&mut self){let account=Account{id:"x".into(),provider:Provider::ZCode,alias:String::new(),source:PathBuf::new(),slot:Some(TEST_SLOT.into()),enabled:true,pinned:false};forget(&account);}}
+        let _cleanup=Cleanup;
+        let mut config=Config::default();
+        connect_keyring_slot(&mut config,TEST_SLOT,"synthetic-zcode-key-0001","备用").unwrap();
+        assert_eq!(config.accounts.len(),1);assert!(config.accounts[0].source.as_os_str().is_empty());assert_eq!(config.accounts[0].alias,"备用");assert_eq!(config.selected,config.accounts[0].id);
+        assert_eq!(load_key(TEST_SLOT).unwrap(),"synthetic-zcode-key-0001");
+        config.accounts[0].enabled=false;
+        connect_keyring_slot(&mut config,TEST_SLOT,"synthetic-zcode-key-0002","").unwrap();
+        assert_eq!(config.accounts.len(),1,"重复连接不能新增账号");assert!(config.accounts[0].enabled,"重连应恢复监控");assert_eq!(config.accounts[0].alias,"备用");
+        assert_eq!(load_key(TEST_SLOT).unwrap(),"synthetic-zcode-key-0002");
+        assert!(!config.json().to_string().contains("synthetic-zcode-key"),"密钥不能写入配置文件");
+        assert!(connect_keyring_slot(&mut config,TEST_SLOT,"短","").is_err());
+        assert!(load_key("unittest-empty-slot").is_err(),"凭据失效时读取必须报错而非返回空值");
+    }
+    #[test]fn keyring_response_maps_periods_resets_and_credential_failure(){
+        // 脱敏后的线上真实结构：HTTP 200 + CREDIT_LIMIT + unit/number + nextResetTime(毫秒)。
+        let v=serde_json::json!({"code":200,"msg":"操作成功","success":true,"data":{"level":"lite","limits":[
+            {"type":"CREDIT_LIMIT","unit":3,"number":5,"usage":2000,"currentValue":930,"percentage":46,"nextResetTime":1793892721234i64},
+            {"type":"CREDIT_LIMIT","unit":6,"number":1,"percentage":10,"nextResetTime":1794366124964i64}]}});
+        let s=finalize_keyring(&v).unwrap();
+        assert_eq!(s.windows.len(),2);assert_eq!(s.rings().len(),2,"两个周期都应画出额度环");
+        assert_eq!(s.rings()[0].label,"5 小时");assert_eq!(s.rings()[0].seconds,Some(18000));assert_eq!(s.rings()[0].remaining,54.0);assert_eq!(s.rings()[0].reset,Some(1793892721));
+        assert_eq!(s.rings()[1].label,"本周");assert_eq!(s.rings()[1].seconds,Some(604800));assert_eq!(s.rings()[1].remaining,90.0);assert_eq!(s.rings()[1].reset,Some(1794366124));
+        assert_eq!(s.plan,"lite","data.level 应回填为套餐名");
+        // 凭据失效：网关返回 code 401 + success:false，必须转成可读错误而非空额度。
+        let expired=finalize_keyring(&serde_json::json!({"code":401,"msg":"token expired or incorrect","success":false})).unwrap_err();
+        assert!(expired.contains("API 密钥查询失败")&&expired.contains("token expired"),"凭据失效要保留服务端原因：{expired}");
+        let no_msg=finalize_keyring(&serde_json::json!({"code":500,"success":false})).unwrap_err();
+        assert!(no_msg.contains("额度服务返回错误"));
     }
 }

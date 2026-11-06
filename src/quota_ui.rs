@@ -13,6 +13,7 @@ pub(crate) struct State {
     pub login:Option<quota::grok::Login>,
     pub workbuddy_connecting:Option<quota::workbuddy::Connect>,
     pub deepseek_connecting:Option<quota::deepseek::Connect>,pub deepseek_key:String,
+    pub zcode_key:String,
     pub stale:HashMap<String,String>,
     pub gemini_connecting:Option<quota::gemini::Connect>,pub gemini_email:String,pub gemini_cookie:String,
 }
@@ -327,7 +328,7 @@ impl App {
         self.quota.connect_target=id;self.quota.connect_open=true;
     }
     fn quota_remove_account(&mut self,id:&str){
-        if let Some(a)=self.quota.config.accounts.iter().find(|a|a.id==id){match a.provider{Provider::GrokBot=>quota::grok::forget(a),Provider::Gemini=>quota::gemini::forget(a),Provider::DeepSeek=>quota::deepseek::forget(a),Provider::WorkBuddy=>quota::workbuddy::forget(a),_=>{}}}
+        if let Some(a)=self.quota.config.accounts.iter().find(|a|a.id==id){match a.provider{Provider::GrokBot=>quota::grok::forget(a),Provider::Gemini=>quota::gemini::forget(a),Provider::DeepSeek=>quota::deepseek::forget(a),Provider::WorkBuddy=>quota::workbuddy::forget(a),Provider::ZCode=>quota::zcode::forget(a),_=>{}}}
         self.quota.config.accounts.retain(|a|a.id!=id);self.quota.config.colors.remove(id);self.quota.rows.remove(id);self.quota.stale.remove(id);self.quota.busy.remove(id);self.quota.save_snapshots();
         if self.quota.config.selected==id{self.quota.config.selected=self.quota.config.accounts.first().map(|a|a.id.clone()).unwrap_or_default();}
     }
@@ -448,6 +449,19 @@ impl App {
                 ui.label(egui::RichText::new("使用 Grok Bot 对应的 Cursor 账号登录，浏览器授权支持自动续期。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75))));
             }else if self.quota.provider==Provider::ZCode{
                 if ui.button("连接本机 ZCode").clicked(){self.quota.note=match quota::zcode::path().ok_or_else(||"未找到 ZCode 登录目录".to_owned()).and_then(|p|quota::zcode::add(&mut self.quota.config,&p,&self.quota.alias)){Ok(())=>"ZCode 已连接".into(),Err(e)=>e};}
+                ui.collapsing("用 API 密钥连接（编码套餐直连智谱）",|ui|{
+                    ui.label(egui::RichText::new("适用于本机登录文件缺少 Coding Plan api-key、或体验额度为空的账号；密钥保存在 Windows 凭据管理器，不写入配置文件。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75))));
+                    settings_control_row(ui,"API 密钥",80.0,|ui|{ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.zcode_key).vertical_align(egui::Align::Center).password(true).hint_text("粘贴开放平台 API 密钥"))});
+                    ui.horizontal(|ui|{
+                        if ui.button("获取密钥").clicked(){self.pending.push(Cmd::OpenUrl("https://open.bigmodel.cn/console/usercenter/apikeys".into()));}
+                        if ui.add_enabled(!self.quota.zcode_key.trim().is_empty(),egui::Button::new("验证并连接")).clicked(){
+                            match quota::zcode::connect_keyring(&mut self.quota.config,self.quota.zcode_key.trim(),&self.quota.alias){
+                                Ok(())=>{self.quota.zcode_key.clear();self.quota.alias.clear();self.quota.note="已连接，刷新额度即可查看。".into();self.pending.push(Cmd::QuotaRefresh);}
+                                Err(e)=>self.quota.note=e
+                            }
+                        }
+                    });
+                });
             }else{
                 self.quota_file_form(ui);
                 ui.label(egui::RichText::new("各账号使用各自的登录文件；移除只取消监控。登录失效时，请在对应工具中重新登录。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75))));
@@ -465,7 +479,7 @@ impl App {
                 if self.quota.gemini_connecting.is_some(){ui.horizontal(|ui|{ui.spinner();ui.label("正在连接 Gemini…");});ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));}
             });
         });self.quota.connect_open=open;
-        if !open{self.quota.deepseek_key.clear();self.quota.gemini_cookie.clear();}
+        if !open{self.quota.deepseek_key.clear();self.quota.gemini_cookie.clear();self.quota.zcode_key.clear();}
     }
     fn quota_file_form(&mut self,ui:&mut egui::Ui){
         ui.label("登录 JSON 文件");ui.horizontal(|ui|{ui.add_sized([(ui.available_width()-65.0).max(100.0),27.0],egui::TextEdit::singleline(&mut self.quota.source).vertical_align(egui::Align::Center).hint_text("选择该账号的登录文件"));if ui.button("选择…").clicked(){self.pending.push(Cmd::QuotaChooseFile);}});
