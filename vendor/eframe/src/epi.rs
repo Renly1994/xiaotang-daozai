@@ -133,6 +133,13 @@ impl CreationContext<'_> {
 
 // ----------------------------------------------------------------------------
 
+/// Optional presenter for a Windows root window using the existing Glow painter.
+#[cfg(all(windows, feature = "glow"))]
+pub trait RootGlowPresenter {
+    /// Paint exactly once into the selected target and present it.
+    fn present(&mut self, size: [u32; 2], paint: &mut dyn FnMut()) -> Result<(), String>;
+}
+
 /// Implement this trait to write apps that can be compiled for both web/wasm and desktop/native using [`eframe`](https://github.com/emilk/egui/tree/master/crates/eframe).
 pub trait App {
     /// Called each time the UI needs repainting, which may be many times per second.
@@ -147,6 +154,28 @@ pub trait App {
     /// Use [`egui::Context::show_viewport_deferred`] to spawn additional viewports (windows).
     /// (A "viewport" in egui means an native OS window).
     fn update(&mut self, ctx: &egui::Context, frame: &mut Frame);
+
+    /// Use a separate input-only root HWND while retaining the original WGL drawable.
+    #[cfg(all(windows, feature = "glow"))]
+    fn wants_root_presenter(&self) -> bool {
+        false
+    }
+
+    /// Called with the root GL context current, before replacing the visible window.
+    #[cfg(all(windows, feature = "glow"))]
+    fn create_root_presenter(
+        &mut self,
+        _input: RawWindowHandle,
+        _gl: std::sync::Arc<glow::Context>,
+        _resolve: &dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void,
+        _size: [u32; 2],
+    ) -> Result<Box<dyn RootGlowPresenter>, String> {
+        Err("no root presenter configured".into())
+    }
+
+    /// The application should disable its request and notify the user.
+    #[cfg(all(windows, feature = "glow"))]
+    fn root_presenter_failed(&mut self, _error: String) {}
 
     /// Get a handle to the app.
     ///

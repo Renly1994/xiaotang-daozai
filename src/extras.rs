@@ -1233,6 +1233,16 @@ impl App {
                         });
                         settings_label(ui,"岛体显示");
                         settings_card(ui,|ui|{
+                            #[cfg(windows)]
+                            {
+                                let hint=if self.display_failed {"当前设备无法使用兼容性显示，已恢复原显示方式。"} else {"岛体周围出现黑框时开启，切换后立即生效。"};
+                                let previous=self.settings.compatibility_display;
+                                setting_row(ui,"兼容性显示",hint,&mut self.settings.compatibility_display);
+                                if previous!=self.settings.compatibility_display {
+                                    ctx.request_repaint_of(egui::ViewportId::ROOT);
+                                }
+                                ui.separator();
+                            }
                             let selected=self.displays.iter().find(|d|d.id==self.settings.display_id);
                             let label=if self.settings.display_id.is_empty(){"跟随主屏"}else{selected.map_or("所选屏幕未连接",|d|d.label.as_str())};
                             settings_control_row(ui,"显示屏",56.0,|ui|{

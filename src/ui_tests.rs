@@ -2522,6 +2522,20 @@ fn display_choice_saves_and_keeps_disconnected_selection(){
         frame(h,raster,vec![]);
     }
     for _ in 0..3{frame(&mut h,&mut raster,vec![]);}
+    #[cfg(windows)]
+    {
+        assert!(!h.app.settings.compatibility_display);
+        for expected in [true,false] {
+            let label=reveal(&mut h,&mut raster,"兼容性显示").expect("应显示兼容性开关");
+            // Shared setting_row puts the switch against the right edge of the card.
+            let pos=egui::pos2(638.0,label.center().y+8.0);
+            for pressed in [true,false] {
+                frame(&mut h,&mut raster,vec![egui::Event::PointerMoved(pos),egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()}]);
+            }
+            assert_eq!(h.app.settings.compatibility_display,expected);
+            assert_eq!(crate::model::Settings::load().compatibility_display,expected);
+        }
+    }
     assert!(h.app.settings.display_id.is_empty());click(&mut h,&mut raster,"跟随主屏");
     for _ in 0..20{frame(&mut h,&mut raster,vec![]);}
     if let Some(path)=std::env::var_os("DAOZAI_DISPLAY_PREVIEW"){
