@@ -63,6 +63,10 @@ struct GlowWinitRunning<'app> {
     integration: EpiIntegration,
     app: Box<dyn 'app + App>,
 
+    // Release registered GL objects while the context and its original drawable still exist.
+    #[cfg(windows)]
+    external: Option<Box<dyn crate::RootGlowPresenter>>,
+
     // These needs to be shared with the immediate viewport renderer, hence the Rc/Arc/RefCells:
     glutin: Rc<RefCell<GlutinWindowContext>>,
 
@@ -102,6 +106,9 @@ struct GlutinWindowContext {
     window_from_viewport: ViewportIdMap<WindowId>,
 
     focused_viewport: Option<ViewportId>,
+    // The WGL surface stays bound to this HWND while another window receives input.
+    #[cfg(windows)]
+    parked_drawable: Option<Arc<Window>>,
 }
 
 struct Viewport {
@@ -342,6 +349,8 @@ impl<'app> GlowWinitApp<'app> {
         }
 
         Ok(self.running.insert(GlowWinitRunning {
+            #[cfg(windows)]
+            external: None,
             glutin,
             painter,
             integration,
@@ -500,6 +509,92 @@ impl WinitApp for GlowWinitApp<'_> {
 }
 
 impl GlowWinitRunning<'_> {
+    #[cfg(windows)]
+    fn sync_root_presenter(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+    ) -> std::result::Result<(), String> {
+        use winit::platform::windows::WindowAttributesExtWindows;
+        let requested = self.app.wants_root_presenter();
+        if requested == self.external.is_some() {
+            return Ok(());
+        }
+        let mut glutin = self.glutin.borrow_mut();
+        let root = ViewportId::ROOT;
+        let original = glutin.window(root);
+        let size = original.inner_size();
+        if requested && (size.width == 0 || size.height == 0) {
+            return Ok(());
+        }
+        let visible = original.is_visible().unwrap_or(false);
+        let position = original.outer_position().ok();
+        let GlutinWindowContext {
+            viewports,
+            current_gl_context,
+            not_current_gl_context,
+            current_viewport,
+            ..
+        } = &mut *glutin;
+        let surface = viewports[&root]
+            .gl_surface
+            .as_ref()
+            .ok_or("root WGL drawable unavailable")?;
+        change_gl_context(
+            current_gl_context,
+            not_current_gl_context,
+            current_viewport,
+            root,
+            surface,
+        );
+        let next = if requested {
+            let mut attrs = egui_winit::create_winit_window_attributes(
+                &glutin.egui_ctx,
+                event_loop,
+                glutin.viewports[&root].builder.clone(),
+            )
+            .with_no_redirection_bitmap(true)
+            .with_transparent(false)
+            .with_active(false)
+            .with_visible(false)
+            .with_inner_size(size);
+            if let Some(p) = position {
+                attrs = attrs.with_position(p);
+            }
+            // winit registers OLE, IME and ordinary window input for this HWND as usual.
+            let input = Arc::new(event_loop.create_window(attrs).map_err(|e| e.to_string())?);
+            let handle = input.window_handle().map_err(|e| e.to_string())?.as_raw();
+            let presenter = self.app.create_root_presenter(
+                handle,
+                self.painter.borrow().gl().clone(),
+                &|s| glutin.get_proc_address(s),
+                size.into(),
+            )?;
+            glutin.parked_drawable = Some(original.clone());
+            self.external = Some(presenter);
+            input
+        } else {
+            self.external.take();
+            let window = glutin
+                .parked_drawable
+                .take()
+                .expect("active external presenter owns parked drawable");
+            if let Some(p) = position {
+                window.set_outer_position(p);
+            }
+            let _ = window.request_inner_size(size);
+            window
+        };
+        original.set_visible(false);
+        glutin.viewport_from_window.remove(&original.id());
+        glutin.viewport_from_window.insert(next.id(), root);
+        glutin.window_from_viewport.insert(root, next.id());
+        glutin.viewports.get_mut(&root).unwrap().window = Some(next.clone());
+        self.integration.frame.raw_window_handle = next.window_handle().map(|h| h.as_raw());
+        next.set_visible(visible);
+        next.request_redraw();
+        Ok(())
+    }
+
     fn run_ui_and_paint(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -516,6 +611,13 @@ impl GlowWinitRunning<'_> {
         else {
             return Ok(EventResult::Wait);
         };
+
+        #[cfg(windows)]
+        if viewport_id == ViewportId::ROOT {
+            if let Err(error) = self.sync_root_presenter(event_loop) {
+                self.app.root_presenter_failed(error);
+            }
+        }
 
         profiling::finish_frame!();
 
@@ -576,6 +678,9 @@ impl GlowWinitRunning<'_> {
 
         let has_many_viewports = self.glutin.borrow().viewports.len() > 1;
         let clear_before_update = !has_many_viewports; // HACK: for some reason, an early clear doesn't "take" on Mac with multiple viewports.
+        #[cfg(windows)]
+        let clear_before_update = clear_before_update
+            && !(viewport_id == ViewportId::ROOT && self.external.is_some());
 
         if clear_before_update {
             // clear before we call update, so users can paint between clear-color and egui windows:
@@ -673,18 +778,24 @@ impl GlowWinitRunning<'_> {
 
         let screen_size_in_pixels: [u32; 2] = window.inner_size().into();
 
-        if !clear_before_update {
-            painter.clear(screen_size_in_pixels, clear_color);
-        }
+        #[cfg(windows)]
+        let external = self.external.as_mut().filter(|_| viewport_id == ViewportId::ROOT);
+        #[cfg(windows)]
+        let custom = external.is_some();
+        #[cfg(not(windows))]
+        let custom = false;
+        let mut draw = |clear: bool| {
+            if clear {
+                painter.clear(screen_size_in_pixels, clear_color);
+            }
 
-        painter.paint_and_update_textures(
-            screen_size_in_pixels,
-            pixels_per_point * if viewport_id==ViewportId::ROOT {crate::root_frame_paint_scale()} else {1.0},
-            &clipped_primitives,
-            &textures_delta,
-        );
+            painter.paint_and_update_textures(
+                screen_size_in_pixels,
+                pixels_per_point * if viewport_id==ViewportId::ROOT {crate::root_frame_paint_scale()} else {1.0},
+                &clipped_primitives,
+                &textures_delta,
+            );
 
-        {
             for action in viewport.actions_requested.drain() {
                 match action {
                     ActionRequested::Screenshot(user_data) => {
@@ -718,10 +829,26 @@ impl GlowWinitRunning<'_> {
                 }
             }
 
-            integration.post_rendering(&window);
+        };
+        #[cfg(windows)]
+        if let Some(external) = external {
+            let mut painted = false;
+            if let Err(error) = external.present(screen_size_in_pixels, &mut || {
+                draw(true);
+                painted = true;
+            }) {
+                // A failed lock/resize can precede drawing. Consume texture deltas exactly once.
+                if !painted { draw(true); }
+                app.root_presenter_failed(error);
+                integration.egui_ctx.request_repaint();
+            }
         }
+        if !custom {
+            draw(!clear_before_update);
+        }
+        integration.post_rendering(&window);
 
-        {
+        if !custom {
             // vsync - don't count as frame-time:
             frame_timer.pause();
             profiling::scope!("swap_buffers");
@@ -1088,6 +1215,8 @@ impl GlutinWindowContext {
             max_texture_side: None,
             window_from_viewport,
             focused_viewport: Some(ViewportId::ROOT),
+            #[cfg(windows)]
+            parked_drawable: None,
         };
 
         slf.initialize_window(ViewportId::ROOT, event_loop)?;

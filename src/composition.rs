@@ -30,19 +30,20 @@ unsafe extern "system" fn backdrop_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
     }
 }
 
-fn create_backdrop_window() -> windows::core::Result<HWND> {
+pub(crate) fn create_visual_window(class: windows::core::PCWSTR, pass_through: bool) -> windows::core::Result<HWND> {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-    static CLASS: std::sync::Once = std::sync::Once::new();
     let instance = unsafe { GetModuleHandleW(None)? };
-    let class = windows::core::w!("DaozaiGlassBackdrop");
-    CLASS.call_once(|| unsafe {
-        let wc = WNDCLASSW { lpfnWndProc: Some(backdrop_proc), hInstance: instance.into(), lpszClassName: class, ..Default::default() };
-        RegisterClassW(&wc);
-    });
+    let wc = WNDCLASSW { lpfnWndProc: Some(backdrop_proc), hInstance: instance.into(), lpszClassName: class, ..Default::default() };
+    unsafe {
+        if RegisterClassW(&wc) == 0 && windows::Win32::Foundation::GetLastError() != windows::Win32::Foundation::ERROR_CLASS_ALREADY_EXISTS {
+            return Err(windows::core::Error::from_win32());
+        }
+    }
+    let mouse_style = if pass_through {WS_EX_LAYERED | WS_EX_TRANSPARENT} else {WINDOW_EX_STYLE(0)};
     const WS_EX_NOREDIRECTIONBITMAP: WINDOW_EX_STYLE = WINDOW_EX_STYLE(0x0020_0000);
     unsafe {
         CreateWindowExW(
-            WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
+            mouse_style | WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
             class,
             windows::core::w!(""),
             WS_POPUP,
@@ -90,8 +91,9 @@ pub struct Backdrop {
 }
 
 impl Backdrop {
-    pub fn new() -> windows::core::Result<Self> {
-        let hwnd = create_backdrop_window()?;
+    pub fn new() -> windows::core::Result<Self> { Self::new_for_input(false) }
+    pub fn new_for_input(pass_through:bool) -> windows::core::Result<Self> {
+        let hwnd = create_visual_window(windows::core::w!("DaozaiGlassBackdrop"),pass_through)?;
         unsafe {
             // 主线程已由窗口框架初始化为单线程套间时返回 S_FALSE，忽略即可。
             let _ = RoInitialize(RO_INIT_SINGLETHREADED);
@@ -195,7 +197,7 @@ mod tests {
 
     #[test]
     fn backdrop_only_covers_the_blur_pieces_so_other_apps_stay_clickable() {
-        let hwnd = create_backdrop_window().unwrap();
+        let hwnd = create_visual_window(windows::core::w!("DaozaiGlassBackdrop"), false).unwrap();
         unsafe {
             let _ = SetWindowPos(hwnd, None, 0, 0, 960, 270, SWP_NOACTIVATE | SWP_NOZORDER);
             clip_to_pieces(hwnd, &[BlurPiece { x: 230.0, y: 0.0, w: 180.0, h: 34.0, radius: 12.0 }]);
