@@ -2,6 +2,7 @@ name: Windows 检查
 on:
   push:
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -21,6 +22,12 @@ jobs:
           cargo +stable build --locked --release --bin daozai --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { throw '发布构建失败' }
           ./scripts/check-runtime.ps1 -Executable ./target/x86_64-pc-windows-msvc/release/daozai.exe
+      - name: 保存 Windows 程序
+        uses: actions/upload-artifact@v4
+        with:
+          name: daozai-windows-cloud-sync
+          path: target/x86_64-pc-windows-msvc/release/daozai.exe
+          if-no-files-found: error
       - name: 检查安装脚本语法
         shell: pwsh
         run: |

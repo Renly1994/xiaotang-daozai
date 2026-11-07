@@ -6,6 +6,49 @@ use std::sync::Mutex;
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn cloud_sync_restore_preserves_device_settings_and_rejects_stale_downloads() {
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let _h=H::new();
+    let mut settings=crate::model::Settings::default();
+    settings.skin=crate::model::Skin::Cream;
+    settings.display_id="other-device".into();settings.save();
+    let remote=crate::cloud_sync::Snapshot::capture().unwrap();
+    settings.skin=crate::model::Skin::Classic;
+    settings.display_id="this-device".into();settings.save();
+    let local=crate::cloud_sync::Snapshot::capture().unwrap().fingerprint().unwrap();
+    remote.restore(&local,"test-password-123").unwrap();
+    let restored=crate::model::Settings::load();
+    assert_eq!(restored.skin,crate::model::Skin::Cream);
+    assert_eq!(restored.display_id,"this-device");
+    let backups=std::fs::read_dir(crate::model::config_dir().join("sync-backups")).unwrap().count();
+    assert_eq!(backups,1);
+    settings.skin=crate::model::Skin::GlassDark;settings.save();
+    assert!(remote.restore(&local,"test-password-123").is_err());
+    assert_eq!(crate::model::Settings::load().skin,crate::model::Skin::GlassDark);
+}
+
+#[cfg(windows)]
+#[test]
+fn cloud_sync_mail_credentials_restore_into_windows_keyring() {
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let _h=H::new();
+    let account=crate::mail::Account {email:format!("cloud-sync-test-{}@example.invalid",std::process::id()),provider:crate::mail::Provider::Qq,custom:None,enabled:true};
+    let key=account.credential_key();
+    struct Cleanup(String);
+    impl Drop for Cleanup {fn drop(&mut self){crate::mail::secrets::delete(&self.0);}}
+    let _cleanup=Cleanup(key.clone());
+    crate::mail::save_accounts(&[account]);
+    crate::mail::secrets::save(&key,"remote-test-auth-code").unwrap();
+    let remote=crate::cloud_sync::Snapshot::capture().unwrap();
+    crate::mail::secrets::save(&key,"local-test-auth-code").unwrap();
+    let local=crate::cloud_sync::Snapshot::capture().unwrap().fingerprint().unwrap();
+    remote.restore(&local,"test-password-123").unwrap();
+    assert_eq!(crate::mail::secrets::load(&key).unwrap(),"remote-test-auth-code");
+    let backup=std::fs::read_dir(crate::model::config_dir().join("sync-backups")).unwrap().next().unwrap().unwrap().path();
+    assert!(!String::from_utf8_lossy(&std::fs::read(backup).unwrap()).contains("local-test-auth-code"));
+}
+
+#[test]
 fn opaque_surface_gets_a_contour_with_the_classic_skin(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();h.app.settings.skin=crate::model::Skin::Classic;
@@ -5128,13 +5171,16 @@ fn settings_gallery(){
     let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_SETTINGS_PREVIEW_DIR").expect("需指定预览目录"));
     std::fs::create_dir_all(&dest).unwrap();
     let width:f32=std::env::var("DAOZAI_SETTINGS_WIDTH").ok().and_then(|v|v.parse().ok()).unwrap_or(690.0);
-    let (w,hgt)=(width,2400.0f32);
+    let height:f32=std::env::var("DAOZAI_SETTINGS_HEIGHT").ok().and_then(|v|v.parse().ok()).unwrap_or(2400.0);
+    let (w,hgt)=(width,height);
     let scale=1.5f32;
     for (mode,dark) in [(SettingsTheme::Dark,true),(SettingsTheme::Light,false)] {
-        for tab in [0usize,10,1,2,4,6,11,9] {
+        for tab in [0usize,10,1,2,4,6,11,12,9] {
+            if std::env::var("DAOZAI_SETTINGS_PREVIEW_TAB").ok().and_then(|v|v.parse::<usize>().ok()).is_some_and(|only|only!=tab){continue;}
             let mut h=H::new();h.app.open_settings();h.ctx.set_embed_viewports(false);
             h.quota_accounts(2);
             h.app.settings.settings_theme=mode;h.app.settings_tab=tab;
+            if tab==12 {if let Ok(status)=std::env::var("DAOZAI_CLOUD_SYNC_PREVIEW_STATUS"){h.app.cloud_sync.preview_notice(status=="success");}}
             let output=std::sync::Arc::new(std::sync::Mutex::new(None));let capture=output.clone();
             egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
                 let id=viewport.ids.this;

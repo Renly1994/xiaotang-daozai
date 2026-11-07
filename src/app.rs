@@ -171,6 +171,8 @@ pub enum Cmd {
     ToggleMute,
     /// v0.5.5：账号清单变了，让外壳重新同步收信线程。
     MailSync,
+    /// Cloud restore may replace a password without changing the account identity.
+    MailReconnect,
     /// 测试某个邮箱的连接（授权码只在内存里传给工作线程）。
     MailTest(mail::Account, String),
     /// v0.5.6：用临时密码试连日历，成功后才允许落盘。
@@ -702,6 +704,7 @@ pub struct App {
     pub(crate) calendar: CalendarState,
     pub(crate) quota: crate::quota_ui::State,
     pub(crate) updates: crate::updates::State,
+    pub(crate) cloud_sync: crate::cloud_sync_ui::State,
     pub(crate) resident: bar::Motion,
     pub(crate) resident_power: (Option<u8>,bool),
 }
@@ -803,6 +806,7 @@ impl App {
             calendar: CalendarState::load(),
             quota: crate::quota_ui::State::load(),
             updates: Default::default(),
+            cloud_sync: Default::default(),
             resident: Default::default(), resident_power:(None,false),
         }
     }

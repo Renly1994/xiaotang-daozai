@@ -22,6 +22,8 @@ pub mod icons;
 pub mod input;
 pub mod lyrics;
 pub mod mail;
+mod cloud_sync;
+mod cloud_sync_ui;
 mod mail_reader;
 pub mod clipboard;
 pub mod side_dock;
