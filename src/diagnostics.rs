@@ -55,6 +55,12 @@ pub fn graphics(cc:&eframe::CreationContext<'_>) {
     if std::fs::create_dir_all(&directory).is_ok(){let _=std::fs::write(directory.join("last-graphics.log"),details);}
 }
 
+#[cfg(windows)]
+pub fn display_mode(message:&str) {
+    let directory=daozai::model::config_dir().join("diagnostics");
+    if std::fs::create_dir_all(&directory).is_ok(){let _=std::fs::write(directory.join("last-display-mode.log"),message);}
+}
+
 pub fn install() {
     std::panic::set_hook(Box::new(|info| {
         // 不写入 panic 的数据载荷，避免把邮件、凭据或登录信息带进日志。

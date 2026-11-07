@@ -83,6 +83,7 @@ impl Shell {
         diagnostics::graphics(cc);
         diagnostics::startup("加载本地配置");
         let mut app = App::new(&cc.egui_ctx, Options::default());
+        #[cfg(windows)] if !app.settings.compatibility_display {diagnostics::display_mode("原显示方式");}
         #[cfg(feature="record")] let quota_demo=std::env::var("DAOZAI_QUOTA_DEMO").is_ok();
         #[cfg(not(feature="record"))] let quota_demo=false;
         diagnostics::startup("初始化额度配置");
@@ -262,11 +263,61 @@ impl Shell {
 }
 
 impl eframe::App for Shell {
+    #[cfg(windows)]
+    fn wants_root_presenter(&self) -> bool {
+        self.app.settings.compatibility_display
+    }
+
+    #[cfg(windows)]
+    fn create_root_presenter(
+        &mut self,
+        input: raw_window_handle::RawWindowHandle,
+        gl: std::sync::Arc<eframe::glow::Context>,
+        resolve: &dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void,
+        size: [u32; 2],
+    ) -> Result<Box<dyn eframe::RootGlowPresenter>, String> {
+        let raw_window_handle::RawWindowHandle::Win32(h) = input else {
+            return Err("缺少 Windows 窗口".into());
+        };
+        let hwnd = windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _);
+        let surface =
+            unsafe { daozai::alpha_presenter::IslandSurface::new(hwnd, gl, resolve, size) }
+                .map_err(|e| e.to_string())?;
+        self.app.display_failed = false;
+        Ok(Box::new(surface))
+    }
+
+    #[cfg(windows)]
+    fn root_presenter_failed(&mut self, error: String) {
+        self.app.settings.compatibility_display = false;
+        self.app.settings.save();
+        self.app.display_failed = true;
+        diagnostics::display_mode(&format!("兼容性显示不可用，已恢复原显示方式。{error}"));
+        self.app.say("兼容性显示不可用，已恢复原显示方式");
+    }
+
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0; 4]
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(windows)]
+        {
+            use raw_window_handle::{HasWindowHandle,RawWindowHandle};
+            if let (Some(native),Ok(handle))=(&mut self.native,_frame.window_handle()){
+                if let RawWindowHandle::Win32(h)=handle.as_raw(){
+                    let hwnd=windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _);
+                    if native.hwnd()!=hwnd {
+                        native.bind_input(hwnd,self.app.settings.compatibility_display);
+                        self.placed=false;
+                        if !self.app.display_failed {diagnostics::display_mode(if self.app.settings.compatibility_display{"DirectComposition · 预乘 Alpha"}else{"原显示方式"});}
+                    }
+                }
+            }
+            if self.app.settings.compatibility_display && _frame.gl().is_none() {
+                self.root_presenter_failed("当前图形后端没有 WGL 上下文".into());
+            }
+        }
         if self.resource_at.ready(Duration::from_secs(30)){
             let (count,bytes)={let textures=ctx.tex_manager();let textures=textures.read();(textures.num_allocated(),textures.allocated().map(|(_,info)|info.bytes_used()).sum())};
             daozai::resources::TEXTURES.store(count,std::sync::atomic::Ordering::Relaxed);

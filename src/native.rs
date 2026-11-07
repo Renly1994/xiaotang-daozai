@@ -75,14 +75,15 @@ impl DragCapture {
 /// 没有播放音乐，例如侧边停靠）一秒才画一帧，拖到岛上往往来不及扩大接收区域。
 /// 这里用一个几乎不占资源的小线程：每 80 ms 看一次鼠标键，只有按住且光标在岛的画布内时
 /// 才请求重绘，让感应区及时生效；平时不触发任何绘制。
-fn watch_drag(hwnd:HWND,ctx:eframe::egui::Context){
-    let raw=hwnd.0 as isize;
+fn watch_drag(target:std::sync::Arc<std::sync::atomic::AtomicIsize>,ctx:eframe::egui::Context){
     let mut was_down=false;
     let _=std::thread::Builder::new().name("daozai-drag-watch".into()).spawn(move||loop{
         std::thread::sleep(std::time::Duration::from_millis(80));
         unsafe {
+            let raw=target.load(Ordering::Acquire);
+            if raw==0{return;}
             let hwnd=HWND(raw as *mut _);
-            if !IsWindow(hwnd).as_bool(){return;}
+            if !IsWindow(hwnd).as_bool(){continue;}
             let down=GetAsyncKeyState(VK_LBUTTON.0 as i32)<0 || GetAsyncKeyState(VK_RBUTTON.0 as i32)<0;
             // 松开后补一帧，让拖放状态及时复位；否则静止时一秒才画一帧，连续点击会沿用上次的按下位置。
             if was_down && !down {ctx.request_repaint();}
@@ -193,7 +194,7 @@ unsafe extern "system" fn subclass(
         || (msg==WM_SHOWWINDOW && wp.0!=0) {
         // 隐藏创建到首次显示、隐藏后恢复时也要恢复透明；等框架处理完窗口状态再应用。
         let result=DefSubclassProc(hwnd,msg,wp,lp);
-        let _=enable_alpha_composition(hwnd);
+        if _data==0 {let _=enable_alpha_composition(hwnd);}
         return result;
     }
     // 保留框架的焦点通知；lParam=-1 禁止系统在激活时重画透明窗口的顶边。
@@ -295,7 +296,37 @@ unsafe fn apply_style(hwnd: HWND, editing: bool, raise: bool) {
     }
 }
 
+/// Install the mouse/drop region on an input-only window, independently of its visual.
+pub fn set_input_shape(hwnd: HWND, boxes: impl IntoIterator<Item = (i32, i32, i32, i32)>) -> bool {
+    unsafe {
+        let region = CreateRectRgn(0, 0, 0, 0);
+        if region.is_invalid() {
+            return false;
+        }
+        for (l, t, r, b) in boxes {
+            let part = CreateRectRgn(l, t, r, b);
+            if part.is_invalid() {
+                let _ = DeleteObject(region);
+                return false;
+            }
+            let combined = CombineRgn(region, region, part, RGN_OR);
+            let _ = DeleteObject(part);
+            if combined.0 == 0 {
+                let _ = DeleteObject(region);
+                return false;
+            }
+        }
+        if SetWindowRgn(hwnd, region, false) == 0 {
+            let _ = DeleteObject(region);
+            return false;
+        }
+        true
+    }
+}
+
 pub struct Window {
+    watch_target:std::sync::Arc<std::sync::atomic::AtomicIsize>,
+    input_shape:Option<Vec<(i32,i32,i32,i32)>>,
     hwnd: HWND,
     region: (i32, i32, i32, i32),
     expanded: bool,
@@ -331,8 +362,34 @@ impl Window {
             )
         };
         let opaque_surface=cc.wgpu_render_state.as_ref().is_some_and(|state|state.adapter.get_info().backend==eframe::wgpu::Backend::Dx12);
-        watch_drag(hwnd,cc.egui_ctx.clone());
-        Some(Self { hwnd, region: (0, 0, 0, 0), expanded: false, hook, browser_state:(None,PollClock::default()), drag_capture:DragCapture::default(), glass:None, backdrop:None, blur:false, blur_unavailable:false, opaque_surface })
+        let watch_target=std::sync::Arc::new(std::sync::atomic::AtomicIsize::new(hwnd.0 as isize));
+        watch_drag(watch_target.clone(),cc.egui_ctx.clone());
+        Some(Self { watch_target,input_shape:None,hwnd, region: (0, 0, 0, 0), expanded: false, hook, browser_state:(None,PollClock::default()), drag_capture:DragCapture::default(), glass:None, backdrop:None, blur:false, blur_unavailable:false, opaque_surface })
+    }
+
+    /// Move the existing drag watcher and native input handling to the active winit HWND.
+    pub fn bind_input(&mut self, hwnd: HWND, external: bool) {
+        if self.hwnd == hwnd {
+            return;
+        }
+        unsafe {
+            let _ = RemoveWindowSubclass(self.hwnd, Some(subclass), SUBCLASS_ID);
+            apply_style(hwnd, false, false);
+            let _ = SetWindowSubclass(hwnd, Some(subclass), SUBCLASS_ID, external as usize);
+            if !external {
+                let _ = enable_alpha_composition(hwnd);
+            }
+        }
+        self.hwnd = hwnd;
+        self.watch_target.store(hwnd.0 as isize, Ordering::Release);
+        self.input_shape = external.then(Vec::new);
+        self.region = (i32::MIN, 0, 0, 0);
+        self.drag_capture = Default::default();
+        self.glass = None;
+        self.backdrop = None;
+        self.blur = false;
+        self.blur_unavailable = false;
+        self.expanded = false;
     }
 
     /// 使用目标屏幕的物理坐标定位，并在缩放、岛体大小、水平位置或屏幕连接变化后重新校正。
@@ -405,13 +462,18 @@ impl Window {
         );
         let mut hits=vec![h];
         if let Some((x,y,w,h))=notice_hit {hits.push((px(x),px(y),px(x+w),px(y+h)));}
+        if let Some(previous)=&mut self.input_shape {
+            let mut shape=hits.clone();
+            if let Some(zone)=zone.filter(|_|capture){shape.push(zone);}
+            if shape!=*previous && set_input_shape(self.hwnd,shape.iter().copied()){*previous=shape;}
+        }
         *hit().lock().unwrap_or_else(|e| e.into_inner()) = hits;
         // 毛玻璃：合成引擎的模糊块贴合岛体轮廓，窗口区域仍用矩形（含阴影与拖放感应区）。
         let _ = capture;
         match glass.filter(|g|!g.is_empty() && !self.blur_unavailable && !self.opaque_surface) {
             Some(shapes) => {
                 if self.backdrop.is_none() {
-                    match crate::composition::Backdrop::new() {
+                    match crate::composition::Backdrop::new_for_input(self.input_shape.is_some()) {
                         Ok(backdrop) => {
                             glass_diagnostic("合成引擎模糊底板已创建");
                             self.backdrop = Some(backdrop);
@@ -457,7 +519,7 @@ impl Window {
                     }
                 }
             }
-            None if self.region != r || self.glass.is_some() => {
+            None if self.input_shape.is_none() && (self.region != r || self.glass.is_some()) => {
                 unsafe {
                     let rgn = CreateRectRgn(r.0, r.1, r.2, r.3);
                     if SetWindowRgn(self.hwnd, rgn, true) != 0 {
@@ -477,6 +539,7 @@ impl Window {
 
 impl Drop for Window {
     fn drop(&mut self) {
+        self.watch_target.store(0,Ordering::Release);
         unsafe {
             let _ = RemoveWindowSubclass(self.hwnd, Some(subclass), SUBCLASS_ID);
             if !self.hook.is_invalid() {
@@ -497,7 +560,7 @@ mod tests {
             let hwnd=CreateWindowExW(WS_EX_TOOLWINDOW,windows::core::w!("STATIC"),windows::core::w!(""),WS_POPUP,-10000,-10000,400,200,None,None,None,None).unwrap();
             let saved=hit().lock().unwrap_or_else(|e|e.into_inner()).clone();
             {
-                let mut native=Window{hwnd,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default(),glass:None,backdrop:None,blur:false,blur_unavailable:true,opaque_surface:true};
+                let mut native=Window{watch_target:Default::default(),input_shape:None,hwnd,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default(),glass:None,backdrop:None,blur:false,blur_unavailable:true,opaque_surface:true};
                 let shapes=[crate::app::GlassShape::Round(eframe::egui::Rect::from_min_max(eframe::egui::pos2(80.0,60.0),eframe::egui::pos2(320.0,160.0)),25.0)];
                 native.update((0.0,0.0,400.0,200.0),(80.0,60.0,240.0,100.0),None,None,Some(&shapes),1.0,false,false);
                 let region=CreateRectRgn(0,0,0,0);
@@ -589,7 +652,7 @@ mod tests {
             assert!(above(cover.0,island.0),"先复现其他窗口盖住岛体");
             let foreground=GetForegroundWindow();
             let saved=hit().lock().unwrap_or_else(|e|e.into_inner()).clone();
-            let mut native=Window{hwnd:island.0,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default(),glass:None,backdrop:None,blur:false,blur_unavailable:false,opaque_surface:false};
+            let mut native=Window{watch_target:Default::default(),input_shape:None,hwnd:island.0,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default(),glass:None,backdrop:None,blur:false,blur_unavailable:false,opaque_surface:false};
             let update=|native:&mut Window,expanded|native.update((0.0,0.0,416.0,140.0),(0.0,0.0,416.0,140.0),None,None,None,1.0,false,expanded);
             update(&mut native,true);
             assert!(above(island.0,cover.0),"展开时必须重新抬高实际窗口层级，不能只检查置顶标记");

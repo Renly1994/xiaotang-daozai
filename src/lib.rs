@@ -54,6 +54,8 @@ mod updates;
 #[cfg(windows)]
 pub mod native;
 #[cfg(windows)]
+pub mod alpha_presenter;
+#[cfg(windows)]
 pub mod wechat;
 #[cfg(windows)]
 pub mod tray;
