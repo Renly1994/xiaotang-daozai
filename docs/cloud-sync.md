@@ -2,6 +2,14 @@
 
 设置 → 云同步，可在坚果云或自建 WebDAV 之间同步岛仔设置与邮箱账号。
 
+## 界面预览
+
+以下预览使用合成状态，不包含真实账号和密码。
+
+![浅色主题的云同步设置](images/cloud-sync/settings-light.png)
+
+![深色主题的云同步设置](images/cloud-sync/settings-dark.png)
+
 ## 第一台电脑
 
 1. 在云盘中创建专用文件夹，例如 `Daozai`，并启用 WebDAV。
