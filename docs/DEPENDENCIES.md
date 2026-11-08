@@ -8,6 +8,10 @@
 - `vendor/egui`：基于 0.31.1，为不同缩放倍率维护独立的字体纹理。
 - `vendor/imap`：基于 2.4.1，关闭 `nom` 默认功能并保留 `std`，移除邮件协议解析不需要的 `lexical-core` 浮点解析依赖。服务器拒绝进入 IDLE 时直接回到轮询。
 
+## CalDAV XML
+
+CalDAV 的 DAV XML 使用 `roxmltree 0.20.0` 按 namespace URI 解析，许可为 MIT OR Apache-2.0，MSRV 为 Rust 1.60。该依赖不提供网络服务，也不引入数据库；HTTP 沿用 `ureq`，凭据沿用 Windows 凭据管理器。
+
 ## 安全检查
 
 2026 年 11 月 3 日发布前，对 Cargo.lock 的 registry 依赖查询了 OSV 公告库，并运行完整测试。已移除受 [RUSTSEC-2023-0086](https://rustsec.org/advisories/RUSTSEC-2023-0086.html) 影响的 `lexical-core 0.7.6`。

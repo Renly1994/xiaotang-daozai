@@ -2,8 +2,15 @@
 use chrono::{Duration, Local, NaiveDate, NaiveTime, Timelike};
 use crate::mail::Meeting;
 
-#[derive(Clone)]
-pub(crate) struct Entry { pub event: Meeting, pub reminder: Option<u32> }
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Entry {
+    pub event: Meeting,
+    pub reminder: Option<u32>,
+    #[serde(default)]
+    pub resource_id: Option<String>,
+    #[serde(default)]
+    pub sync_reminders: Vec<i64>,
+}
 
 pub(crate) struct Draft {
     pub uid: Option<String>, pub title: String, pub start_date: String, pub start_time: String,
@@ -40,7 +47,7 @@ impl Draft {
         if end<=start{return Err("结束时间必须晚于开始时间".into());}
         let uid=self.uid.clone().unwrap_or_else(||format!("local-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         Ok(Entry{event:Meeting{uid,title:self.title.trim().into(),start,end:Some(end),all_day:self.all_day,
-            at:chrono::DateTime::from_timestamp(start,0).unwrap().with_timezone(&Local).format("%m-%d %H:%M").to_string()},reminder:self.reminder})
+            at:chrono::DateTime::from_timestamp(start,0).unwrap().with_timezone(&Local).format("%m-%d %H:%M").to_string()},reminder:self.reminder,resource_id:None,sync_reminders:vec![]})
     }
 }
 impl Entry {
@@ -62,20 +69,14 @@ pub(crate) fn decode(raw:&[u8])->Result<Vec<Entry>,String> {
         let dt=chrono::DateTime::from_timestamp(start,0).ok_or("本机日程时间无效")?;
         if end<=start || chrono::DateTime::from_timestamp(end,0).is_none(){return Err("本机日程结束时间无效".into());}
         Ok(Entry{event:Meeting{uid:text("uid")?,title:text("title")?,start,end:Some(end),all_day:row["all_day"].as_bool().unwrap_or(false),
-            at:dt.with_timezone(&Local).format("%m-%d %H:%M").to_string()},reminder:row["reminder"].as_u64().and_then(|n|u32::try_from(n).ok())})
+            at:dt.with_timezone(&Local).format("%m-%d %H:%M").to_string()},reminder:row["reminder"].as_u64().and_then(|n|u32::try_from(n).ok()),resource_id:None,sync_reminders:vec![]})
     }).collect()
 }
 pub(crate) fn load()->Result<Vec<Entry>,String> {
-    match std::fs::read(crate::model::config_dir().join("local-calendar.json")) {
-        Ok(raw)=>decode(&raw),Err(e) if e.kind()==std::io::ErrorKind::NotFound=>Ok(vec![]),Err(_)=>Err("无法读取本机日程文件".into()),
-    }
+    crate::organizer::read_state().map(|state|state.local_events)
 }
 pub(crate) fn save(entries:&[Entry])->Result<(),String> {
-    let rows:Vec<_>=entries.iter().map(|entry|serde_json::json!({"uid":entry.event.uid,"title":entry.event.title,"start":entry.event.start,
-        "end":entry.event.end,"all_day":entry.event.all_day,"reminder":entry.reminder})).collect();
-    let path=crate::model::config_dir().join("local-calendar.json");
-    std::fs::create_dir_all(path.parent().unwrap()).map_err(|_|"无法创建日程目录")?;
-    crate::model::atomic_write(&path,&serde_json::to_vec(&rows).map_err(|_|"日程序列化失败")?).map_err(|_|"日程保存失败，请检查磁盘和文件权限".into())
+    crate::organizer::save_events(entries)
 }
 
 #[cfg(test)]

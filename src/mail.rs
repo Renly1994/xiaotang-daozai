@@ -307,7 +307,7 @@ pub fn links_of(parsed:&Parsed)->Vec<Link> {
 }
 
 /// 会议邀请里界面和提醒要用的字段。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Meeting {
     pub all_day: bool,
     pub title: String,

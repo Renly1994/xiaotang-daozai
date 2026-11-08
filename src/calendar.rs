@@ -1,13 +1,15 @@
-//! 日历：飞书 / 钉钉 / iCloud / 自定义 CalDAV 与企业微信 Exchange ActiveSync 只读接入。
+//! 日历：飞书 / 钉钉 / iCloud / 自定义 CalDAV 与企业微信 Exchange ActiveSync 接入。
 //!
-//! `PROPFIND` 找日历（uuid），`REPORT calendar-query` 分别查询提醒窗口与所选月份，
+//! 默认只读：`PROPFIND` 找日历，`REPORT calendar-query` 查询提醒窗口与所选月份，
 //! 企业微信使用 FolderSync / Sync；复用 VEVENT 解析与重复日程展开。认证使用 Basic Auth，
 //! 没有 OAuth、没有回调，用户在客户端自己生成账号密码即可。
 //!
-//! 硬约束：只读；凭据只进 Windows 凭据管理器（`keyring`，和邮件同一套库），
-//! 配置文件里只有平台、用户名、日历地址；不落盘正文、不进日志。
+//! 自定义 CalDAV 可显式启用双向同步，由 caldav 模块执行条件写入并将原始 ICS、队列及
+//! 冲突存入 organizer 事务快照。其他 provider 保持只读。凭据只进 Windows 凭据管理器
+//! （`keyring`，和邮件同一套库），不把密码或日程正文写入日志。
 
 mod exchange;
+pub mod caldav;
 
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
@@ -21,7 +23,8 @@ const WINDOW_SECS: i64 = 24 * 3600;
 
 // ---------------------------------------------------------------- 平台
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Provider {
     #[default]
     Feishu,
@@ -73,6 +76,9 @@ impl Provider {
 
     /// 自定义 CalDAV、Exchange 需要用户填写服务器地址。
     pub fn custom_server(self) -> bool { matches!(self, Provider::Custom | Provider::Exchange) }
+
+    /// 只有自定义 CalDAV 可以启用日程和待办双向同步。
+    pub fn two_way_capable(self) -> bool { self == Provider::Custom }
 
     /// 走 Exchange ActiveSync 协议，而不是 CalDAV。
     pub fn exchange(self) -> bool { matches!(self, Provider::WeCom | Provider::Exchange) }
@@ -135,14 +141,29 @@ impl Provider {
 
 // ---------------------------------------------------------------- 配置
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ConflictPolicy {
+    #[default]
+    Ask,
+    Server,
+    Client,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Config {
     pub provider: Provider,
     pub username: String,
-    /// 发现到的日历集合地址；`None` 表示还没发现。
+    /// 发现到的日历集合地址；`None` 表示还没发现，不代表写入授权。
     pub href: Option<String>,
-    /// 服务器地址覆盖（只在录制/测试里用）。
+    /// 服务器地址覆盖。
     pub server: Option<String>,
+    /// 空值表示旧凭据仍未迁移；持久化账号时生成稳定 ID。
+    pub account_id: String,
+    pub two_way: bool,
+    pub event_collection: Option<String>,
+    pub todo_collection: Option<String>,
+    pub conflict_policy: ConflictPolicy,
 }
 
 impl Config {
@@ -158,129 +179,304 @@ pub fn normalize_server(raw: &str) -> Option<String> {
     let raw = if raw.contains("://") { raw.to_string() } else { format!("https://{raw}") };
     let raw = raw.replacen("webcal://", "https://", 1).replacen("caldav://", "https://", 1).replacen("caldavs://", "https://", 1);
     let url = url::Url::parse(&raw).ok()?;
-    let local = url.host_str().is_some_and(|host| host == "localhost" || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()));
+    let local = loopback_host(&url);
     if url.host_str().is_none_or(str::is_empty) || !url.username().is_empty() || url.password().is_some() { return None; }
     if !(url.scheme() == "https" || url.scheme() == "http" && local) { return None; }
     Some(url.to_string())
 }
 
-fn config_path() -> std::path::PathBuf {
-    crate::model::config_dir().join("calendar.json")
+fn loopback_host(url: &url::Url) -> bool {
+    url.host_str().is_some_and(|host| host.eq_ignore_ascii_case("localhost")
+        || host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()))
 }
 
-pub fn load_config() -> Option<Config> {
-    decode_config(&std::fs::read(config_path()).ok()?)
+pub fn load_config_strict() -> Result<Option<Config>, String> {
+    let state = crate::organizer::read_state()?;
+    Ok(state.accounts.into_iter().find(|cfg| cfg.provider == state.active_provider))
 }
 
-pub fn load_configs() -> Vec<Config> {
-    let Ok(raw) = std::fs::read(config_path()) else { return vec![]; };
-    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&raw) else { return vec![]; };
-    if let Some(accounts) = json.get("accounts").and_then(|v| v.as_array()) {
-        accounts.iter().filter_map(|v| decode_config(v.to_string().as_bytes())).collect()
-    } else {
-        decode_config(&raw).into_iter().collect()
-    }
+pub fn load_configs_strict() -> Result<Vec<Config>, String> {
+    Ok(crate::organizer::read_state()?.accounts)
 }
 
-pub fn selected_provider() -> Provider {
-    std::fs::read(config_path()).ok()
-        .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
-        .and_then(|json| json.get("active").or_else(|| json.get("provider")).and_then(|v| v.as_str()).map(Provider::parse))
-        .unwrap_or_default()
+pub fn selected_provider_strict() -> Result<Provider, String> {
+    Ok(crate::organizer::read_state()?.active_provider)
 }
 
-/// 纯解析：只有平台、用户名、日历地址，没有任何密码字段。
-pub fn decode_config(raw: &[u8]) -> Option<Config> {
-    let json: serde_json::Value = serde_json::from_slice(raw).ok()?;
-    if let Some(accounts) = json.get("accounts").and_then(|v| v.as_array()) {
-        let active = json.get("active")?.as_str()?;
-        return accounts.iter().filter_map(|v| decode_config(v.to_string().as_bytes()))
-            .find(|cfg| cfg.provider.key() == active);
-    }
-    let username = json.get("username")?.as_str()?.trim().to_string();
-    if username.is_empty() {
-        return None;
-    }
-    Some(Config {
-        provider: Provider::parse(json.get("provider").and_then(|p| p.as_str()).unwrap_or("feishu")),
-        username,
-        href: json.get("href").and_then(|h| h.as_str()).map(|s| s.to_string()),
-        server: json.get("server").and_then(|h| h.as_str()).map(|s| s.to_string()),
-    })
-}
+/// 兼容旧调用方；写入必须使用严格读取，不能把读取失败当成空配置。
+pub fn load_config() -> Option<Config> { load_config_strict().ok().flatten() }
+pub fn load_configs() -> Vec<Config> { load_configs_strict().unwrap_or_default() }
+pub fn selected_provider() -> Provider { selected_provider_strict().unwrap_or_default() }
 
-pub fn encode_config(cfg: &Config) -> Vec<u8> {
-    let json = serde_json::json!({
-        "provider": cfg.provider.key(),
-        "username": cfg.username,
-        "href": cfg.href,
-        "server": cfg.server,
-    });
-    serde_json::to_vec(&json).unwrap_or_default()
-}
-
-pub fn save_config(cfg: &Config) -> Result<(), String> {
-    let mut accounts = load_configs();
-    if let Some(saved) = accounts.iter_mut().find(|saved| saved.provider == cfg.provider) {
-        *saved = cfg.clone();
-    } else {
-        accounts.push(cfg.clone());
-    }
-    save_configs(&accounts, cfg.provider)
-}
-
-fn save_configs(accounts: &[Config], active: Provider) -> Result<(), String> {
-    let accounts: Vec<serde_json::Value> = accounts.iter()
-        .map(|cfg| serde_json::from_slice(&encode_config(cfg)).expect("日历配置可以序列化")).collect();
-    let data = serde_json::to_vec(&serde_json::json!({"active": active.key(), "accounts": accounts}))
-        .map_err(|e| format!("配置序列化失败：{e}"))?;
-    let path = config_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败：{e}"))?;
-    }
-    crate::model::atomic_write(&path, &data).map_err(|e| format!("写配置失败：{e}"))
-}
-
-pub fn select_provider(provider: Provider) -> Result<(), String> {
-    save_configs(&load_configs(), provider)
-}
-
-/// 新连接完整保存后才移除旧凭据；配置保存失败时恢复原凭据。
-pub fn save_connection(cfg: &Config, password: &str, old: Option<&Config>) -> Result<(), String> {
-    let saved = load_configs().into_iter().find(|saved| saved.provider == cfg.provider);
-    let old = saved.as_ref().or(old.filter(|old| old.provider == cfg.provider));
-    let same_account = old.is_some_and(|old|
-        old.provider == cfg.provider && old.username.eq_ignore_ascii_case(&cfg.username));
-    let previous_password = secrets::load(cfg).ok();
-    secrets::save(cfg, password)?;
-    if let Err(error) = save_config(cfg) {
-        if let Some(password) = previous_password {
-            if let Err(restore) = secrets::save(cfg, &password) {
-                return Err(format!("{error}；恢复原凭据失败：{restore}"));
-            }
-        } else {
-            secrets::delete(cfg);
-        }
-        return Err(error);
-    }
-    if let Some(old) = old.filter(|_| !same_account) {
-        secrets::delete(old);
+fn validate_config(cfg: &Config) -> Result<(), String> {
+    if cfg.username.trim().is_empty() { return Err("日历用户名不能为空".into()); }
+    if cfg.two_way && !cfg.provider.two_way_capable() {
+        return Err("只有 CalDAV 账号支持双向同步".into());
     }
     Ok(())
 }
 
+/// 纯解析：支持旧单账号和 accounts 格式；任何坏账号都返回错误，不静默丢弃。
+/// 不生成 ID、不触碰磁盘或凭据，供 organizer 一次性迁移使用。
+pub fn decode_configs_strict(raw: &[u8]) -> Result<(Vec<Config>, Provider), String> {
+    let json: serde_json::Value = serde_json::from_slice(raw)
+        .map_err(|e| format!("日历配置解析失败：{e}"))?;
+    if !json.is_object() { return Err("日历配置必须是对象".into()); }
+    let decode = |value: serde_json::Value| -> Result<Config, String> {
+        if !value.is_object() { return Err("日历账号必须是对象".into()); }
+        let cfg: Config = serde_json::from_value(value)
+            .map_err(|e| format!("日历账号解析失败：{e}"))?;
+        validate_config(&cfg)?;
+        Ok(cfg)
+    };
+    if let Some(values) = json.get("accounts") {
+        let values = values.as_array().ok_or("日历 accounts 必须是数组")?;
+        let active: Provider = serde_json::from_value(json.get("active").cloned().ok_or("日历配置缺少 active 平台")?)
+            .map_err(|e| format!("日历活动平台无效：{e}"))?;
+        let mut accounts = Vec::with_capacity(values.len());
+        for value in values {
+            let cfg = decode(value.clone())?;
+            if accounts.iter().any(|saved: &Config| saved.provider == cfg.provider) {
+                return Err("日历配置包含重复平台".into());
+            }
+            if !cfg.account_id.is_empty() && accounts.iter().any(|saved| saved.account_id == cfg.account_id) {
+                return Err("日历配置包含重复账号 ID".into());
+            }
+            accounts.push(cfg);
+        }
+        Ok((accounts, active))
+    } else {
+        let cfg = decode(json)?;
+        let provider = cfg.provider;
+        Ok((vec![cfg], provider))
+    }
+}
+
+pub fn decode_config_strict(raw: &[u8]) -> Result<Option<Config>, String> {
+    let (accounts, active) = decode_configs_strict(raw)?;
+    Ok(accounts.into_iter().find(|cfg| cfg.provider == active))
+}
+
+pub fn decode_config(raw: &[u8]) -> Option<Config> { decode_config_strict(raw).ok().flatten() }
+
+pub fn encode_config(cfg: &Config) -> Vec<u8> {
+    serde_json::to_vec(cfg).expect("日历配置可以序列化")
+}
+
+fn same_identity(left: &Config, right: &Config) -> bool {
+    left.provider == right.provider && left.username == right.username && left.server == right.server
+}
+
+fn prepare_config(cfg: &Config, previous: Option<&Config>) -> Result<Config, String> {
+    validate_config(cfg)?;
+    let mut cfg = cfg.clone();
+    if cfg.two_way && !previous.is_some_and(|saved| saved.two_way && same_identity(saved, &cfg)
+        && saved.event_collection == cfg.event_collection && saved.todo_collection == cfg.todo_collection) {
+        return Err("启用双向同步或更换集合必须先完成服务端初始化".into());
+    }
+    cfg.account_id = match previous {
+        Some(saved) if same_identity(saved, &cfg) && !saved.account_id.is_empty() => saved.account_id.clone(),
+        _ => crate::organizer::new_id(),
+    };
+    Ok(cfg)
+}
+
+/// 只更新账号与选中平台；资源、待上传队列和冲突由 organizer 保留。
+fn save_configs<R>(update: impl FnOnce(&mut Vec<Config>, &mut Provider) -> Result<R, String>) -> Result<R, String> {
+    crate::organizer::transaction(|state| {
+        let result = update(&mut state.accounts, &mut state.active_provider)?;
+        if let Some(binding) = &mut state.binding {
+            let unchanged = state.accounts.iter().any(|cfg| cfg.account_id == binding.account_id && cfg.two_way
+                && cfg.event_collection.as_deref() == Some(binding.event_collection.as_str())
+                && cfg.todo_collection.as_deref() == Some(binding.todo_collection.as_str()));
+            if !unchanged { binding.switching = true; }
+        }
+        Ok(result)
+    })
+}
+
+pub fn save_config(cfg: &Config) -> Result<(), String> {
+    persist_connection(cfg, None, None)
+}
+
+pub fn select_provider(provider: Provider) -> Result<(), String> {
+    save_configs(|_, active| { *active = provider; Ok(()) })
+}
+
+/// 新连接凭据 → 快照提交 → 删除旧凭据。调用方保存后应重读实际持久化的 Config。
+pub fn save_connection(cfg: &Config, password: &str, old: Option<&Config>) -> Result<(), String> {
+    persist_connection(cfg, Some(password), old)
+}
+
+#[cfg(windows)]
+struct CredentialSaveLock { _file: std::fs::File }
+
+#[cfg(windows)]
+impl CredentialSaveLock {
+    fn acquire() -> Result<Self, String> {
+        use std::os::windows::fs::OpenOptionsExt;
+        // 同一用户的各登录会话和所有 DAOZAI_DATA_DIR 共用；文件仅保存锁元数据，不含凭据。
+        let root = std::env::var_os("LOCALAPPDATA").filter(|path| !path.is_empty())
+            .ok_or("缺少 LOCALAPPDATA，无法安全锁定日历凭据保存")?;
+        let dir = std::path::PathBuf::from(root).join("Daozai");
+        std::fs::create_dir_all(&dir).map_err(|e| format!("创建日历凭据锁目录失败：{e}"))?;
+        let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).share_mode(0)
+            .open(dir.join("calendar-credentials.lock")).map_err(|error| {
+                if matches!(error.raw_os_error(), Some(32 | 33)) {
+                    "其他进程正在保存日历凭据，请稍后重试".into()
+                } else { format!("打开日历凭据保存锁失败：{error}") }
+            })?;
+        Ok(Self { _file: file })
+    }
+}
+
+fn persist_connection(cfg: &Config, password: Option<&str>, old: Option<&Config>) -> Result<(), String> {
+    static CONNECTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = CONNECTION_LOCK.lock().map_err(|_| "日历凭据保存锁不可用")?;
+    #[cfg(windows)]
+    let _process_guard = CredentialSaveLock::acquire()?;
+    let saved = load_configs_strict()?.into_iter().find(|saved| saved.provider == cfg.provider);
+    let old = saved.as_ref().or(old.filter(|old| old.provider == cfg.provider));
+    let next = prepare_config(cfg, saved.as_ref())?;
+    let same_key = old.is_some_and(|old| credential_name(old) == credential_name(&next));
+    // 自动迁移只限身份没有变化的旧连接；换用户名/服务器不能沿用旧密码。
+    let migrated_password = if password.is_none() && !same_key && old.is_some_and(|old| same_identity(old, &next)) {
+        optional_password(old.unwrap())?
+    } else { None };
+    let password = password.or(migrated_password.as_deref());
+    let previous_password = if password.is_some() { optional_password(&next)? } else { None };
+    if let Some(password) = password { secrets::save(&next, password)?; }
+    let result = save_configs(|accounts, active| {
+        let current = accounts.iter_mut().find(|account| account.provider == cfg.provider);
+        if current.as_deref() != saved.as_ref() {
+            return Err("日历账号配置已变化，请重新读取后保存".into());
+        }
+        if let Some(current) = current { *current = next.clone(); } else { accounts.push(next.clone()); }
+        *active = next.provider;
+        Ok(())
+    });
+    if let Err(error) = result {
+        if password.is_some() {
+            if let Some(previous_password) = previous_password {
+                if let Err(restore) = secrets::save(&next, &previous_password) {
+                    return Err(format!("{error}；恢复原凭据失败：{restore}"));
+                }
+            } else {
+                secrets::delete(&next);
+            }
+        }
+        return Err(error);
+    }
+    if let Some(old) = old.filter(|_| !same_key && password.is_some()) { secrets::delete(old); }
+    Ok(())
+}
+
+fn optional_password(cfg: &Config) -> Result<Option<String>, String> {
+    match secrets::load(cfg) {
+        Ok(password) => Ok(Some(password)),
+        Err(error) if error == "没有保存密码" => Ok(None),
+        #[cfg(not(windows))]
+        Err(_) => Ok(None),
+        #[cfg(windows)]
+        Err(error) => Err(error),
+    }
+}
+
+fn credential_name(cfg: &Config) -> String {
+    if cfg.account_id.is_empty() {
+        format!("{}:{}", cfg.provider.key(), cfg.username.trim().to_ascii_lowercase())
+    } else {
+        format!("account:{}", cfg.account_id)
+    }
+}
+
 pub fn forget_config() -> Result<(), String> {
-    let Some(active) = load_config() else { return Ok(()); };
-    let mut accounts = load_configs();
-    accounts.retain(|cfg| cfg.provider != active.provider);
-    save_configs(&accounts, active.provider)
+    save_configs(|accounts, active| {
+        accounts.retain(|cfg| cfg.provider != *active);
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_config_defaults_and_accounts_decode_strictly() {
+        let raw = br#"{"username":"CaseSensitive","provider":"custom","href":"/old/"}"#;
+        let cfg = decode_config_strict(raw).unwrap().unwrap();
+        assert_eq!(cfg.username, "CaseSensitive");
+        assert!(cfg.account_id.is_empty());
+        assert!(!cfg.two_way);
+        assert_eq!(cfg.conflict_policy, ConflictPolicy::Ask);
+        assert_eq!(cfg.event_collection, None);
+        let raw = br#"{"active":"dingtalk","accounts":[{"username":"test-feishu"},{"provider":"dingtalk","username":"test-ding"}]}"#;
+        assert_eq!(decode_configs_strict(raw).unwrap().0.len(), 2);
+        assert_eq!(decode_config_strict(raw).unwrap().unwrap().provider, Provider::DingTalk);
+        assert!(decode_config_strict(br#"{"active":"custom","accounts":[]}"#).unwrap().is_none());
+        for invalid in [
+            br#"{"provider":"typo","username":"test"}"#.as_slice(),
+            br#"{"username":" "}"#.as_slice(),
+            br#"{"username":"test","two_way":"true"}"#.as_slice(),
+            br#"{"active":"custom","accounts":[{"username":"test"},{"username":23}]}"#.as_slice(),
+            br#"{"active":"custom","accounts":[{"username":"one"},{"username":"two"}]}"#.as_slice(),
+            br#"{"active":"custom","accounts":{}}"#.as_slice(),
+        ] { assert!(decode_configs_strict(invalid).is_err()); }
+    }
+
+    #[test]
+    fn config_round_trip_and_provider_capability() {
+        for provider in Provider::ALL {
+            assert_eq!(serde_json::to_value(provider).unwrap(), provider.key());
+            assert_eq!(provider.two_way_capable(), provider == Provider::Custom);
+        }
+        let cfg = Config { provider: Provider::Custom, username: "test".into(), account_id: "stable".into(),
+            two_way: true, event_collection: Some("/events/".into()), todo_collection: Some("/tasks/".into()),
+            conflict_policy: ConflictPolicy::Client, ..Config::default() };
+        assert_eq!(decode_config_strict(&encode_config(&cfg)).unwrap(), Some(cfg));
+    }
+
+    #[test]
+    fn config_save_cannot_activate_or_move_two_way_binding() {
+        let mut cfg = Config { provider: Provider::Custom, username: "test".into(), two_way: true,
+            account_id: "existing".into(), ..Config::default() };
+        assert!(prepare_config(&cfg, None).is_err());
+        assert_eq!(prepare_config(&cfg, Some(&cfg)).unwrap().account_id, "existing");
+        let previous = cfg.clone();
+        cfg.todo_collection = Some("/different-tasks/".into());
+        assert!(prepare_config(&cfg, Some(&previous)).is_err());
+        cfg.two_way = false;
+        assert_eq!(prepare_config(&cfg, Some(&previous)).unwrap().account_id, "existing");
+        cfg.username = "TEST".into();
+        assert_ne!(prepare_config(&cfg, Some(&previous)).unwrap().account_id, "existing");
+    }
+
+    #[test]
+    fn credentials_use_stable_identity_after_migration() {
+        let legacy = Config { username: "CaseSensitive".into(), ..Config::default() };
+        assert_eq!(credential_name(&legacy), "feishu:casesensitive");
+        let cfg = Config { account_id: "stable".into(), ..legacy };
+        assert_eq!(credential_name(&cfg), "account:stable");
+        assert_eq!(credential_name(&Config { username: "OTHER".into(), ..cfg.clone() }), credential_name(&cfg));
+    }
+
+    #[test]
+    fn loopback_and_todo_only_collection_fallback_are_consistent() {
+        for host in ["localhost", "127.0.0.1", "[::1]"] {
+            let raw = format!("http://{host}/dav/");
+            assert!(normalize_server(&raw).is_some());
+            assert!(loopback_host(&url::Url::parse(&raw).unwrap()));
+        }
+        let xml = r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:response><d:href>/tasks/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/><c:calendar/></d:resourcetype><c:supported-calendar-component-set><c:comp name="VTODO"/></c:supported-calendar-component-set></d:prop></d:propstat></d:response></d:multistatus>"#;
+        assert!(calendar_collections(xml, "https://dav.example.invalid/").is_empty());
+    }
 }
 
 // ---------------------------------------------------------------- 凭据
 
 #[cfg(windows)]
 pub mod secrets {
-    /// 凭据只进 Windows 凭据管理器；键是「平台:用户名」，值是密码。
+    /// 凭据只进 Windows 凭据管理器；新键引用 account_id，空 ID 才使用旧平台/用户名键。
     pub fn save(cfg: &super::Config, password: &str) -> Result<(), String> {
         let entry = keyring::Entry::new(super::SERVICE, &name(cfg))
             .map_err(|e| format!("凭据管理器不可用：{e}"))?;
@@ -290,7 +486,10 @@ pub mod secrets {
     pub fn load(cfg: &super::Config) -> Result<String, String> {
         let entry = keyring::Entry::new(super::SERVICE, &name(cfg))
             .map_err(|e| format!("凭据管理器不可用：{e}"))?;
-        entry.get_password().map_err(|_| "没有保存密码".to_string())
+        entry.get_password().map_err(|error| match error {
+            keyring::Error::NoEntry => "没有保存密码".into(),
+            _ => format!("读取密码失败：{error}"),
+        })
     }
 
     pub fn delete(cfg: &super::Config) {
@@ -300,7 +499,7 @@ pub mod secrets {
     }
 
     fn name(cfg: &super::Config) -> String {
-        format!("{}:{}", cfg.provider.key(), cfg.username.trim().to_ascii_lowercase())
+        super::credential_name(cfg)
     }
 }
 
@@ -471,7 +670,7 @@ fn dav_response(
     let base=url::Url::parse(&cfg.base()).map_err(|_|Failure::text("日历服务器地址无效"))?;
     let mut target=url::Url::parse(url).map_err(|_|Failure::text("日历地址无效"))?;
     for attempt in 0..4 {
-        let local=base.host_str().is_some_and(|host|host.parse::<std::net::IpAddr>().is_ok_and(|ip|ip.is_loopback()));
+        let local=loopback_host(&base);
         if !same_service(cfg.provider,&target,&base) || !target.username().is_empty() || target.password().is_some()
             || !(target.scheme()=="https" || target.scheme()=="http" && local) {
             return Err(Failure::text("日历返回了不可信地址，请重新连接"));
@@ -716,7 +915,10 @@ fn property_href(xml:&str,property:&str,base:&str)->Option<String>{
 fn calendar_collections(xml:&str,base:&str)->Vec<String>{
     // 只取能放日程（VEVENT）的日历集合，跳过只放提醒事项的列表，最多 12 个。
     let mut calendars=event_calendars(xml,base);
-    if calendars.is_empty(){if let Some(url)=pick_calendar(xml,base){calendars.push(url);}}
+    // 已有明确日历集合却不支持 VEVENT 时不能再用旧兜底选中 VTODO 集合。
+    if calendars.is_empty() && !responses(xml).iter().any(|(_, is_calendar, _)| *is_calendar) {
+        if let Some(url)=pick_calendar(xml,base){calendars.push(url);}
+    }
     calendars
 }
 
@@ -924,6 +1126,10 @@ pub enum Cmd {
     ViewMonth(NaiveDate),
     /// 用临时密码试连，成功后界面才落盘。
     Test(Config, String),
+    Discover(Config, String),
+    Initialize(Config, String, String, String, u64),
+    SetTwoWay(String, bool),
+    ResolveConflict(String, bool),
 }
 
 pub enum Event {
@@ -934,6 +1140,8 @@ pub enum Event {
     MonthLoaded { config: Config, month: NaiveDate, result: Result<Vec<crate::mail::Meeting>, String> },
     /// 一次失败（界面只在连续失败时显示红字）。
     Failed { config: Config, message: String },
+    Collections { config: Config, result: Result<Vec<caldav::dav::Collection>, String> },
+    Organizer { account_id: String, generation: u64, result: Result<(), String> },
 }
 
 pub struct Service {
@@ -965,6 +1173,29 @@ impl Service {
 
     pub fn test(&self, cfg: Config, password: String) {
         let _ = self.cmd.send(Cmd::Test(cfg, password));
+    }
+
+    pub fn discover(&self, cfg: Config, password: String) {
+        let _ = self.cmd.send(Cmd::Discover(cfg, password));
+    }
+
+    pub fn initialize(&self, cfg: Config, event_path: String, todo_path: String, password: String, expected_generation: u64) {
+        let _ = self.cmd.send(Cmd::Initialize(cfg, event_path, todo_path, password, expected_generation));
+    }
+
+    pub fn set_two_way(&self, account_id: String, enabled: bool) -> Result<(), String> {
+        // UI 线程先阻止后续写入；后台串行等待已发请求确认后再完成切换。
+        crate::organizer::transaction(|state| {
+            let binding = state.binding.as_mut().filter(|binding| binding.account_id == account_id)
+                .ok_or("账号尚未初始化双向同步")?;
+            binding.switching = true;
+            Ok(())
+        })?;
+        self.cmd.send(Cmd::SetTwoWay(account_id, enabled)).map_err(|_| "日历后台服务已停止".into())
+    }
+
+    pub fn resolve_conflict(&self, id: String, prefer_local: bool) {
+        let _ = self.cmd.send(Cmd::ResolveConflict(id, prefer_local));
     }
 
     pub fn try_recv(&self) -> Option<Event> {
@@ -1014,6 +1245,34 @@ fn run_with(cmd_rx: Receiver<Cmd>, ev: Sender<Event>, interval: Duration, mut sy
                         let _ = ev.send(Event::Test { ok, message, count, config });
                     });
             }
+            Ok(Cmd::Discover(c, password)) => {
+                let result = if c.provider.two_way_capable() {
+                    caldav::dav::DavClient::new(&c.base(), &c.username, &password)
+                        .and_then(|client| client.discover()).map_err(|error| error.message)
+                } else { Err("只有 CalDAV 账号支持双向集合发现".into()) };
+                let _ = ev.send(Event::Collections { config: c, result });
+            }
+            Ok(Cmd::Initialize(c, event_path, todo_path, password, expected_generation)) => {
+                let result = caldav::sync::initialize(&c, &event_path, &todo_path, &password, expected_generation);
+                dirty = result.is_ok();
+                finish_organizer_command(&mut cfg, &ev, c.account_id, result);
+            }
+            Ok(Cmd::SetTwoWay(account_id, enabled)) => {
+                let result = caldav::sync::set_enabled(&account_id, enabled);
+                dirty = result.is_ok();
+                finish_organizer_command(&mut cfg, &ev, account_id, result);
+            }
+            Ok(Cmd::ResolveConflict(id, prefer_local)) => {
+                match crate::organizer::read_state() {
+                    Ok(state) => {
+                        let account_id = state.binding.as_ref().map(|binding| binding.account_id.clone()).unwrap_or_default();
+                        let result = caldav::sync::resolve_conflict(&id, prefer_local);
+                        dirty = result.is_ok();
+                        finish_organizer_command(&mut cfg, &ev, account_id, result);
+                    }
+                    Err(error) => { let _ = ev.send(Event::Organizer { account_id: String::new(), generation: 0, result: Err(error) }); }
+                }
+            }
             Err(RecvTimeoutError::Timeout) => dirty = true,
             Err(RecvTimeoutError::Disconnected) => return,
         }
@@ -1026,21 +1285,54 @@ fn run_with(cmd_rx: Receiver<Cmd>, ev: Sender<Event>, interval: Duration, mut sy
     }
 }
 
+fn finish_organizer_command(configs: &mut Vec<Config>, ev: &Sender<Event>, account_id: String, result: Result<(), String>) {
+    match crate::organizer::read_state() {
+        Ok(state) => {
+            *configs = state.accounts;
+            let _ = ev.send(Event::Organizer { account_id, generation: state.generation, result });
+        }
+        Err(error) => {
+            let error = match result { Ok(()) => error, Err(previous) => format!("{previous}；读取同步状态失败：{error}") };
+            let _ = ev.send(Event::Organizer { account_id, generation: 0, result: Err(error) });
+        }
+    }
+}
+
 fn sync_once(
     cfg: &Config,
     month: Option<NaiveDate>,
     ev: &Sender<Event>,
 ) {
+    let state = match crate::organizer::read_state() {
+        Ok(state) => state,
+        Err(error) => {
+            let _ = ev.send(Event::Organizer { account_id: cfg.account_id.clone(), generation: 0, result: Err(error) });
+            return;
+        }
+    };
+    // 配置命令可能已过期，始终使用本次事务快照内的实际账号和凭据引用。
+    let Some(cfg) = state.accounts.iter().find(|current| current.provider == cfg.provider) else { return; };
+    let bound = state.binding.as_ref().is_some_and(|binding| binding.account_id == cfg.account_id);
     let password = match secrets::load(cfg) {
         Ok(p) => p,
         Err(e) => {
             // 没配置凭据：静默，只记日志。
             eprintln!("[calendar] 凭据不可用：{e}");
-            let _ = ev.send(Event::Failed { config:cfg.clone(),message: e.clone() });
-            if let Some(month) = month { let _ = ev.send(Event::MonthLoaded { config: cfg.clone(), month, result: Err(e) }); }
+            if bound {
+                let _ = ev.send(Event::Organizer { account_id: cfg.account_id.clone(), generation: state.generation, result: Err(e) });
+            } else {
+                let _ = ev.send(Event::Failed { config:cfg.clone(),message: e.clone() });
+                if let Some(month) = month { let _ = ev.send(Event::MonthLoaded { config: cfg.clone(), month, result: Err(e) }); }
+            }
             return;
         }
     };
+    if bound {
+        let result = caldav::sync::sync_account(cfg, &password);
+        let mut current_configs = Vec::new();
+        finish_organizer_command(&mut current_configs, ev, cfg.account_id.clone(), result);
+        return;
+    }
     match fetch(cfg, &password) {
         Ok(f) => {
             let _ = ev.send(Event::Synced { config:cfg.clone(),events: f.events, at: now_label() });
@@ -1098,7 +1390,7 @@ mod tests {
                 write!(socket,"HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
             }
         });
-        let cfg=Config{provider:Provider::DingTalk,username:"test".into(),href:Some(format!("{base}empty/")),server:Some(base)};
+        let cfg=Config{provider:Provider::DingTalk,username:"test".into(),href:Some(format!("{base}empty/")),server:Some(base),..Config::default()};
         let result=fetch_month(&cfg,"test",NaiveDate::from_ymd_opt(2026,11,1).unwrap());
         stop.send(()).unwrap();worker.join().unwrap();
         assert_eq!(result.unwrap().events.len(),1,"已保存的空日历不能遮蔽其他日历");
@@ -1167,7 +1459,7 @@ mod tests {
                 }
                 paths
             });
-            let cfg=Config{provider,username:"synthetic".into(),href:None,server:Some(base.clone())};
+            let cfg=Config{provider,username:"synthetic".into(),href:None,server:Some(base.clone()),..Config::default()};
             let result=discover(&agent(),&cfg,"synthetic-password");
             stop_tx.send(()).unwrap();let paths=worker.join().unwrap();
             assert_eq!(result.unwrap(),format!("{base}dav/calendars/account/primary/"));
@@ -1204,7 +1496,7 @@ mod tests {
                         }
                         paths
                     });
-                    let cfg=Config{provider:Provider::ICloud,username:"synthetic".into(),href:None,server:Some(base)};
+                    let cfg=Config{provider:Provider::ICloud,username:"synthetic".into(),href:None,server:Some(base),..Config::default()};
                     let result=fetch_month(&cfg,"synthetic-password",NaiveDate::from_ymd_opt(2026,11,1).unwrap());
                     stop.send(()).unwrap();
                     let paths=worker.join().unwrap();
@@ -1229,7 +1521,7 @@ mod tests {
             write!(stream,"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
             drop(stream);listener
         });
-        let cfg=Config{provider:Provider::Custom,username:"synthetic".into(),href:None,server:Some(base)};
+        let cfg=Config{provider:Provider::Custom,username:"synthetic".into(),href:None,server:Some(base),..Config::default()};
         assert_eq!(discover(&agent(),&cfg,"synthetic-password").unwrap_err().status,Some(400));
         let listener=worker.join().unwrap();listener.set_nonblocking(true).unwrap();
         assert!(listener.accept().is_err());
@@ -1247,7 +1539,7 @@ mod tests {
                 assert!(read_discovery_request(&mut stream).starts_with("REPORT /calendar/ "));
                 write!(stream,"HTTP/1.1 {code} Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
             });
-            let cfg=Config{provider:Provider::Custom,username:"synthetic".into(),href:None,server:Some(base)};
+            let cfg=Config{provider:Provider::Custom,username:"synthetic".into(),href:None,server:Some(base),..Config::default()};
             let error=fetch_month(&cfg,"synthetic-password",NaiveDate::from_ymd_opt(2026,11,1).unwrap()).err().unwrap();
             worker.join().unwrap();
             assert_eq!(error.status,Some(code));
@@ -1274,7 +1566,7 @@ mod tests {
             write!(stream,"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
             drop(stream);listener
         });
-        let cfg=Config{provider:Provider::DingTalk,username:"synthetic".into(),href:None,server:Some(base)};
+        let cfg=Config{provider:Provider::DingTalk,username:"synthetic".into(),href:None,server:Some(base),..Config::default()};
         let client=ureq::AgentBuilder::new().timeout(Duration::from_millis(200)).build();
         assert_eq!(discover(&client,&cfg,"wrong").unwrap_err().status,Some(401));
         let listener=worker.join().unwrap();listener.set_nonblocking(true).unwrap();
@@ -1293,7 +1585,7 @@ mod tests {
             let body=format!("<d:current-user-principal xmlns:d=\"DAV:\"><d:href>{foreign_url}</d:href></d:current-user-principal>");
             write!(stream,"HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
         });
-        let cfg=Config{provider:Provider::WeCom,username:"synthetic".into(),href:None,server:Some(base)};
+        let cfg=Config{provider:Provider::WeCom,username:"synthetic".into(),href:None,server:Some(base),..Config::default()};
         assert!(discover(&agent(),&cfg,"synthetic-password").unwrap_err().message.contains("不可信"));
         worker.join().unwrap();foreign.set_nonblocking(true).unwrap();assert!(foreign.accept().is_err());
     }
@@ -1303,7 +1595,7 @@ mod tests {
         use std::net::TcpListener;
         let server=TcpListener::bind("127.0.0.1:0").unwrap();
         let url=format!("http://{}/calendar/",server.local_addr().unwrap());
-        let cfg=Config{provider:Provider::Feishu,username:"synthetic".into(),href:Some(url.clone()),server:None};
+        let cfg=Config{provider:Provider::Feishu,username:"synthetic".into(),href:Some(url.clone()),server:None,..Config::default()};
         let client=ureq::AgentBuilder::new().timeout(Duration::from_millis(100)).build();
         assert!(dav(&client,"REPORT",&url,"1","",&cfg,"synthetic-secret").is_err());
         server.set_nonblocking(true).unwrap();
@@ -1327,7 +1619,7 @@ mod tests {
                 write!(stream,"HTTP/1.1 {status}\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
             }
         });
-        let cfg=Config{provider:Provider::Feishu,username:"synthetic".into(),href:None,server:Some(base.clone())};
+        let cfg=Config{provider:Provider::Feishu,username:"synthetic".into(),href:None,server:Some(base.clone()),..Config::default()};
         assert!(dav(&agent(),"REPORT",&base,"1","",&cfg,"secret").is_ok());
         assert!(dav(&agent(),"REPORT",&base,"1","",&cfg,"secret").is_err());
         worker.join().unwrap();foreign.set_nonblocking(true).unwrap();assert!(foreign.accept().is_err());
@@ -1452,7 +1744,7 @@ mod tests {
                     write!(socket,"HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",xml.len(),xml).unwrap();
                 }
             });
-            let cfg=Config{provider:Provider::Feishu,username:"demo".into(),href:Some(format!("{base}calendar/")),server:Some(base)};
+            let cfg=Config{provider:Provider::Feishu,username:"demo".into(),href:Some(format!("{base}calendar/")),server:Some(base),..Config::default()};
             let result=fetch_month(&cfg,"test",NaiveDate::from_ymd_opt(2026,11,3).unwrap());
             if succeeds {assert_eq!(result.unwrap().events.len(),2);} else {assert!(result.is_err());}
             server.join().unwrap();
@@ -1491,7 +1783,7 @@ mod tests {
                     write!(socket,"HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",xml.len(),xml).unwrap();
                 }
             });
-            let cfg=Config{provider:Provider::DingTalk,username:"demo".into(),href:Some(format!("{base}calendar/")),server:Some(base)};
+            let cfg=Config{provider:Provider::DingTalk,username:"demo".into(),href:Some(format!("{base}calendar/")),server:Some(base),..Config::default()};
             let result=fetch_month(&cfg,"test",NaiveDate::from_ymd_opt(2026,11,3).unwrap());
             if succeeds {assert_eq!(result.unwrap().events.len(),2);} else {assert!(result.is_err());}
             server.join().unwrap();
@@ -1533,7 +1825,7 @@ mod tests {
             write!(socket,"HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",xml.len(),xml).unwrap();
             String::from_utf8(buf).unwrap()
         });
-        let cfg=Config{provider:Provider::Feishu,username:"demo".into(),href:Some(format!("http://127.0.0.1:{port}/calendar/")),server:Some(format!("http://127.0.0.1:{port}/"))};
+        let cfg=Config{provider:Provider::Feishu,username:"demo".into(),href:Some(format!("http://127.0.0.1:{port}/calendar/")),server:Some(format!("http://127.0.0.1:{port}/")),..Config::default()};
         let events=fetch_month(&cfg,"demo-password",NaiveDate::from_ymd_opt(2024,2,12).unwrap()).unwrap().events;
         assert_eq!(events.iter().map(|m|m.uid.as_str()).collect::<Vec<_>>(),["month-first","leap-day"]);
         let request=server.join().unwrap();
@@ -1546,7 +1838,7 @@ mod tests {
         let worker=std::thread::spawn(move||run_with(rx,tx,Duration::from_millis(40),|cfg,_,ev|{
             ev.send(Event::Synced{config:cfg.clone(),events:vec![],at:String::new()}).unwrap();
         }));
-        let config=Config{provider:Provider::Feishu,username:"demo".into(),href:None,server:None};
+        let config=Config{provider:Provider::Feishu,username:"demo".into(),href:None,server:None,..Config::default()};
         cmd.send(Cmd::Configure(vec![config.clone()],false)).unwrap();
         events.recv_timeout(Duration::from_secs(1)).expect("新连接应同步一次");
         assert!(matches!(events.recv_timeout(Duration::from_millis(120)),Err(RecvTimeoutError::Timeout)));
@@ -1573,7 +1865,7 @@ mod tests {
                 else {Event::Synced{config:cfg.clone(),events:vec![],at:String::new()}};
             ev.send(event).unwrap();
         }));
-        let feishu=Config{provider:Provider::Feishu,username:"demo".into(),href:None,server:None};
+        let feishu=Config{provider:Provider::Feishu,username:"demo".into(),href:None,server:None,..Config::default()};
         let ding=Config{provider:Provider::DingTalk,..feishu.clone()};
         cmd.send(Cmd::Configure(vec![feishu,ding.clone()],false)).unwrap();
         assert!(matches!(events.recv_timeout(Duration::from_secs(1)).unwrap(),Event::Failed{..}));
@@ -1636,7 +1928,7 @@ mod tests {
         for provider in Provider::ALL {assert_eq!(Provider::parse(provider.key()),provider);}
         assert!(Provider::Exchange.exchange() && Provider::WeCom.exchange() && !Provider::Custom.exchange());
         assert!(Provider::Exchange.custom_server() && Provider::Exchange.server().is_empty());
-        let saved=Config{provider:Provider::Exchange,username:"me@example.com".into(),href:None,server:Some("https://mail.example.com/".into())};
+        let saved=Config{provider:Provider::Exchange,username:"me@example.com".into(),href:None,server:Some("https://mail.example.com/".into()),..Config::default()};
         assert_eq!(decode_config(&encode_config(&saved)).unwrap(),saved,"Exchange 账号的服务器地址要能保存和读回");
         assert_eq!(Failure::transport("timed out").message, "连不上服务器，检查网络");
         assert_eq!(Failure::status(Provider::DingTalk, 404).message, "服务器地址不对（404）");
@@ -1763,6 +2055,7 @@ END:VCALENDAR</c:calendar-data></d:prop></d:propstat></d:response></d:multistatu
             username: "u1".into(),
             href: None,
             server: Some(format!("http://127.0.0.1:{port}/calendars/")),
+            ..Config::default()
         };
         let got = fetch(&cfg, "p1").expect("完整链路应成功");
         assert!(got.href.ends_with("/8f3c2d7a-1111-2222-3333-444455556666/"));
@@ -1791,7 +2084,7 @@ mod icloud_and_ics_tests {
         assert!(normalize_server("http://127.0.0.1:5232/").is_some());
         assert!(normalize_server("https://user:pw@example.com/").is_none());
         assert!(normalize_server("  ").is_none());
-        let cfg = Config { provider: Provider::Custom, username: "me".into(), href: None, server: Some("https://dav.example.com/".into()) };
+        let cfg = Config { provider: Provider::Custom, username: "me".into(), href: None, server: Some("https://dav.example.com/".into()), ..Config::default() };
         let back = decode_config(&encode_config(&cfg)).unwrap();
         assert_eq!(back, cfg);
     }

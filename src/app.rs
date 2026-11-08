@@ -176,6 +176,10 @@ pub enum Cmd {
     MailManage(crate::mail_manage::Request),
     /// v0.5.6：用临时密码试连日历，成功后才允许落盘。
     CalendarTest(calendar::Config, String),
+    CalendarDiscover(calendar::Config, String),
+    CalendarInitialize(calendar::Config, String, String, String, u64),
+    CalendarTwoWay(String, bool),
+    CalendarConflict(String, bool),
     /// 让外壳立即同步一次日历。
     CalendarSync,
     CalendarMonth(chrono::NaiveDate),
@@ -517,6 +521,7 @@ impl MailState {
 /// v0.5.6：日程（CalDAV）的界面状态。密码只在表单里暂存，保存后立刻清掉。
 #[derive(Default)]
 pub(crate) struct CalendarState {
+    pub caldav: crate::caldav_ui::State,
     pub local: Vec<crate::local_calendar::Entry>,
     pub local_error: String,
     pub draft: Option<crate::local_calendar::Draft>,
@@ -553,7 +558,7 @@ pub(crate) struct CalendarFeed {
 }
 
 impl CalendarFeed {
-    fn new(config: calendar::Config) -> Self {
+    pub(crate) fn new(config: calendar::Config) -> Self {
         Self { config, events: vec![], month: Default::default(), connected: false,
             last_sync: String::new(), failures: 0, error: String::new() }
     }
@@ -578,7 +583,9 @@ impl CalendarState {
             server: config.as_ref().filter(|cfg| cfg.provider.custom_server()).and_then(|cfg| cfg.server.clone()).unwrap_or_default(), ..Default::default() };
         let feeds = calendar::load_configs().into_iter().map(CalendarFeed::new).collect();
         let (local,local_error)=match crate::local_calendar::load(){Ok(events)=>(events,String::new()),Err(error)=>(vec![],error)};
-        Self { config, form, feeds, local, local_error, ..Default::default() }
+        let mut state=Self { config, form, feeds, local, local_error, ..Default::default() };
+        state.caldav.bound=crate::organizer::read_state().is_ok_and(|snapshot|snapshot.binding.is_some());
+        state
     }
 
 }
@@ -648,6 +655,7 @@ pub struct App {
     // 待办
     pub(crate) adding: bool,
     pub(crate) editing: Option<usize>,
+    pub(crate) editing_id: Option<String>,
     pub(crate) buf: String,
     pub(crate) todo_input_focused: bool,
     todo_ime_active: bool,
@@ -799,6 +807,7 @@ impl App {
             todo_ime_active: false,
             todo_ime_frame: false,
             editing: None,
+            editing_id: None,
             buf: String::new(),
             todo_pop: Spring::new(0.0, 500.0, 0.45),
             ly: LyricsState::default(),
@@ -920,6 +929,17 @@ impl App {
         }
     }
 
+    pub(crate) fn save_todos_ui(&mut self) -> bool {
+        if self.calendar.caldav.initializing {
+            if let Some(before)=&self.todos.baseline {self.todos.items=before.clone();}
+            self.say("正在初始化 CalDAV，请稍后编辑"); return false;
+        }
+        match self.todos.save() {
+            Ok(()) => { if self.calendar.caldav.bound { self.pending.push(Cmd::CalendarSync); } true }
+            Err(error) => { self.say(error); false }
+        }
+    }
+
     /// 设置窗口第 8 个标签页：邮件。
     pub fn open_mail_settings(&mut self) {
         self.settings_tab = 7;
@@ -929,6 +949,8 @@ impl App {
     /// v0.5.6：日历服务推来的事件。失败不弹窗，只累计次数（连续两次才显示红字）。
     pub fn calendar_event(&mut self, ev: calendar::Event) {
         match ev {
+            calendar::Event::Collections { config, result } => self.caldav_collections_result(config,result),
+            calendar::Event::Organizer { account_id, generation, result } => self.caldav_result(account_id,generation,result),
             calendar::Event::Test { ok, message, count, config } => {
                 self.calendar.testing = false;
                 if !ok {
@@ -936,7 +958,7 @@ impl App {
                     self.calendar.note_error = true;
                     return;
                 }
-                let Some(cfg) = config else {
+                let Some(mut cfg) = config else {
                     self.calendar.note = "服务器没有返回日历地址".into();
                     self.calendar.note_error = true;
                     return;
@@ -945,6 +967,11 @@ impl App {
                     self.calendar.note = e;
                     self.calendar.note_error = true;
                     return;
+                }
+                match calendar::load_config_strict() {
+                    Ok(Some(saved)) => cfg=saved,
+                    Ok(None) => { self.calendar.note="连接保存后未找到账号，请重新连接".into();self.calendar.note_error=true;return; }
+                    Err(error) => { self.calendar.note=error;self.calendar.note_error=true;return; }
                 }
                 self.calendar.note = format!("已连接 · 未来 24 小时 {count} 个日程");
                 self.calendar.note_error = false;
@@ -1198,6 +1225,7 @@ impl App {
             username: "demo***@feishu.example".into(),
             href: Some("https://caldav.feishu.cn/calendars/8f3c2d7a-1111-2222-3333-444455556666/".into()),
             server: None,
+            ..Default::default()
         };
         match mode.as_str() {
             "paste" => {
@@ -1377,6 +1405,7 @@ impl App {
         self.adding = false;
         self.editing = None;
         self.todo_choosing = false;
+        self.editing_id = None;
         self.task_dialog=None;
         self.calendar.draft=None;
         self.buf.clear();
@@ -2548,7 +2577,11 @@ impl App {
         }
         let now = format!("{} {}", env.today, env.clock.get(..5).unwrap_or("00:00"));
         let due: Vec<_> = self.todos.items.iter().enumerate().filter(|(_, item)| item.reminder_due(&now)).map(|(i,item)| (i,item.text.clone())).collect();
-        for (i,text) in due { self.todos.items[i].mark_reminded(&now); self.todos.save(); self.alert("待办到时间了", text, 4, true); }
+        for (i,text) in due {
+            if self.calendar.caldav.initializing {break;}
+            self.todos.items[i].mark_reminded(&now);
+            match self.todos.save() {Ok(())=>self.alert("待办到时间了", text, 4, true),Err(error)=>self.say(error)}
+        }
         // v0.5.5 会议提醒：.ics 里的开始时间，默认提前 15 分钟（可设 5/15/30）。
         // v0.5.6 起日历（CalDAV）事件走同一套：同一场会（UID + DTSTART）只提醒一次，
         // 邮件和日历两条来源撞上了也只弹一次。
@@ -2557,6 +2590,16 @@ impl App {
         let mut picks = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for entry in &self.calendar.local {
+            if self.calendar.caldav.initializing {break;}
+            if let Some(id)=&entry.resource_id {
+                for at in &entry.sync_reminders {
+                    let key=format!("caldav-alarm:{id}:{}:{}:{at}",entry.event.uid,entry.event.start);
+                    if now_ts>=*at && now_ts<entry.event.end.unwrap_or(entry.event.start+60).max(*at+60) && !self.mail.fired.contains(&key) && seen.insert(key.clone()) {
+                        picks.push((key,entry.event.clone(),"CalDAV".into(),CALENDAR_PAGE));
+                    }
+                }
+                continue;
+            }
             let Some(at)=entry.reminder_at() else{continue;};
             let key=calendar::dedupe_key(&entry.event);
             let cutoff=if entry.event.all_day{at+60}else{entry.event.start+60};
@@ -2582,6 +2625,16 @@ impl App {
             }
         }
         for (key, meeting, source, page) in picks {
+            if key.starts_with("caldav-alarm:") {
+                match crate::organizer::transaction(|state| {
+                    let metadata=state.metadata.entry(key.clone()).or_default();
+                    if metadata.reminded {return Ok(false);}
+                    metadata.reminded=true;Ok(true)
+                }) {
+                    Ok(false)=>{self.mail.fired.insert(key);continue;},Ok(true)=>{},
+                    Err(error)=>{self.say(error);continue;}
+                }
+            }
             self.mail.fired.insert(key);
             self.meeting_alert(meeting, source, page);
         }
@@ -2796,15 +2849,16 @@ impl App {
         if submit {
             let text = self.buf.trim().to_string();
             let mut added=false;
-            if let Some(i) = self.editing {
-                if !text.is_empty() && i < self.todos.items.len() {
+            if self.editing.is_some() {
+                let index=self.editing_id.as_ref().and_then(|id|self.todos.items.iter().position(|item|&item.id==id));
+                if let Some(i)=index.filter(|_|!text.is_empty()) {
                     self.todos.items[i].text = text;
-                    self.todos.save();
-                }
+                    if !self.save_todos_ui(){return;}
+                } else {self.say("待办已变化，请重新打开后编辑");return;}
             } else if !text.is_empty() {
                 self.todo_first = 0;
                 self.todos.items.insert(0, model::TodoItem::new(text));
-                self.todos.save();
+                if !self.save_todos_ui(){return;}
                 self.todo_pop.vel += 6.0;
                 added=true;
             }
