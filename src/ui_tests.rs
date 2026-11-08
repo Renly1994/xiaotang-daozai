@@ -4345,8 +4345,9 @@ fn calendar_month_refresh_removes_cancelled_cached_event() {
 #[test]
 fn ignored_mail_event_hides_stops_reminders_persists_and_restores() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    let now=chrono::Local::now();let day=now.date_naive();
-    let meeting=crate::mail::Meeting{all_day:false,title:"测试邀请".into(),start:now.timestamp()+600,end:None,at:String::new(),uid:"ignore-me".into()};
+    // 提前十分钟的日程可能跨午夜，查询日期必须取日程实际开始日期。
+    let start=chrono::Local::now()+chrono::Duration::minutes(10);let day=start.date_naive();
+    let meeting=crate::mail::Meeting{all_day:false,title:"测试邀请".into(),start:start.timestamp(),end:None,at:String::new(),uid:"ignore-me".into()};
     h.app.mail.recent.push(crate::mail::Item {received_unix: None, account:"test@qq.com".into(),from:"测试".into(),subject:"邀请".into(),time:String::new(),code:None,summary:String::new().into(),links:vec![],meeting:Some(meeting.clone()),uid:99});
     h.app.toggle_mail_event(&meeting);
     assert!(h.app.calendar_entries(day).is_empty());
