@@ -295,6 +295,7 @@ unsafe fn apply_style(hwnd: HWND, editing: bool, raise: bool) {
     }
     if want_ex != ex {
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want_ex);
+        frame_changed = true;
     }
     let topmost = ex & WS_EX_TOPMOST.0 as isize != 0;
     if frame_changed || !topmost || raise {
@@ -328,6 +329,8 @@ pub struct Window {
     blur: bool,
     blur_unavailable: bool,
     opaque_surface: bool,
+    /// 临时让开期间，原生窗口只保留当前岛体轮廓；完全收起后区域为空。
+    mouse_passthrough: bool,
 }
 
 impl Window {
@@ -336,7 +339,18 @@ impl Window {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Option<Self> {
         let RawWindowHandle::Win32(handle) = cc.window_handle().ok()?.as_raw() else { return None };
         let hwnd = HWND(handle.hwnd.get() as *mut _);
-        let opaque_surface=cc.wgpu_render_state.as_ref().is_some_and(|state|state.adapter.get_info().backend==eframe::wgpu::Backend::Dx12);
+        // AMD/ATI OpenGL 和 WGPU 的 Vulkan 表面在部分 Windows 驱动上会把透明像素显示成黑色。
+        // 对这些路径按岛体轮廓裁剪窗口，避免透明画布露出黑矩形。
+        let opaque_surface=if let Some(state)=&cc.wgpu_render_state {
+            matches!(state.adapter.get_info().backend,eframe::wgpu::Backend::Dx12|eframe::wgpu::Backend::Vulkan)
+        } else if let Some(gl)=&cc.gl {
+            use eframe::glow::HasContext;
+            unsafe {
+                let vendor=gl.get_parameter_string(eframe::glow::VENDOR).to_ascii_lowercase();
+                let renderer=gl.get_parameter_string(eframe::glow::RENDERER).to_ascii_lowercase();
+                vendor.contains("ati") || vendor.contains("amd") || renderer.contains("radeon")
+            }
+        } else { false };
         Some(Self::attach(hwnd, &cc.egui_ctx, opaque_surface, true))
     }
 
@@ -368,7 +382,7 @@ impl Window {
         // 首帧（包括启动即隐藏的空区域）也必须触发 SetWindowRgn，避免透明画布拦截点击。
         let region=(i32::MIN, 0, 0, 0);
         watch_drag(hwnd,ctx.clone());
-        Self { hwnd, region, expanded: false, hook, browser_state:(None,PollClock::default()), drag_capture:DragCapture::default(), glass:None, backdrop:None, blur:false, blur_unavailable:false, opaque_surface }
+        Self { hwnd, region, expanded: false, hook, browser_state:(None,PollClock::default()), drag_capture:DragCapture::default(), glass:None, backdrop:None, blur:false, blur_unavailable:false, opaque_surface, mouse_passthrough:false }
     }
 
     /// 使用目标屏幕的物理坐标定位，并在缩放、岛体大小、水平位置或屏幕连接变化后重新校正。
@@ -434,9 +448,14 @@ impl Window {
         ppp: f32,
         editing: bool,
         expanded: bool,
+        mouse_passthrough: bool,
     ) {
         let px = |v: f32| (v * ppp).round() as i32;
-        let r = (px(region.0), px(region.1), px(region.0 + region.2), px(region.1 + region.3));
+        let empty_region = !region.0.is_finite() || !region.1.is_finite()
+            || !region.2.is_finite() || !region.3.is_finite()
+            || region.2 <= 0.0 || region.3 <= 0.0;
+        let r = if empty_region { (0, 0, 0, 0) }
+            else { (px(region.0), px(region.1), px(region.0 + region.2), px(region.1 + region.3)) };
         // 仅在拖动进入感应区后扩大 OLE 接收区域，避免普通点击改变透明窗口裁剪。
         let button_down=unsafe{GetAsyncKeyState(VK_LBUTTON.0 as i32)<0 || GetAsyncKeyState(VK_RBUTTON.0 as i32)<0};
         let zone=file_drop_zone.map(|(x,y,w,h)|(px(x),px(y),px(x+w),px(y+h)));
@@ -444,7 +463,8 @@ impl Window {
         let cursor=unsafe{(GetCursorPos(&mut cursor).is_ok() && GetWindowRect(self.hwnd,&mut window).is_ok()).then_some((cursor.x-window.left,cursor.y-window.top))};
         let threshold=unsafe{((GetSystemMetrics(SM_CXDRAG)/2).max(1),(GetSystemMetrics(SM_CYDRAG)/2).max(1))};
         let capture=self.drag_capture.update(button_down,cursor,zone,threshold);
-        let r=file_drag_region(r,zone,capture);
+        let r=if mouse_passthrough {r}else{file_drag_region(r,zone,capture)};
+        let passthrough_changed=self.mouse_passthrough!=mouse_passthrough;
         let h = (
             px(hit_rect.0),
             px(hit_rect.1),
@@ -487,7 +507,7 @@ impl Window {
                 self.blur = false;
             }
         }
-        // DX12 的普通窗口表面没有 alpha 合成，只有它需要按轮廓裁剪窗口区域。
+        // 不能可靠逐像素合成 alpha 的 WGPU 窗口按岛体轮廓裁剪，避免透明画布显示成黑矩形。
         match glass.filter(|_|self.opaque_surface) {
             Some(shapes) => {
                 let key=glass_key(shapes,ppp);
@@ -505,7 +525,7 @@ impl Window {
                     }
                 }
             }
-            None if self.region != r || self.glass.is_some() => {
+            None if self.region != r || self.glass.is_some() || passthrough_changed => {
                 unsafe {
                     let rgn = CreateRectRgn(r.0, r.1, r.2, r.3);
                     if SetWindowRgn(self.hwnd, rgn, true) != 0 {
@@ -518,8 +538,11 @@ impl Window {
             }
             None => {}
         }
+        // 跨进程点击穿透不依赖 HTTRANSPARENT 或 WS_EX_TRANSPARENT：把原生窗口裁剪到
+        // 当前岛体（或空区域）后，Windows 会直接把岛外命中交给下面的程序。
         unsafe { apply_style(self.hwnd, editing, expanded && !self.expanded) };
         self.expanded = expanded;
+        self.mouse_passthrough = mouse_passthrough;
     }
 }
 
@@ -546,16 +569,16 @@ mod tests {
             let hwnd=CreateWindowExW(WS_EX_TOOLWINDOW,windows::core::w!("STATIC"),windows::core::w!(""),WS_POPUP,-10000,-10000,400,200,None,None,None,None).unwrap();
             let saved=hit().lock().unwrap_or_else(|e|e.into_inner()).clone();
             {
-                let mut native=Window{hwnd,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default(),glass:None,backdrop:None,blur:false,blur_unavailable:true,opaque_surface:true};
+                let mut native=Window{hwnd,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default(),glass:None,backdrop:None,blur:false,blur_unavailable:true,opaque_surface:true,mouse_passthrough:false};
                 let shapes=[crate::app::GlassShape::Round(eframe::egui::Rect::from_min_max(eframe::egui::pos2(80.0,60.0),eframe::egui::pos2(320.0,160.0)),25.0)];
-                native.update((0.0,0.0,400.0,200.0),(80.0,60.0,240.0,100.0),None,None,Some(&shapes),1.0,false,false);
+                native.update((0.0,0.0,400.0,200.0),(80.0,60.0,240.0,100.0),None,None,Some(&shapes),1.0,false,false,false);
                 let region=CreateRectRgn(0,0,0,0);
                 GetWindowRgn(hwnd,region);
                 assert!(PtInRegion(region,200,100).as_bool());
                 assert!(!PtInRegion(region,10,10).as_bool(),"兼容后端不能保留画布上的黑色背景");
                 assert!(!PtInRegion(region,81,61).as_bool(),"圆角外侧必须透出桌面");
                 assert!(!native.blur);
-                native.update((0.0,0.0,0.0,0.0),(0.0,0.0,0.0,0.0),None,None,None,1.0,false,false);
+                native.update((0.0,0.0,0.0,0.0),(0.0,0.0,0.0,0.0),None,None,None,1.0,false,false,true);
                 GetWindowRgn(hwnd,region);
                 assert!(!PtInRegion(region,200,100).as_bool(),"隐藏时不能留下上一帧轮廓");
                 let _=DeleteObject(region);
@@ -638,8 +661,8 @@ mod tests {
             assert!(above(cover.0,island.0),"先复现其他窗口盖住岛体");
             let foreground=GetForegroundWindow();
             let saved=hit().lock().unwrap_or_else(|e|e.into_inner()).clone();
-            let mut native=Window{hwnd:island.0,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default(),glass:None,backdrop:None,blur:false,blur_unavailable:false,opaque_surface:false};
-            let update=|native:&mut Window,expanded|native.update((0.0,0.0,416.0,140.0),(0.0,0.0,416.0,140.0),None,None,None,1.0,false,expanded);
+            let mut native=Window{hwnd:island.0,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default(),glass:None,backdrop:None,blur:false,blur_unavailable:false,opaque_surface:false,mouse_passthrough:false};
+            let update=|native:&mut Window,expanded|native.update((0.0,0.0,416.0,140.0),(0.0,0.0,416.0,140.0),None,None,None,1.0,false,expanded,false);
             update(&mut native,true);
             assert!(above(island.0,cover.0),"展开时必须重新抬高实际窗口层级，不能只检查置顶标记");
             assert_eq!(GetForegroundWindow(),foreground,"悬停展开不能抢走当前应用的输入焦点");

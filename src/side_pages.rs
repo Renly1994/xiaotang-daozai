@@ -5,7 +5,7 @@ use crate::{
     paint::{self, Card, H},
     theme::{self, size, W},
 };
-use eframe::egui::{self, Rect};
+use eframe::egui;
 
 pub(crate) const COLUMN_W: f32 = crate::side_dock::SIDE_PLAYER_W;
 
@@ -42,13 +42,10 @@ impl App {
         let available = self.page_on_dock(self.page());
         let editing = self.calendar.draft.is_some() || self.task_dialog.is_some();
 
-        if available && !editing && self.page() != 3 { self.page_title(self.page(), &column); }
+        if available && !editing { self.page_title(self.page(), &column); }
         if available && self.page() == 8 { self.draw_steam_avatar(&column); }
-        if self.page() == 3 && available && !editing {
-            self.shelf_tabs(&column, 13.0);
-        }
         self.page_gear(&column, COLUMN_W - 16.0, if available { self.page_settings_tab() } else { 10 });
-        if self.page() != 3 && self.page_on_dock(8) && (self.steam.badge().is_some() || self.settings.resident_pages[8]) {
+        if self.page() != 8 && self.page_on_dock(8) && (self.steam.badge().is_some() || !self.steam.installed_games.is_empty() || self.settings.page_resident(8)) {
             self.draw_steam_shortcut(&column, COLUMN_W - 46.0, 18.0);
         }
         let clock = self.settings.clock_text(&env.clock);
@@ -84,8 +81,8 @@ impl App {
             1 => 282.0,
             2 if self.water_view == 1 => 276.0,
             2 => 243.0,
-            3 if self.shelf_tab == 0 => (self.shelf.items.len() as f32 * 94.0 + 38.0).max(152.0),
-            3 => 232.0,
+            3 => (self.shelf.items.len() as f32 * 94.0 + 38.0).max(152.0),
+            9 => 232.0,
             4 => 279.0,
             5 => 274.0,
             6 => 270.0,
@@ -94,7 +91,7 @@ impl App {
             _ => 120.0,
         };
         let smooth_scroll = ui.input(|input| input.smooth_scroll_delta.y);
-        egui::ScrollArea::vertical().id_salt((page, editing, self.shelf_tab, self.subpage))
+        egui::ScrollArea::vertical().id_salt((page, editing, self.subpage))
             .max_height(body.height()).auto_shrink([false, false])
             .show(&mut ui, |ui| {
                 if available && editing {
@@ -146,10 +143,10 @@ impl App {
         let y = c.to_local(cursor).y;
         let scroll = c.ui.input(|input| input.raw_scroll_delta.y);
         if scroll == 0.0 { return; }
-        let keep_page = self.page() == CALENDAR_PAGE || self.page() == 3 && self.shelf_tab == 1;
+        let keep_page = self.page() == CALENDAR_PAGE || self.page() == 9;
         let page = self.page();
         let (first, max) = match page {
-            3 if self.shelf_tab == 1 && (31.0..=218.0).contains(&y) => {
+            9 if (31.0..=218.0).contains(&y) => {
                 let count = self.clipboard.lock().items.len();
                 (self.clip_first, count.saturating_sub(crate::pages::CLIP_ROWS))
             }
@@ -166,7 +163,7 @@ impl App {
         if first == target && !keep_page { return; }
         if self.wheel_step(scroll).is_some() {
             match page {
-                3 => self.clip_first = target,
+                9 => self.clip_first = target,
                 4 => self.todo_first = target,
                 _ => self.calendar.view.first = target,
             }

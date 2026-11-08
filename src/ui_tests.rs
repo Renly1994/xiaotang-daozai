@@ -174,7 +174,7 @@ fn v0649_settings_and_mail_accounts_survive_upgrade(){
             assert!(saved.lines().any(|value|value==line),"升级保存不能改变旧设置：{line}");
         }
         assert!(saved.lines().any(|line|line=="visible_pages=101111111"),"新增 Steam 页面应默认可见");
-        assert!(saved.lines().any(|line|line=="page_order=5,2,0,1,3,4,6,7,8"),"旧页面顺序应保留并追加 Steam");
+        assert!(saved.lines().any(|line|line=="page_order=5,2,0,1,3,9,4,6,7,8"),"迁移后剪贴板应紧邻置物架，并保留其余页面顺序");
     }
     std::fs::write(directory.join("mail-accounts.json"),br#"[{"email":"OldUser@qq.com","provider":"qq","enabled":true},{"email":"old@icloud.com","provider":"icloud","enabled":false}]"#).unwrap();
     let accounts=crate::mail::load_accounts();
@@ -1518,8 +1518,7 @@ fn wheel_scrolls_lists_only_inside_content_and_leaves_at_the_edge(){
 fn wheel_clipboard_stays_at_both_edges() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    h.app.show_page(3);
-    h.app.shelf_tab=1;
+    h.app.show_page(9);
     for count in [crate::pages::CLIP_ROWS+1] {
         h.app.clipboard.lock().items.clear();
         for i in 0..count { h.app.clipboard.lock().push(&i.to_string(), "09:00"); }
@@ -1527,7 +1526,7 @@ fn wheel_clipboard_stays_at_both_edges() {
         for (delta, first) in [(40.0,0),(-40.0,last),(-40.0,last),(40.0,0),(40.0,0)] {
             h.hover(H::local(300.0,60.0),0.4);
             h.wheel(delta);
-            assert_eq!(h.app.page,3);
+            assert_eq!(h.app.page,9);
             assert_eq!(h.app.clip_first,first);
         }
     }
@@ -3695,22 +3694,30 @@ fn shelf_remove_icon_stays_centered_on_hover_and_preserves_the_file(){
 fn resident_components_can_be_dragged_saved_and_reset(){
     use crate::bar_layout::{CLOCK,BATTERY};
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-    fn draw(h:&mut H,events:Vec<egui::Event>,dock:crate::model::Dock)->[Pos2;2]{
-        let mut points=[Pos2::ZERO;2];
+    fn draw(h:&mut H,events:Vec<egui::Event>,dock:crate::model::Dock)->([Pos2;2],[f32;2],[f32;2]){
+        let mut points=[Pos2::ZERO;2];let mut targets=[0.0;2];let mut animated=[0.0;2];
         h.t+=0.02;
-        let out=h.ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(600.0,480.0))),time:Some(h.t),events,..Default::default()},|ctx|{egui::CentralPanel::default().show(ctx,|ui|{h.app.resident_order_settings(ui);for (index,slot) in [CLOCK,BATTERY].into_iter().enumerate(){let id=if dock==crate::model::Dock::Top{ui.id().with(("resident-icon",slot))}else{ui.id().with(("resident-icon",dock.key(),slot))};points[index]=ui.ctx().read_response(id).unwrap().rect.center();}});});
-        h.shapes=out.shapes;points
+        let out=h.ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(1200.0,480.0))),time:Some(h.t),events,..Default::default()},|ctx|{egui::CentralPanel::default().show(ctx,|ui|{h.app.resident_order_settings(ui);let body=ui.ctx().read_response(ui.id().with(("resident-drop-zone",dock.key()))).unwrap().rect;let ids=[CLOCK,BATTERY].map(|slot|if dock==crate::model::Dock::Top{ui.id().with(("resident-icon",slot))}else{ui.id().with(("resident-icon",dock.key(),slot))});let rects=ids.map(|id|ui.ctx().read_response(id).unwrap().rect);let scale=if dock==crate::model::Dock::Top{rects[1].width()/30.0}else{1.0};for (index,slot) in [CLOCK,BATTERY].into_iter().enumerate(){let rect=rects[index];points[index]=rect.center();let animation_id=if dock==crate::model::Dock::Top{ui.id().with(("resident-preview-x",slot))}else{ui.id().with(("resident-preview-y",dock.key(),slot))};let target=if dock==crate::model::Dock::Top{(rect.center().x-body.left())/scale}else{rect.center().y-body.top()};targets[index]=target;animated[index]=ui.ctx().animate_value_with_time(animation_id,target,0.18);}});});
+        h.shapes=out.shapes;(points,targets,animated)
     }
     fn point(h:&H,label:&str)->Pos2{h.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t) if t.galley.text()==label=>Some(t.visual_bounding_rect().center()),_=>None}).unwrap()}
     for dock in crate::model::Dock::ALL {
     let mut h=H::new();h.app.settings.dock=dock;
-    draw(&mut h,vec![],dock);let [from,to]=draw(&mut h,vec![],dock);
+     draw(&mut h,vec![],dock);let ([from,to],initial_targets,_)=draw(&mut h,vec![],dock);
     assert!(if dock.is_side() { (from.x-to.x).abs()<1.0 && from.y>to.y } else { (from.y-to.y).abs()<1.0 && from.x>to.x });
     let button=|pos,pressed|egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()};
-    draw(&mut h,vec![egui::Event::PointerMoved(from),button(from,true)],dock);
+     draw(&mut h,vec![egui::Event::PointerMoved(from),button(from,true)],dock);
     draw(&mut h,vec![egui::Event::PointerMoved(from+egui::vec2(0.0,10.0))],dock);
     draw(&mut h,vec![egui::Event::PointerMoved(to)],dock);
-    for _ in 0..3{draw(&mut h,vec![],dock);}
+     let mut first_reordered=None;
+     for _ in 0..3{let (_,targets,animated)=draw(&mut h,vec![],dock);first_reordered.get_or_insert((targets[1],animated[1]));}
+     if crate::bar_layout::animations_enabled(){
+         let (target,position)=first_reordered.expect("重排后应绘制至少一帧");
+         let target_axis=target;
+         let old_axis=initial_targets[1];
+         assert!((position-target_axis).abs()>1.0,"同岛让位首帧不能直接跳到目标位置：{position} == {target_axis}");
+         assert!((position-old_axis).abs()<(target_axis-old_axis).abs(),"相邻组件应从原位置平滑向新位置移动：{old_axis} -> {position} -> {target_axis}");
+     }
     draw(&mut h,vec![button(to,false)],dock);
     assert_eq!(h.app.settings.resident_order.first(),Some(&CLOCK));
     assert!(h.app.settings.resident_order.contains(&BATTERY));
@@ -3718,6 +3725,114 @@ fn resident_components_can_be_dragged_saved_and_reset(){
     let reset=point(&h,"恢复默认");draw(&mut h,vec![egui::Event::PointerMoved(reset),button(reset,true)],dock);draw(&mut h,vec![button(reset,false)],dock);
     assert!(h.app.settings.resident_order.is_empty());
     }
+}
+
+#[test]
+fn resident_mascot_cross_dock_drag_does_not_repeat_reorder_while_pointer_is_steady(){
+    use crate::bar_layout::{MAIL,PET,STEAM,TODO};
+    use crate::model::Dock;
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.split_docks=true;
+    h.app.settings.pet=true;
+    h.app.settings.dock=Dock::Left;
+    h.app.settings.page_docks=[Dock::Right.bit();9];
+    h.app.settings.page_docks[crate::app::CALENDAR_PAGE]=Dock::Top.bit();
+    h.app.settings.status_docks[0]=Dock::Top;
+    h.app.settings.resident_order=crate::bar_layout::DEFAULT_ORDER.to_vec();
+    let mut mascot_left=None;let mut todo_right=None;let mut mail_right=None;let mut steam_right=None;let mut mascot_right=false;let mut active_drag=false;
+    let pet_eye_path_count=|shapes:&[egui::epaint::ClippedShape]|shapes.iter().filter(|shape|matches!(&shape.shape,
+        egui::Shape::Path(path) if path.points.len()==13&&(path.stroke.width-3.6).abs()<0.05
+            &&matches!(&path.stroke.color,egui::epaint::ColorMode::Solid(color) if color.a()>8)
+    )).count();
+    let pet_eye_center=|shapes:&[egui::epaint::ClippedShape]|{
+        let centers:Vec<_>=shapes.iter().filter_map(|shape|match &shape.shape{
+            egui::Shape::Path(path) if path.points.len()==13&&(path.stroke.width-3.6).abs()<0.05
+                &&matches!(&path.stroke.color,egui::epaint::ColorMode::Solid(color) if color.a()>8)=>{
+                let min=path.points.iter().copied().fold(Pos2::new(f32::INFINITY,f32::INFINITY),|a,b|Pos2::new(a.x.min(b.x),a.y.min(b.y)));
+                let max=path.points.iter().copied().fold(Pos2::new(f32::NEG_INFINITY,f32::NEG_INFINITY),|a,b|Pos2::new(a.x.max(b.x),a.y.max(b.y)));
+                Some(Pos2::new((min.x+max.x)*0.5,(min.y+max.y)*0.5))
+            },_=>None
+        }).collect();
+        (!centers.is_empty()).then(||centers.iter().copied().fold(Pos2::ZERO,|sum,point|sum+point.to_vec2())/centers.len() as f32)
+    };
+    let draw=|h:&mut H,events:Vec<egui::Event>,mascot_left:&mut Option<Pos2>,todo_right:&mut Option<Pos2>,mail_right:&mut Option<Pos2>,steam_right:&mut Option<Rect>,mascot_right:&mut bool,active_drag:&mut bool|{
+        h.t+=0.02;
+        let output=h.ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(600.0,480.0))),time:Some(h.t),events,..Default::default()},|ctx|{
+            egui::CentralPanel::default().show(ctx,|ui|{
+                h.app.resident_order_settings(ui);
+                let left=ui.id().with(("resident-icon",Dock::Left.key(),PET));
+                let todo=ui.id().with(("resident-icon",Dock::Right.key(),TODO));
+                let mail=ui.id().with(("resident-icon",Dock::Right.key(),MAIL));
+                let steam=ui.id().with(("resident-icon",Dock::Right.key(),STEAM));
+                *mascot_left=ui.ctx().read_response(left).map(|response|response.rect.center());
+                *todo_right=ui.ctx().read_response(todo).map(|response|response.rect.center());
+                *mail_right=ui.ctx().read_response(mail).map(|response|response.rect.center());
+                *steam_right=ui.ctx().read_response(steam).map(|response|response.rect);
+            });
+        });
+        h.shapes=output.shapes.clone();
+        *mascot_right=pet_eye_center(&h.shapes).is_some_and(|center|todo_right.is_some_and(|target|(center.x-target.x).abs()<2.0));
+        *active_drag=egui::DragAndDrop::has_any_payload(&h.ctx);
+    };
+    draw(&mut h,vec![],&mut mascot_left,&mut todo_right,&mut mail_right,&mut steam_right,&mut mascot_right,&mut active_drag);
+    let from=mascot_left.expect("吉祥物初始应在左岛");
+    let todo_origin=todo_right.expect("右岛应有待办组件");
+    let target=todo_origin+egui::vec2(0.0,13.0);
+    assert!(mail_right.is_some(),"右岛应有邮箱组件");
+    assert!(steam_right.is_some(),"右岛应有 Steam 组件");
+    let button=|pos,pressed|egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()};
+    draw(&mut h,vec![egui::Event::PointerMoved(from),button(from,true)],&mut mascot_left,&mut todo_right,&mut mail_right,&mut steam_right,&mut mascot_right,&mut active_drag);
+    draw(&mut h,vec![egui::Event::PointerMoved(from+egui::vec2(0.0,10.0))],&mut mascot_left,&mut todo_right,&mut mail_right,&mut steam_right,&mut mascot_right,&mut active_drag);
+    assert!(active_drag,"吉祥物离开原岛后应进入拖动状态");
+    let mut observed=Vec::new();let mut max_entry_eye_paths=0;let mut mascot_entered=false;
+    let start=from+egui::vec2(0.0,10.0);
+    for step in 1..=36{
+        let point=start.lerp(target,step as f32/36.0);
+        draw(&mut h,vec![egui::Event::PointerMoved(point)],&mut mascot_left,&mut todo_right,&mut mail_right,&mut steam_right,&mut mascot_right,&mut active_drag);
+        assert!(active_drag,"跨到目标岛时，吉祥物拖拽载荷应持续存在");
+        mascot_entered|=mascot_right;
+        let eye_paths=pet_eye_path_count(&h.shapes);
+        assert!(eye_paths<=2,"拖动交接过程中吉祥物只能绘制一份，不能出现分离的双影：{eye_paths}条眼睛路径");
+        max_entry_eye_paths=max_entry_eye_paths.max(eye_paths);
+    }
+    assert!(mascot_entered,"吉祥物应进入右岛的原生排序槽");
+    for _ in 0..45{
+        draw(&mut h,vec![],&mut mascot_left,&mut todo_right,&mut mail_right,&mut steam_right,&mut mascot_right,&mut active_drag);
+        if mascot_right {
+            observed.push(h.app.settings.resident_order.clone());
+            let eye_paths=h.shapes.iter().filter(|shape|matches!(&shape.shape,
+                    egui::Shape::Path(path) if path.points.len()==13&&(path.stroke.width-3.6).abs()<0.05
+                        &&matches!(&path.stroke.color,egui::epaint::ColorMode::Solid(color) if color.a()>8)
+                )).count();
+            max_entry_eye_paths=max_entry_eye_paths.max(eye_paths);
+        }
+    }
+    assert!(!observed.is_empty(),"拖动中的吉祥物应进入右岛排序列表");
+    assert!(max_entry_eye_paths<=2,"吉祥物进入目标岛期间不能同时绘制目标槽与浮动图标：{max_entry_eye_paths}眼形路径");
+    let reorder_count=observed.windows(2).filter(|pair|pair[0]!=pair[1]).count();
+    assert!(reorder_count<=1,"鼠标停在待办上时，吉祥物不应连续穿过多个排序位置：{observed:?}");
+    let steady=observed.iter().rev().take(10).collect::<Vec<_>>();
+    assert!(steady.windows(2).all(|pair|pair[0]==pair[1]),"鼠标停在待办上时，吉祥物顺序不应在相邻组件间来回跳动：{steady:?}");
+    let before_move=pet_eye_center(&h.shapes).expect("浮动吉祥物应可见");
+    assert!((todo_right.unwrap().y-todo_origin.y).abs()<1.0,"在待办与邮箱之间插入时，待办本身不应被空槽推移");
+    assert!((mail_right.unwrap().y-before_move.y-26.0).abs()<4.0,"捕获后的组件下方只能有一个组件间距，邮箱位置应紧随其后");
+    let right_top=todo_origin.y-150.0;
+    let expanded_right_bottom=right_top+26.0*9.0+14.0;
+    assert!(steam_right.unwrap().bottom()<=expanded_right_bottom+0.5,"目标岛末尾组件不能被多余空槽推到岛体外：{:?} > {expanded_right_bottom}",steam_right.unwrap());
+    let move_to=target+egui::vec2(0.0,26.0);
+    for step in 0..8{
+        draw(&mut h,if step==0{vec![egui::Event::PointerMoved(move_to)]}else{vec![]},&mut mascot_left,&mut todo_right,&mut mail_right,&mut steam_right,&mut mascot_right,&mut active_drag);
+        assert!(pet_eye_path_count(&h.shapes)<=2,"目标岛内继续拖动时仍应保持单一吉祥物");
+    }
+    let after_move=pet_eye_center(&h.shapes).expect("移动中的吉祥物应可见");
+    assert!(after_move.distance(before_move)>8.0,"进入目标岛后，吉祥物必须跟随鼠标继续移动：{before_move:?} -> {after_move:?}");
+    draw(&mut h,vec![egui::Event::PointerMoved(move_to),button(move_to,false)],&mut mascot_left,&mut todo_right,&mut mail_right,&mut steam_right,&mut mascot_right,&mut active_drag);
+    for _ in 0..50{
+        draw(&mut h,vec![],&mut mascot_left,&mut todo_right,&mut mail_right,&mut steam_right,&mut mascot_right,&mut active_drag);
+        assert!(pet_eye_path_count(&h.shapes)<=2,"胞吞和落位阶段也必须始终只有一个可见吉祥物");
+    }
+    assert_eq!(h.app.settings.dock,Dock::Right,"动画完成后，吉祥物应归入右岛");
 }
 
 #[test]
@@ -3878,13 +3993,13 @@ fn calendar_sync_result_does_not_enqueue_another_sync() {
 fn page_order_persists_and_controls_navigation() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    h.app.settings.page_order=[5,2,0,1,3,4,6,7,8];
+    h.app.settings.page_order=[5,2,0,1,3,9,4,6,7,8];
     h.app.settings.save();
     let settings=crate::model::Settings::load();
-    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7,8]);
+    assert_eq!(settings.page_order,[5,2,0,1,3,9,4,6,7,8]);
     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
     assert_eq!(restarted.page(),5);
-    for page in [1,3,4,6,7,8] {h.app.set_page_visible(page,false);}
+    for page in [1,3,4,6,7,8,9] {h.app.set_page_visible(page,false);}
     h.hover(Pos2::new(WIN_W / 2.0, 33.0),1.0);
     for expected in [5,2,0] {
         h.click(H::local(398.0,68.0));
@@ -3897,7 +4012,7 @@ fn page_order_persists_and_controls_navigation() {
     assert_eq!(h.app.page,5);
     for invalid in ["0,0,1,2,3,4,5,6","8,1,2,3,4,5,6,7","0,1","invalid"] {
         std::fs::write(crate::model::config_dir().join("settings.txt"),format!("page_order={invalid}\n")).unwrap();
-        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7,8]);
+        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,9,4,5,6,7,8]);
     }
 }
 
@@ -3924,9 +4039,9 @@ fn page_order_drag_applies_on_release_and_saves() {
     draw(&mut h,vec![egui::Event::PointerMoved(from),button(from,true)]);
     draw(&mut h,vec![egui::Event::PointerMoved(from+egui::vec2(0.0,10.0))]);
     draw(&mut h,vec![egui::Event::PointerMoved(to)]);
-    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7,8]);
+    assert_eq!(h.app.settings.page_order,[0,1,2,3,9,4,5,6,7,8]);
     draw(&mut h,vec![button(to,false)]);
-    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7,8]);
+    assert_eq!(h.app.settings.page_order,[1,2,0,3,9,4,5,6,7,8]);
     assert_eq!(crate::model::Settings::load().page_order,h.app.settings.page_order);
 }
 
@@ -4910,18 +5025,17 @@ fn feature_gallery(){
     h.app.open_task_reminder(3);
     shoot_feature(&mut h,&mut r,&dest,"todo-picker",60,Some(H::local(120.0,60.0)),today);
     // 剪贴板
-    let mut h=H::new();let mut r=feature_raster();h.app.show_page(3);h.app.shelf_tab=1;
+    let mut h=H::new();let mut r=feature_raster();h.app.show_page(9);
     shoot_feature(&mut h,&mut r,&dest,"clip-empty",60,Some(H::local(120.0,60.0)),today);
     {let mut hist=h.app.clipboard.lock();hist.items.clear();
         for (i,t) in ["https://github.com/Renly1994/xiaotang-daozai/releases","会议纪要：\n1. 周三前确认岛仔竖版方案\n2. 剪贴板记录上线","13800138000","SELECT * FROM todo WHERE repeat > 0 ORDER BY due;","验证码 482913"].iter().enumerate(){hist.push(t,&format!("09:{:02}",30+i));}
         hist.items[3].pinned=true;}
     shoot_feature(&mut h,&mut r,&dest,"clip-list",30,Some(H::local(200.0,66.0)),today);
-    h.app.shelf_tab=0;
     let file=std::env::temp_dir().join("岛仔周报.docx");std::fs::write(&file,b"x").unwrap();h.app.shelf.items=vec![file];
     shoot_feature(&mut h,&mut r,&dest,"shelf-files",30,Some(H::local(120.0,60.0)),today);
     h.app.confirm_clear=Some(h.app.t);
     shoot_feature(&mut h,&mut r,&dest,"shelf-confirm",5,Some(H::local(120.0,60.0)),today);
-    h.app.settings.clipboard_history=false;h.app.shelf_tab=1;
+    h.app.settings.clipboard_history=false;h.app.show_page(9);
     shoot_feature(&mut h,&mut r,&dest,"clip-off",30,Some(H::local(120.0,60.0)),today);
 }
 
@@ -5203,11 +5317,11 @@ fn split_docks_keep_one_owner_and_restore_single_island() {
     for page in [0, 1, 2, 4, 5, 6, 7, 8] {
         assert_eq!(Dock::ALL.into_iter().filter(|&dock| settings.page_on(page, dock)).count(), 1);
     }
-    assert!(settings.shelf_tab_on(0, Dock::Top) && !settings.shelf_tab_on(0, Dock::Right));
-    assert!(settings.shelf_tab_on(1, Dock::Right) && !settings.shelf_tab_on(1, Dock::Top));
+    assert!(settings.page_on(3, Dock::Top) && !settings.page_on(3, Dock::Right));
+    assert!(settings.page_on(9, Dock::Right) && !settings.page_on(9, Dock::Top));
     assert!(Dock::ALL.into_iter().all(|dock| settings.dock_in_use(dock)));
     settings.split_docks = false;
-    assert!((0..9).all(|page| settings.page_on(page, Dock::Top)));
+    assert!((0..10).all(|page| settings.page_on(page, Dock::Top)));
     assert!(!settings.dock_in_use(Dock::Left) && !settings.dock_in_use(Dock::Right));
     settings.enable_split_docks();
     assert_eq!(settings.page_dock(1), Dock::Left);
@@ -5767,8 +5881,8 @@ fn wheel_short_clipboard_and_calendar_turn_pages(){
     for count in [0,1,crate::pages::CLIP_ROWS]{
         h.app.clipboard.lock().items.clear();
         for i in 0..count{h.app.clipboard.lock().push(&i.to_string(),"09:00");}
-        for (delta,page) in [(-40.0,4),(40.0,2)]{
-            h.app.show_page(3);h.app.shelf_tab=1;h.hover(H::local(300.0,60.0),0.5);h.wheel(delta);
+        for (delta,page) in [(-40.0,4),(40.0,3)]{
+            h.app.show_page(9);h.hover(H::local(300.0,60.0),0.5);h.wheel(delta);
             assert_eq!(h.app.page,page,"剪贴板未溢出应翻页，条数 {count}");
         }
     }

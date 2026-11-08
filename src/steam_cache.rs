@@ -231,7 +231,8 @@ impl LocalCache {
 
     fn refresh_directory(&mut self) {
         if self.path_due.map_or(true, |due| Instant::now() >= due) {
-            let directory = steam_directory().map(|path| path.join("appcache").join("stats"));
+            let directory = crate::steam::steam_install_root()
+                .map(|path| path.join("appcache").join("stats"));
             if directory != self.directory {
                 self.stamp = None;
                 self.game_icons.clear();
@@ -278,66 +279,6 @@ impl LocalCache {
         }
         ("本地缓存暂时无法读取，稍后重试", None)
     }
-}
-
-#[cfg(windows)]
-fn steam_directory() -> Option<PathBuf> {
-    use std::os::windows::ffi::OsStringExt;
-    use windows::{
-        core::{w, PCWSTR},
-        Win32::System::Registry::{
-            RegGetValueW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ,
-        },
-    };
-    fn read_path(root: HKEY, subkey: PCWSTR, value: PCWSTR) -> Option<PathBuf> {
-        let mut path = [0u16; 1024];
-        let mut size = std::mem::size_of_val(&path) as u32;
-        let status = unsafe {
-            RegGetValueW(
-                root,
-                subkey,
-                value,
-                RRF_RT_REG_SZ,
-                None,
-                Some(path.as_mut_ptr().cast()),
-                Some(&mut size),
-            )
-        };
-        if status.is_err() {
-            return None;
-        }
-        let end = path.iter().position(|unit| *unit == 0)?;
-        (end > 0).then(|| std::ffi::OsString::from_wide(&path[..end]).into())
-    }
-    [
-        (
-            HKEY_CURRENT_USER,
-            w!("Software\\Valve\\Steam"),
-            w!("SteamPath"),
-        ),
-        (
-            HKEY_CURRENT_USER,
-            w!("Software\\WOW6432Node\\Valve\\Steam"),
-            w!("SteamPath"),
-        ),
-        (
-            HKEY_LOCAL_MACHINE,
-            w!("Software\\Valve\\Steam"),
-            w!("InstallPath"),
-        ),
-        (
-            HKEY_LOCAL_MACHINE,
-            w!("Software\\WOW6432Node\\Valve\\Steam"),
-            w!("InstallPath"),
-        ),
-    ]
-    .into_iter()
-    .find_map(|(root, subkey, value)| read_path(root, subkey, value))
-}
-
-#[cfg(not(windows))]
-fn steam_directory() -> Option<PathBuf> {
-    None
 }
 
 #[cfg(test)]

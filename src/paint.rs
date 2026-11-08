@@ -663,6 +663,10 @@ pub fn resident_shelf(c: &Card, x: f32, y: f32) {
     tray(c, x, y - 1.0, 18.0, 0.0, Color32::from_gray(235), Color32::from_gray(100));
 }
 
+pub fn resident_clipboard(c: &Card, x: f32, y: f32) {
+    clipboard_glyph(c,x,y,16.0,Color32::from_rgb(112,206,242),Color32::from_rgb(42,65,78));
+}
+
 pub fn resident_mail(c: &Card, x: f32, y: f32) {
     let ink = Color32::from_rgb(112, 206, 242);
     c.stroke(x - 7.0, y - 5.0, 14.0, 10.0, 2.0, 1.3, ink);

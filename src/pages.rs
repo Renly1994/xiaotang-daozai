@@ -2,7 +2,7 @@
 //! 坐标全部是面板局部逻辑点（419×140），文字 y 是基线。
 
 use crate::anim::{self, lerp, smoothstep, Spring};
-use crate::app::{App, Cmd, Env, Phase};
+use crate::app::{App, Cmd, Env, Phase, PH};
 use crate::mail;
 use crate::paint::{self, capsule, mix, Card, H};
 use crate::smtc::Transport;
@@ -43,6 +43,31 @@ fn cover_colors(title: &str) -> (Color32, Color32) {
 }
 
 impl App {
+    pub(crate) fn shelf_columns_for_width(width:f32)->usize {
+        ((width-72.0)/68.0).floor().max(1.0) as usize
+    }
+
+    pub(crate) fn shelf_rows_for_height(height:f32)->usize {
+        if height>=350.0 {3}else if height>=272.0 {2}else{1}
+    }
+
+    pub(crate) fn shelf_page_capacity(&self)->usize {
+        if self.side() { return 5; }
+        Self::shelf_columns_for_width(self.expanded_width())*Self::shelf_rows_for_height(self.expanded_height())
+    }
+
+    pub(crate) fn shelf_list_bounds(&self)->Rect {
+        if self.side() {Rect::from_min_size(Pos2::new(10.0,28.0),egui::vec2(136.0,self.expanded_height()-46.0))}
+        else {Rect::from_min_size(Pos2::new(36.0,28.0),egui::vec2(self.expanded_width()-72.0,self.expanded_height()-46.0))}
+    }
+
+    pub(crate) fn shelf_last_page_start(&self)->usize {
+        let (width,height)=self.settings.dock_size(self.dock());
+        let capacity=Self::shelf_columns_for_width(width)*Self::shelf_rows_for_height(height);
+        let count=self.shelf.items.len();
+        if count<=capacity {0}else{((count-1)/capacity)*capacity}
+    }
+
     // ================= 音乐 =================
     pub(crate) fn page_music(&mut self, c: &Card, _env: &Env, cmds: &mut Vec<Cmd>) {
         let media = self.media.clone();
@@ -659,54 +684,16 @@ impl App {
     }
 
     // ================= 置物架 =================
-    /// 标题旁的「文件 | 剪贴板」分栏，返回分栏右边缘。
-    /// 页面标题处的「置物架 | 剪贴板」分栏，返回分栏右边缘。
-    pub(crate) fn shelf_tabs(&mut self, c: &Card, x: f32) -> f32 {
-        let labels = ["置物架", "剪贴板"];
-        let font = 12.0;
-        let tabs: Vec<_> = labels.into_iter().enumerate()
-            .filter(|(tab, _)| !self.settings.split_docks || self.settings.shelf_tab_on(*tab, self.dock()))
-            .map(|(tab, label)| (tab, label, c.text_w(label, font, W::Bold) + 14.0)).collect();
-        let total = tabs.iter().map(|(_, _, width)| width).sum::<f32>() + 4.0;
-        c.fill(x, 9.5, total, 21.0, 10.5, theme::BTN);
-        let mut left = x + 2.0;
-        for (i, label, w) in tabs {
-            let available = self.settings.shelf_tab_on(i, self.dock());
-            let selected = self.shelf_tab == i;
-            let r = c.hit(left, 9.5, w, 21.0, ("shelf-tab", i));
-            let r = if available { r } else { r.on_hover_text("可在页面管理中为当前停靠位置启用") };
-            let (h, _) = c.hover_t(&r);
-            if selected {
-                c.fill(left, 11.5, w, 17.0, 8.5, Color32::from_gray(88));
-            } else if h > 0.01 {
-                c.fill(left, 11.5, w, 17.0, 8.5, Color32::from_white_alpha((18.0 * h) as u8));
-            }
-            c.text(left + w / 2.0, 24.3, label, font, W::Bold, if selected { theme::WHITE } else if available {theme::GRAY} else {theme::DIM}, H::Center);
-            if r.clicked() && available && !selected {
-                self.shelf_tab = i;
-                self.confirm_clear = None;
-                self.clip_confirm_clear = None;
-            }
-            left += w;
-        }
-        x + total
-    }
-
-    pub(crate) fn page_shelf(&mut self, c: &Card, env: &Env, cmds: &mut Vec<Cmd>) {
+    pub(crate) fn page_shelf(&mut self, c: &Card, _env: &Env, cmds: &mut Vec<Cmd>) {
         let side = self.side();
         let n = self.shelf.items.len();
         let drag = self.drag_a;
-        // 拖文件进来时回到「文件」分栏。
-        if drag > 0.002 && self.settings.shelf_tab_on(0, self.dock()) { self.shelf_tab = 0; }
-        if !side { self.shelf_tabs(c, 13.0); }
-        if self.shelf_tab == 1 {
-            self.page_clipboard(c, env, cmds);
-            return;
-        }
-        let add_x = if side { 140.0 } else { 344.0 };
+        let add_x = if side { 140.0 } else { self.expanded_width()-75.0 };
         c.text(add_x,23.0,"添加",size::SMALL,W::Regular,theme::GRAY,H::Right);
         if c.hit(add_x-33.0,8.0,38.0,22.0,"shelf-add").on_hover_text("从电脑选择文件").clicked(){cmds.push(Cmd::AddFiles);}
-        if n>5 && !side {c.text(209.5,121.0,&format!("{}–{} / {n} · 滚轮查看",self.shelf_first+1,(self.shelf_first+5).min(n)),10.5,W::Regular,theme::DIM,H::Center);}
+        let capacity=self.shelf_page_capacity().max(1);
+        self.shelf_first=self.shelf_first.min(n.saturating_sub(1));
+        if n>capacity && !side {c.text(self.expanded_width()/2.0,self.expanded_height()-21.0,&format!("{}–{} / {n} · 滚轮翻页",self.shelf_first+1,(self.shelf_first+capacity).min(n)),10.5,W::Regular,theme::DIM,H::Center);}
 
         if n > 0 {
             // 「添加」左边的「清空」：第一次点变红，3 秒内再点才真正清空。
@@ -717,7 +704,8 @@ impl App {
             let base = if confirming { Color32::from_rgb(120, 28, 36) } else { theme::BTN };
             let hover = if confirming { Color32::from_rgb(150, 34, 44) } else { theme::BTN_HOVER };
             // 放在右下角：顶栏中间是日期时间，宽度随 12 小时制等设置变化。
-            let (x, y) = if side { (101.0 - lw, 10.0) } else { (377.0 - lw, 109.0) };
+            let clear_y=if self.expanded_height()<=PH {109.0}else{self.expanded_height()-40.0};
+            let (x, y) = if side { (101.0 - lw, 10.0) } else { (self.expanded_width()-42.0-lw, clear_y) };
             let (r, bc) = capsule(&c.faded(1.0 - drag), x, y, lw, 17.0, "shelf-clear", base, hover);
             let r = if confirming { r.on_hover_text("再点一次清空置物架（文件本身不动）") } else { r.on_hover_text("清空置物架") };
             bc.text(x + lw / 2.0, y + 12.0, label, size::SMALL, W::Regular, theme::WHITE, H::Center);
@@ -741,8 +729,8 @@ impl App {
             let a = 1.0 - drag;
             if a > 0.0 {
                 let ec = body.faded(a);
-                let (x, w, center) = if side { (10.0, 136.0, 78.0) } else { (42.0, 335.0, 209.5) };
-                ec.dashed(x, 32.0, w, 91.0, 12.0, 1.2, Color32::from_gray(70), 0.0);
+                let (x, w, center, height) = if side { (10.0, 136.0, 78.0, 91.0) } else { (36.0, self.expanded_width()-72.0, self.expanded_width()/2.0, (self.expanded_height()-48.0).max(91.0)) };
+                ec.dashed(x, 32.0, w, height, 12.0, 1.2, Color32::from_gray(70), 0.0);
                 paint::tray(&ec, center, 60.0, 28.0, 0.0, Color32::from_gray(200), Color32::from_gray(80));
                 ec.text(center, 93.0, "把文件拖到这儿", 12.0, W::Semibold, theme::WHITE, H::Center);
                 if side {
@@ -763,17 +751,89 @@ impl App {
     fn shelf_row(&mut self, c: &Card, cmds: &mut Vec<Cmd>) {
         let side = self.side();
         let n = self.shelf.items.len();
-        let slot = 68.0;
-        let center = 209.5;
-        let visible = n.min(5) as f32;
-        let scroll = self.shelf_scroll.pos;
-        let row = if side { c.clone() } else { c.clipped(36.0, 28.0, 347.0, 100.0) };
+        if side { self.shelf_row_side(c,cmds); return; }
+        let width=self.expanded_width();
+        let bounds=self.shelf_list_bounds();
+        let row=c.clipped(bounds.left(),bounds.top(),bounds.width(),bounds.height());
+        let columns=Self::shelf_columns_for_width(width);
+        let capacity=self.shelf_page_capacity().max(1);
+        let first=self.shelf_first.min(n.saturating_sub(1));
+        let end=(first+capacity).min(n);
+        let dt = self.dt;
+        let items = self.shelf.items.clone();
+        self.icons.retain(&items);
+        self.shelf_x.retain(|p, _| items.contains(p));
+        let available_width=width-72.0;
+        for (visible_index,p) in items.iter().enumerate().take(end).skip(first) {
+            let page_index=visible_index-first;
+            let row_start=(page_index/columns)*columns;
+            let items_in_row=(end-row_start).min(columns);
+            let slot=available_width/items_in_row as f32;
+            let column=page_index%columns;
+            let row_index=page_index/columns;
+            let x=36.0+(column as f32+0.5)*slot;
+            let y=30.0+row_index as f32*94.0;
+            let born = self.shelf_born.get(p).copied();
+            let spring = self.shelf_x.entry(p.clone()).or_insert_with(|| {
+                let start=if born.is_some(){x+slot*0.9}else{x};
+                Spring::new(start,230.0,0.9)
+            });
+            spring.target=x;
+            spring.step(dt);
+            let x=spring.pos;
+            let half_w=31.0;
+            let height=82.0;
+            let appear=born.map(|b|smoothstep(0.0,0.35,(self.t-b) as f32)).unwrap_or(1.0);
+            let edge=smoothstep(20.0,36.0,x)*smoothstep(width-20.0,width-36.0,x);
+            let a=appear*edge;
+            if a<=0.01 {continue;}
+            let r=row.hit_drag(x-half_w,y,half_w*2.0,height,("shelf",p));
+            let show_hint=self.shelf_menu_rect.is_none()&&!r.context_menu_opened()&&!r.secondary_clicked();
+            if show_hint {r.clone().on_hover_text(p.display().to_string());}
+            let (h,pr)=row.hover_t(&r);
+            let cc=row.faded(a).scaled(x,y+36.0,1.0-0.04*pr);
+            if h>0.01 {cc.fill(x-half_w,y,half_w*2.0,height,10.0,Color32::from_white_alpha((16.0*h) as u8));}
+            let lift=-2.0*h+(1.0-appear)*8.0;
+            self.file_icon_at(&cc,p,x,y+22.0+lift,36.0);
+            let name=p.file_name().map(|s|s.to_string_lossy().to_string()).unwrap_or_default();
+            let name_width=(slot-8.0).clamp(54.0,104.0);
+            let lines=cc.wrap(&name,size::SMALL,W::Semibold,name_width,2);
+            for (i,line) in lines.iter().enumerate(){cc.text(x,y+56.0+i as f32*13.0,line,size::SMALL,W::Semibold,theme::WHITE,H::Center);}
+            let meta=self.icons.get(c.ui.ctx(),p).map(|preview|preview.metadata).unwrap_or_default();
+            cc.text(x,y+if lines.len()>1{82.0}else{69.0},&meta,size::TINY,W::Regular,theme::GRAY,H::Center);
+            if r.drag_started()&&p.exists(){cmds.push(Cmd::DragFile(p.clone()));}
+            let remove_y=y+9.0;
+            let remove=row.hit(x+15.0,remove_y-9.0,17.0,18.0,("shelf-remove",p));
+            let remove_card=row.faded(a);
+            remove_card.circle(x+23.5,remove_y,7.5,Color32::from_rgb(55,40,46));
+            paint::close(&remove_card,x+23.5,remove_y,2.4,theme::WHITE);
+            let mut delete=remove.clicked();
+            if show_hint {remove.on_hover_text("从置物架移除，保留原文件");}
+            r.context_menu(|ui|{
+                if ui.button("打开").clicked(){if p.exists(){cmds.push(Cmd::Open(p.clone()));}ui.close_menu();}
+                if ui.button("在文件夹中显示").clicked(){cmds.push(Cmd::Reveal(p.clone()));ui.close_menu();}
+                if ui.button("复制完整路径").clicked(){cmds.push(Cmd::Copy(p.display().to_string()));ui.close_menu();}
+                if ui.button("从置物架移除").clicked(){delete=true;ui.close_menu();}
+                self.shelf_menu_rect=Some(egui::Frame::menu(ui.style()).widget_rect(ui.min_rect()));
+            });
+            if delete {self.shelf.remove(p);self.icons.remove(p);self.shelf_x.remove(p);self.shelf_born.remove(p);self.shelf_first=self.shelf_first.min(self.shelf.items.len().saturating_sub(1));}
+            else if r.clicked(){if p.exists(){cmds.push(Cmd::Open(p.clone()));}else{self.say("文件已移动或删除，可从置物架移除");}}
+        }
+    }
+
+    fn shelf_row_side(&mut self,c:&Card,cmds:&mut Vec<Cmd>){
+        let n=self.shelf.items.len();
+        let slot=68.0;
+        let center=209.5;
+        let visible=n.min(5) as f32;
+        let scroll=self.shelf_scroll.pos;
+        let row=c.clone();
         let dt = self.dt;
         let items = self.shelf.items.clone();
         self.icons.retain(&items);
         self.shelf_x.retain(|p, _| items.contains(p));
         for (i, p) in items.iter().enumerate() {
-            let slot_card = if side { row.shifted(0.0, 3.0 + i as f32 * 94.0) } else { row.clone() };
+            let slot_card = row.shifted(0.0, 3.0 + i as f32 * 94.0);
             let row = &slot_card;
             let target = center + (i as f32 - scroll - (visible - 1.0) / 2.0) * slot;
             let born = self.shelf_born.get(p).copied();
@@ -784,9 +844,9 @@ impl App {
             });
             s.target = target;
             s.step(dt);
-            let x = if side { 78.0 } else { s.pos };
-            let (half_w, height) = if side { (63.0, 91.0) } else { (31.0, 78.0) };
-            if side && !row.rect(x - half_w, 30.0, half_w * 2.0, height).intersects(row.painter.clip_rect()) { continue; }
+            let x = 78.0;
+            let (half_w, height) = (63.0,91.0);
+            if !row.rect(x-half_w,30.0,half_w*2.0,height).intersects(row.painter.clip_rect()){continue;}
             if x < 0.0 || x > 420.0 {
                 continue;
             }
@@ -807,7 +867,7 @@ impl App {
             let lift = -2.0 * h + (1.0 - appear) * 8.0;
             self.file_icon_at(&cc, p, x, 52.0 + lift, 36.0);
             let name = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-            let lines = cc.wrap(&name, size::SMALL, W::Semibold, if side { 116.0 } else { 60.0 }, if side { 2 } else { 1 });
+            let lines = cc.wrap(&name, size::SMALL, W::Semibold, 116.0, 2);
             for (i, line) in lines.iter().enumerate() {
                 cc.text(x, 86.0 + i as f32 * 13.0, line, size::SMALL, W::Semibold, theme::WHITE, H::Center);
             }
@@ -832,8 +892,8 @@ impl App {
         }
     }
 
-    // ================= 剪贴板（置物架第二个分栏） =================
-    fn page_clipboard(&mut self, c: &Card, _env: &Env, _cmds: &mut Vec<Cmd>) {
+    // ================= 独立剪贴板页面 =================
+    pub(crate) fn page_clipboard(&mut self, c: &Card, _env: &Env, _cmds: &mut Vec<Cmd>) {
         let side = self.side();
         let offset = if side { 199.0 } else { 0.0 };
         let center = 209.5 - offset / 2.0;
@@ -1126,7 +1186,9 @@ impl App {
     }
     pub(crate) fn mail_list_bounds(&self)->Rect {
         let left=if self.visible_mail_code().is_some(){182.0}else{36.0};
-        Rect::from_min_max(Pos2::new(left,36.0),Pos2::new(380.0,122.0))
+        let right=(self.expanded_width()-36.0).max(left+48.0);
+        let bottom=(self.expanded_height()-18.0).max(122.0);
+        Rect::from_min_max(Pos2::new(left,36.0),Pos2::new(right,bottom))
     }
     pub(crate) fn page_mail(&mut self, c: &Card, _env: &Env, cmds: &mut Vec<Cmd>) {
         let side = self.side();
@@ -1207,12 +1269,14 @@ impl App {
                 if hit.hovered()||selected{row.fill(0.0,0.0,row_w,row_h-2.0,6.0,Color32::from_gray(if hit.hovered(){27}else{17}));}
                 if selected{row.fill(0.0,6.0,2.0,20.0,1.0,theme::GREEN);}
                 if compact {
-                    row.text(6.0,14.0,&row.fit(&item.from,11.0,W::Semibold,62.0),11.0,W::Semibold,theme::WHITE,H::Left);
-                    let subject_w=row_w-118.0-if *hidden {34.0}else{0.0};
-                    let width=row.text(74.0,14.0,&row.fit(&item.subject,10.5,W::Regular,subject_w),10.5,W::Regular,Color32::from_gray(200),H::Left);
+                    let sender_w=(row_w*0.18).clamp(62.0,112.0);
+                    let subject_x=6.0+sender_w+6.0;
+                    let subject_w=(row_w-subject_x-46.0-if *hidden {34.0}else{0.0}).max(12.0);
+                    row.text(6.0,14.0,&row.fit(&item.from,11.0,W::Semibold,sender_w),11.0,W::Semibold,theme::WHITE,H::Left);
+                    let width=row.text(subject_x,14.0,&row.fit(&item.subject,10.5,W::Regular,subject_w),10.5,W::Regular,Color32::from_gray(200),H::Left);
                     if *hidden {
-                        row.fill(78.0+width,5.0,30.0,12.0,3.0,theme::BTN);
-                        row.text(93.0+width,14.0,"已隐藏",8.5,W::Regular,theme::GRAY,H::Center);
+                        row.fill(subject_x+width,5.0,30.0,12.0,3.0,theme::BTN);
+                        row.text(subject_x+15.0+width,14.0,"已隐藏",8.5,W::Regular,theme::GRAY,H::Center);
                     }
                     row.text(row_w-6.0,14.0,item.time.rsplit(' ').next().unwrap_or(&item.time),10.0,W::Regular,Color32::from_gray(170),H::Right);
                     row.seg((6.0,row_h-0.5),(row_w-6.0,row_h-0.5),0.5,Color32::from_gray(40));
@@ -1293,44 +1357,50 @@ impl App {
     pub(crate) fn mail_detail(&mut self, c: &Card, raw: &mail::Item, cmds: &mut Vec<Cmd>) {
         let hidden=self.mail_code_hidden(raw);
         let display=self.display_mail(raw);let item=&display;
-        c.fill(36.0, 36.0, 347.0, 188.0, 11.0, theme::CARD);
-        let back = c.hit(330.0, 42.0, 44.0, 14.0, ("mail-back", item.uid));
+        let width=self.expanded_width();
+        let height=self.expanded_height();
+        let right=width-45.0;
+        let body_width=(right-46.0).max(120.0);
+        let body_height=(height-146.0).max(90.0);
+        c.fill(36.0,36.0,width-72.0,height-48.0,11.0,theme::CARD);
+        let back = c.hit(right-44.0, 42.0, 44.0, 14.0, ("mail-back", item.uid));
         let bh = c.hover_t(&back).0;
-        c.text(374.0, 50.0, "返回", 10.5, W::Regular, if bh > 0.5 { theme::WHITE } else { theme::GRAY }, H::Right);
+        c.text(right, 50.0, "返回", 10.5, W::Regular, if bh > 0.5 { theme::WHITE } else { theme::GRAY }, H::Right);
         if back.clicked() {
             self.mail.open_uid = None;
             return;
         }
-        let from = c.fit(&item.from, 11.5, W::Semibold, 210.0);
+        let read_x=right-108.0;
+        let from = c.fit(&item.from, 11.5, W::Semibold, (read_x-54.0).max(100.0));
         c.text(46.0, 50.0, &from, 11.5, W::Semibold, theme::WHITE, H::Left);
-        let read=c.hit(266.0,42.0,60.0,14.0,("mail-read",&item.account,item.uid)).on_hover_text("在独立窗口阅读完整正文");
-        c.text(324.0,50.0,"阅读全文",10.5,W::Regular,if read.hovered(){theme::BLUE}else{theme::GRAY},H::Right);
+        let read=c.hit(read_x,42.0,60.0,14.0,("mail-read",&item.account,item.uid)).on_hover_text("在独立窗口阅读完整正文");
+        c.text(read_x+58.0,50.0,"阅读全文",10.5,W::Regular,if read.hovered(){theme::BLUE}else{theme::GRAY},H::Right);
         if read.clicked(){self.mail.reading=Some(raw.clone());self.mail.reader_focus=true;}
-        let subject = c.fit(&item.subject, 13.5, W::Semibold, 328.0);
+        let subject = c.fit(&item.subject, 13.5, W::Semibold, body_width);
         c.text(46.0, 73.0, &subject, 13.5, W::Semibold, theme::WHITE, H::Left);
-        c.hit(46.0,58.0,328.0,20.0,("mail-subject",&item.account,item.uid)).on_hover_text(&item.subject);
-        c.text(374.0, 92.0, &item.time, 10.0, W::Regular, Color32::from_gray(170), H::Right);
+        c.hit(46.0,58.0,body_width,20.0,("mail-subject",&item.account,item.uid)).on_hover_text(&item.subject);
+        c.text(right, 92.0, &item.time, 10.0, W::Regular, Color32::from_gray(170), H::Right);
         let account=format!("收件邮箱：{}",item.account);
-        c.text(46.0,92.0,&c.fit(&account,10.0,W::Regular,230.0),10.0,W::Regular,Color32::from_gray(175),H::Left);
-        c.hit(46.0,80.0,230.0,16.0,("mail-account",&item.account,item.uid)).on_hover_text(&account);
+        c.text(46.0,92.0,&c.fit(&account,10.0,W::Regular,(body_width-50.0).max(100.0)),10.0,W::Regular,Color32::from_gray(175),H::Left);
+        c.hit(46.0,80.0,body_width,16.0,("mail-account",&item.account,item.uid)).on_hover_text(&account);
 
         // 正文和链接共用滚动区域，会议与验证码操作保留在底部。
         let mut content=egui::Ui::new(c.ui.ctx().clone(),egui::Id::new(("mail-content",&item.account,item.uid,c.live)),
-            egui::UiBuilder::new().max_rect(c.rect(46.0,104.0,328.0,90.0)).layer_id(c.painter.layer_id()).style(c.ui.style().clone()));
-        content.set_clip_rect(c.rect(46.0,104.0,328.0,90.0).intersect(c.painter.clip_rect()));
+            egui::UiBuilder::new().max_rect(c.rect(46.0,104.0,body_width,body_height)).layer_id(c.painter.layer_id()).style(c.ui.style().clone()));
+        content.set_clip_rect(c.rect(46.0,104.0,body_width,body_height).intersect(c.painter.clip_rect()));
         content.set_opacity(c.painter.opacity());
         if !c.live {content.disable();}
         content.spacing_mut().item_spacing.y=6.0*c.s;
         content.style_mut().spacing.scroll.floating=false;
         content.spacing_mut().scroll.bar_width=4.0*c.s;
-        egui::ScrollArea::vertical().id_salt(("mail-body",&item.account,item.uid)).max_height(90.0*c.s).auto_shrink([false,false]).show(&mut content,|ui|{
+        egui::ScrollArea::vertical().id_salt(("mail-body",&item.account,item.uid)).max_height(body_height*c.s).auto_shrink([false,false]).show(&mut content,|ui|{
             if !item.summary.is_empty() {
                 ui.add(egui::Label::new(egui::RichText::new(item.summary.as_ref()).font(c.font(12.0,W::Regular)).color(Color32::from_gray(220))).wrap());
             }else if item.links.is_empty(){
                 ui.label(egui::RichText::new("（这封邮件没有正文）").font(c.font(12.0,W::Regular)).color(theme::DIM));
             }
             for link in &item.links {
-                let text=format!("{} ↗",c.fit(&link.label,12.0,W::Regular,295.0));
+                let text=format!("{} ↗",c.fit(&link.label,12.0,W::Regular,(body_width-32.0).max(80.0)));
                 if ui.add(egui::Link::new(egui::RichText::new(text).font(c.font(12.0,W::Regular)).color(theme::BLUE))).on_hover_text(&link.url).clicked(){
                     cmds.push(Cmd::OpenUrl(link.url.clone()));
                 }
@@ -1338,18 +1408,19 @@ impl App {
         });
 
         // 底部一行：会议时间（绿）优先，其次验证码（点一下复制）。
-        c.seg((46.0,199.0),(374.0,199.0),0.6,Color32::from_gray(48));
-        let y = 214.0;
+        let footer_y=height-37.0;
+        c.seg((46.0,footer_y),(right,footer_y),0.6,Color32::from_gray(48));
+        let y = height-22.0;
         if hidden {
             c.text(46.0,y,"验证码已隐藏（不代表失效）",11.0,W::Regular,theme::GRAY,H::Left);
-            c.text(374.0,y,"查看 15 秒",10.5,W::Regular,theme::BLUE,H::Right);
-            if c.hit(290.0,y-14.0,86.0,24.0,("mail-reveal",item.uid)).clicked(){self.reveal_mail_code(raw);}
+            c.text(right,y,"查看 15 秒",10.5,W::Regular,theme::BLUE,H::Right);
+            if c.hit(right-84.0,y-14.0,86.0,24.0,("mail-reveal",item.uid)).clicked(){self.reveal_mail_code(raw);}
         } else if let Some(m) = &item.meeting {
             let ignored=self.mail_event_ignored(m);
             c.text(46.0,y,&format!("{} · {}",if ignored{"已忽略"}else{"日程"},m.at),10.5,W::Regular,if ignored{theme::DIM}else{theme::GREEN},H::Left);
             let label=if ignored{"恢复日程"}else{"忽略日程"};
-            c.text(374.0,y,label,10.5,W::Regular,theme::GRAY,H::Right);
-            if c.hit(316.0,y-14.0,60.0,24.0,("mail-ignore-event",item.uid)).on_hover_text(&m.title).clicked(){self.toggle_mail_event(m);}
+            c.text(right,y,label,10.5,W::Regular,theme::GRAY,H::Right);
+            if c.hit(right-58.0,y-14.0,60.0,24.0,("mail-ignore-event",item.uid)).on_hover_text(&m.title).clicked(){self.toggle_mail_event(m);}
         } else if let Some(code) = &item.code {
             let label = format!("验证码 {code}");
             let w = c.text(46.0, y, &label, 13.0, W::Semibold, theme::GREEN, H::Left);

@@ -2,7 +2,7 @@
 //!
 //! 收起栏和展开页面均按竖向排列。
 
-use crate::app::{App, Env, Phase, BAR_H_MIN, BAR_W_MIN, PILL_GAP, PW};
+use crate::app::{App, Env, Phase, BAR_H_MIN, BAR_W_MIN, PILL_GAP};
 use crate::model::{Dock, IslandShape};
 use crate::paint::{self, Card, H};
 use crate::theme::{self, W};
@@ -57,10 +57,10 @@ impl App {
         use crate::bar_layout as bar;
         let mut items = Vec::new();
         let page_on = |page| self.settings.page_on(page, self.dock());
-        let pinned = |page: usize| page_on(page) && self.settings.resident_pages[page];
+        let pinned = |page: usize| page_on(page) && self.settings.page_resident(page);
         let order = bar::normalize_order(&self.settings.resident_order).unwrap_or_else(|| {
             if self.settings.show_battery { bar::DEFAULT_ORDER.to_vec() }
-            else { vec![bar::QUOTA, bar::PET, bar::CLOCK, bar::BATTERY, bar::MUSIC, bar::FOCUS, bar::WATER, bar::SHELF, bar::TODO, bar::MAIL, bar::STEAM] }
+            else { vec![bar::QUOTA, bar::PET, bar::CLOCK, bar::BATTERY, bar::MUSIC, bar::FOCUS, bar::WATER, bar::SHELF, bar::CLIPBOARD, bar::TODO, bar::MAIL, bar::STEAM] }
         });
         for slot in order {
             match slot {
@@ -78,9 +78,10 @@ impl App {
                     if quotas.is_empty() && pinned(6) { items.push(SideItem::Shortcut(6)); }
                     items.extend(quotas.into_iter().map(|(index, height)| SideItem::Quota(index, height)));
                 }
-                bar::STEAM if page_on(8) && (self.steam.badge().is_some() || pinned(8)) => items.push(SideItem::Shortcut(8)),
+                bar::STEAM if page_on(8) && (self.steam.badge().is_some() || !self.steam.installed_games.is_empty() || pinned(8)) => items.push(SideItem::Shortcut(8)),
                 bar::WATER if pinned(2) => items.push(SideItem::Shortcut(2)),
                 bar::SHELF if pinned(3) => items.push(SideItem::Shortcut(3)),
+                bar::CLIPBOARD if pinned(9) => items.push(SideItem::Shortcut(9)),
                 bar::TODO if pinned(4) => items.push(SideItem::Shortcut(4)),
                 bar::MAIL if pinned(5) => items.push(SideItem::Shortcut(5)),
                 _ => {}
@@ -146,7 +147,7 @@ impl App {
 
     /// 展开面板（页面内容）的左上角。
     pub(crate) fn content_origin(&self, win: Rect) -> Pos2 {
-        self.island_rect(win, if self.side() { self.expanded_width() } else { PW }, self.expanded_height()).min
+        self.island_rect(win, self.expanded_width(), self.expanded_height()).min
     }
 
     /// 侧边停靠的命中区域：收起时是胶囊外扩几点并一直延伸到屏幕边缘，展开时是整个面板。
@@ -229,11 +230,14 @@ impl App {
                 SideItem::Shortcut(page) => match page {
                     2 => paint::resident_water(c, cx, mid),
                     3 => paint::resident_shelf(c, cx, mid),
+                    9 => paint::resident_clipboard(c, cx, mid),
                     4 => paint::resident_todo(c, cx, mid),
                     5 => paint::resident_mail(c, cx, mid),
                     6 => paint::target(c, cx, mid, theme::SOFT_GREEN),
                     8 => {
-                        let icon = self.steam.badge().and_then(|(_, game)| game.icon.as_deref());
+                        let icon = self.steam.game().and_then(|game|game.icon.as_deref())
+                            .or_else(||self.steam.installed_games.first().and_then(|game|game.icon.as_deref()))
+                            .or_else(||self.steam.badge().and_then(|(_,game)|game.icon.as_deref()));
                         if let Some(texture) = self.steam_images.get(c.ui.ctx(), icon, None) {
                             c.painter.image(texture, c.rect(cx - 9.0, mid - 9.0, 18.0, 18.0),
                                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);

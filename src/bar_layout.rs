@@ -15,23 +15,39 @@ pub(crate) const SHELF: usize = 12;
 pub(crate) const TODO: usize = 13;
 pub(crate) const MAIL: usize = 14;
 pub(crate) const CALENDAR: usize = 15;
-pub(crate) const SLOT_COUNT: usize = 16;
-const WIDTHS: [f32; SLOT_COUNT] = [44.0,20.0,27.0,27.0,27.0,22.0,14.0,crate::focus_bar::WIDTH,20.0,32.0,18.0,18.0,18.0,18.0,18.0,18.0];
+pub(crate) const CLIPBOARD: usize = 16;
+pub(crate) const SLOT_COUNT: usize = 17;
+const WIDTHS: [f32; SLOT_COUNT] = [44.0,20.0,27.0,27.0,27.0,22.0,14.0,crate::focus_bar::WIDTH,20.0,32.0,18.0,18.0,18.0,18.0,18.0,18.0,18.0];
 const GAP: f32 = 12.0;
 
 pub(crate) const LEGACY_ORDER: [usize;6]=[BATTERY,PET,CLOCK,QUOTA,MUSIC,FOCUS];
-pub(crate) const DEFAULT_ORDER: [usize;11]=[BATTERY,PET,CLOCK,QUOTA,MUSIC,FOCUS,WATER,SHELF,TODO,MAIL,STEAM];
+pub(crate) const DEFAULT_ORDER: [usize;12]=[BATTERY,PET,CLOCK,QUOTA,MUSIC,FOCUS,WATER,SHELF,CLIPBOARD,TODO,MAIL,STEAM];
 pub(crate) fn valid_order(order:&[usize])->bool {
     order.len()==DEFAULT_ORDER.len() && DEFAULT_ORDER.iter().all(|slot|order.iter().filter(|value|*value==slot).count()==1)
 }
 pub(crate) fn normalize_order(order:&[usize])->Option<Vec<usize>> {
     if valid_order(order){return Some(order.to_vec());}
-    if order.len()==DEFAULT_ORDER.len()+1 {
+    if order.len()==12 {
         let without_calendar:Vec<_>=order.iter().copied().filter(|slot|*slot!=CALENDAR).collect();
-        if valid_order(&without_calendar){return Some(without_calendar);}
+        if without_calendar.len()==11 {
+            let old_slots=[BATTERY,PET,CLOCK,QUOTA,MUSIC,FOCUS,WATER,SHELF,TODO,MAIL,STEAM];
+            if old_slots.iter().all(|slot|without_calendar.iter().filter(|value|*value==slot).count()==1) {
+                return Some(insert_clipboard(without_calendar));
+            }
+        }
+    }
+    let old_slots=[BATTERY,PET,CLOCK,QUOTA,MUSIC,FOCUS,WATER,SHELF,TODO,MAIL,STEAM];
+    if order.len()==old_slots.len() && old_slots.iter().all(|slot|order.iter().filter(|value|*value==slot).count()==1){
+        return Some(insert_clipboard(order.to_vec()));
     }
     (order.len()==LEGACY_ORDER.len() && LEGACY_ORDER.iter().all(|slot|order.iter().filter(|value|*value==slot).count()==1))
-        .then(||order.iter().copied().chain(DEFAULT_ORDER[LEGACY_ORDER.len()..].iter().copied()).collect())
+        .then(||insert_clipboard(order.iter().copied().chain(DEFAULT_ORDER[LEGACY_ORDER.len()..].iter().copied()).filter(|slot|*slot!=CLIPBOARD).collect()))
+}
+
+fn insert_clipboard(mut order:Vec<usize>)->Vec<usize>{
+    let at=order.iter().position(|slot|*slot==SHELF).map(|index|index+1).unwrap_or(order.len());
+    order.insert(at,CLIPBOARD);
+    order
 }
 
 pub(crate) fn animations_enabled()->bool {
@@ -90,10 +106,10 @@ impl Layout {
         for value in x.iter_mut().flatten() {*value-=width/2.0;}
         Self {width:width.max(96.0),x,widths,quotas,focus_width}
     }
-    pub fn add_pages(&mut self,pinned:[bool;9],steam:bool) {
+    pub fn add_pages(&mut self,pinned:[bool;10],steam:bool) {
         let old_width=self.width;
         let mut cursor=old_width/2.0-16.0+GAP;
-        for (slot,on) in [(WATER,pinned[2]),(SHELF,pinned[3]),(TODO,pinned[4]),(MAIL,pinned[5]),(STEAM,steam||pinned[8])] {
+        for (slot,on) in [(WATER,pinned[2]),(SHELF,pinned[3]),(CLIPBOARD,pinned[9]),(TODO,pinned[4]),(MAIL,pinned[5]),(STEAM,steam||pinned[8])] {
             if on {self.x[slot]=Some(cursor+WIDTHS[slot]/2.0);cursor+=WIDTHS[slot]+GAP;}
         }
         let growth=cursor-(old_width/2.0-16.0+GAP);

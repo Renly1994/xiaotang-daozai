@@ -405,7 +405,7 @@ impl App {
             AlertSource::External(id) => self.settings.status_docks[if id == "QQ" {3} else {1}],
             AlertSource::Internal if matches!(alert.title.as_str(), "电源已连接" | "已切换电池供电" | "电量偏低") => self.settings.status_docks[0],
             AlertSource::Internal if alert.is_hud() => self.settings.status_docks[1],
-            _ if alert.page < self.settings.visible_pages.len() && self.settings.visible_pages[alert.page] => self.settings.page_dock(alert.page),
+            _ if self.settings.page_visible(alert.page) => self.settings.page_dock(alert.page),
             _ => crate::model::Dock::ALL.into_iter().find(|&dock| self.settings.dock_in_use(dock)).unwrap_or(self.settings.dock),
         }
     }
@@ -1048,9 +1048,9 @@ impl App {
         let before=format!("{:?}",self.settings);
         match self.settings_category {
             0=>{
-                let choices=[("吉祥物",self.settings.pet),("极简刘海",self.settings.minimal),("系统提示",self.settings.system_hud),("全屏隐藏",self.settings.hide_fullscreen),
+                let choices=[("吉祥物",self.settings.pet),("极简刘海",self.settings.minimal_on(self.dock())),("系统提示",self.settings.system_hud),("全屏隐藏",self.settings.hide_fullscreen),
                 ];
-                for (i,(name,on)) in choices.iter().enumerate(){let x=42.0+(i%2) as f32*169.0;let y=57.0+(i/2) as f32*27.0;let text=format!("{}  {}",name,if *on{"开"}else{"关"});if setting_button(c,x,y,158.0,&text,*on,&format!("general-{i}")){match i{0=>self.set_pet(!self.settings.pet),1=>self.set_minimal(!self.settings.minimal),2=>self.settings.system_hud=!self.settings.system_hud,_=>self.settings.hide_fullscreen=!self.settings.hide_fullscreen,
+                for (i,(name,on)) in choices.iter().enumerate(){let x=42.0+(i%2) as f32*169.0;let y=57.0+(i/2) as f32*27.0;let text=format!("{}  {}",name,if *on{"开"}else{"关"});if setting_button(c,x,y,158.0,&text,*on,&format!("general-{i}")){match i{0=>self.set_pet(!self.settings.pet),1=>self.set_minimal(!self.settings.minimal_on(self.dock())),2=>self.settings.system_hud=!self.settings.system_hud,_=>self.settings.hide_fullscreen=!self.settings.hide_fullscreen,
                         }}}
                 c.text(42.0,116.0,"岛仔收起时常驻；极简模式保留细线",10.5,W::Regular,theme::GRAY,H::Left,
                 );
@@ -1178,42 +1178,6 @@ fn page_setting_row(ui:&mut egui::Ui,title:&str,description:&str,visible:&mut bo
         });
     });
     ui.add_space(2.0);
-}
-
-/// 剪贴板作为独立设置行显示，但与页面行共享标题和停靠选择器的列位置。
-fn clipboard_dock_setting_row(ui:&mut egui::Ui,dock:&mut crate::model::Dock,width:f32)->bool{
-    let controls_width=SETTINGS_DOCK_COMPACT_W+SETTINGS_RESIDENT_SLOT_W+SETTINGS_SWITCH_W+2.0*SETTINGS_PAGE_CONTROL_GAP;
-    let row_height=49.0;
-    let row_inset=28.0;
-    let content_width=(width-row_inset).max(1.0);
-    let text_w=(content_width-controls_width-SETTINGS_ROW_GAP).max(48.0);
-    let ctx=ui.ctx().clone();
-    let mut changed=false;
-    ui.allocate_ui_with_layout(egui::vec2(width,row_height),egui::Layout::left_to_right(egui::Align::Center),|ui|{
-        ui.spacing_mut().item_spacing.x=0.0;
-        ui.allocate_exact_size(egui::vec2(row_inset,row_height),egui::Sense::hover());
-        ui.allocate_ui_with_layout(egui::vec2(content_width,row_height),egui::Layout::left_to_right(egui::Align::Center),|ui|{
-            ui.spacing_mut().item_spacing.x=0.0;
-            ui.allocate_ui_with_layout(egui::vec2(text_w,row_height),egui::Layout::left_to_right(egui::Align::Center),|ui|{
-                ui.vertical(|ui|{
-                    ui.set_width(text_w);
-                    ui.spacing_mut().item_spacing.y=2.0;
-                    ui.label(egui::RichText::new("剪贴板").size(13.0).color(settings_color(&ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
-                    ui.label(egui::RichText::new("文字记录与快捷粘贴，可与置物架分别停靠").size(11.5).color(settings_color(&ctx,Color32::from_gray(175),Color32::from_gray(90))));
-                });
-            });
-            ui.add_space(SETTINGS_ROW_GAP);
-            ui.allocate_ui_with_layout(egui::vec2(controls_width,row_height),egui::Layout::left_to_right(egui::Align::Center),|ui|{
-                ui.spacing_mut().item_spacing.x=0.0;
-                changed=settings_dock_position(ui,dock,true);
-                ui.add_space(SETTINGS_PAGE_CONTROL_GAP);
-                ui.allocate_exact_size(egui::vec2(SETTINGS_RESIDENT_SLOT_W,24.0),egui::Sense::hover());
-                ui.add_space(SETTINGS_PAGE_CONTROL_GAP);
-                ui.allocate_exact_size(egui::vec2(SETTINGS_SWITCH_W,24.0),egui::Sense::hover());
-            });
-        });
-    });
-    changed
 }
 
 /// 设置页统一的分段选择器（灰色底框 + 选中块）。返回值为是否发生了切换。
@@ -1574,19 +1538,18 @@ impl App {
                         });
                         settings_label(ui,"功能页面");
                         settings_card(ui,|ui|{
-                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","查看 Steam 状态与成就进度"];
+                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","查看 Steam 状态与成就进度","文字记录与快捷粘贴"];
                             ui.label(egui::RichText::new("拖动左侧手柄调整顺序，松开后自动应用到岛。").size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             #[derive(Clone)]
                             struct PageDrag(usize);
                             let mut movement=None;
                             let row_w=ui.available_width();
-                            let mut clipboard_dock=self.settings.clipboard_dock();
                             for (index,page) in self.settings.page_order.into_iter().enumerate() {
                                 if index>0 {ui.separator();}
-                                let mut visible=self.settings.visible_pages[page];
-                                let mut resident=if page==crate::app::CALENDAR_PAGE{self.settings.calendar_resident}else{self.settings.resident_pages[page]};
+                                let mut visible=self.settings.page_visible(page);
+                                let mut resident=if page==crate::app::CALENDAR_PAGE{self.settings.calendar_resident}else{self.settings.page_resident(page)};
                                 let mut dock = self.settings.page_dock(page);
-                                let can_change=!visible || self.settings.visible_pages.iter().filter(|enabled|**enabled).count()>1;
+                                let can_change=!visible || self.settings.page_order.iter().filter(|page|self.settings.page_visible(**page)).count()>1;
                                 let row=ui.push_id(("page-order",page),|ui|ui.horizontal(|ui|{
                                     ui.set_max_width(row_w);
                                     let (rect,handle)=ui.allocate_exact_size(egui::vec2(20.0,40.0),egui::Sense::drag());
@@ -1607,20 +1570,12 @@ impl App {
                                     }
                                 }
                                 if let Some(payload)=row.dnd_release_payload::<PageDrag>() {movement=Some((payload.0,index));}
-                                if visible!=self.settings.visible_pages[page] {self.set_page_visible(page,visible);}
+                                if visible!=self.settings.page_visible(page) {self.set_page_visible(page,visible);}
                                 if page==crate::app::CALENDAR_PAGE { self.settings.calendar_resident=resident; }
-                                else { self.settings.resident_pages[page]=resident; }
+                                else { self.settings.set_page_resident(page,resident); }
                                 if dock != self.settings.page_dock(page) {
                                     self.settings.enable_split_docks();
-                                    self.settings.page_docks[page] = dock.bit();
-                                }
-                                if page==3 {
-                                    ui.separator();
-                                    clipboard_dock_setting_row(ui,&mut clipboard_dock,row_w);
-                                    if clipboard_dock!=self.settings.clipboard_dock(){
-                                        self.settings.enable_split_docks();
-                                        self.settings.clipboard_docks=clipboard_dock.bit();
-                                    }
+                                    self.settings.set_page_dock(page,dock);
                                 }
                             }
                             if let Some((page,to))=movement {
@@ -1628,7 +1583,7 @@ impl App {
                                 if from<to {self.settings.page_order[from..=to].rotate_left(1);}
                                 else {self.settings.page_order[to..=from].rotate_right(1);}
                             }
-                            if self.settings.visible_pages.iter().filter(|enabled|**enabled).count()==1 {
+                            if self.settings.page_order.iter().filter(|page|self.settings.page_visible(**page)).count()==1 {
                                 ui.add_space(5.0);
                                 ui.label(egui::RichText::new("至少保留一个页面。关闭仅隐藏页面，数据和提醒设置保留。").size(11.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             }
@@ -1694,7 +1649,7 @@ impl App {
                                 if settings_dock_position(ui, &mut self.settings.dock, false) {self.settings.island_offset=0;}
                             });
                             let dock = self.settings.dock;
-                            ui.label(egui::RichText::new(format!("{}展开尺寸（按位置保存）", dock.label())).size(11.0).color(ui.visuals().weak_text_color()));
+                            ui.label(egui::RichText::new(format!("{}组件最大可用尺寸（按位置保存）", dock.label())).size(11.0).color(ui.visuals().weak_text_color()));
                             let [width, height] = &mut self.settings.dock_sizes[dock.index()];
                             let (width_range, height_range, defaults) = if dock.is_side() {
                                 (crate::side_dock::SIDE_MIN_W..=crate::side_dock::SIDE_MAX_W, 280..=500,
@@ -1702,14 +1657,16 @@ impl App {
                             } else {
                                 (419..=520, 140..=350, [419, 140])
                             };
-                            settings_control_row_right(ui,"展开宽度",|ui| {
+                            settings_control_row_right(ui,"最大宽度",|ui| {
                                 ui.add(egui::Slider::new(width, width_range).suffix(" 点"));
                                 if ui.small_button("默认").clicked() { *width = defaults[0]; }
                             });
-                            settings_control_row_right(ui,"展开高度",|ui| {
+                            settings_control_row_right(ui,"最大高度",|ui| {
                                 ui.add(egui::Slider::new(height, height_range).suffix(" 点"));
                                 if ui.small_button("默认").clicked() { *height = defaults[1]; }
                             });
+                            ui.label(egui::RichText::new("尺寸作为置物架、邮箱等内容较多页面的上限；紧凑页面在默认尺寸足够时保持原大小。置物架先扩列，再增加行数，最后才分页。")
+                                .size(11.0).color(ui.visuals().weak_text_color()));
                             ui.add_space(4.0);
                             let side=self.settings.dock.is_side();
                             settings_control_row(ui,if side{"上下位置"}else{"水平位置"},56.0,|ui|{
@@ -1738,9 +1695,32 @@ impl App {
                             });
                             ui.label(egui::RichText::new("鼠标停在岛上图标后再展开对应页面；移到另一个图标会重新计时。").size(11.0).color(ui.visuals().weak_text_color()));
                             ui.separator();
-                            let mut minimal=self.settings.minimal;
-                            setting_row(ui,"极简刘海","收起时显示一条细线",&mut minimal);
-                            if minimal!=self.settings.minimal {self.set_minimal(minimal);}
+                            setting_row(ui,"靠近时临时收起","停在岛体轮廓附近后让开底层区域，鼠标离开后恢复",&mut self.settings.hover_hide_enabled);
+                            if self.settings.hover_hide_enabled {
+                                settings_control_row(ui,"识别范围",80.0,|ui|{
+                                    ui.add_sized([ui.available_width().min(300.0),30.0],egui::Slider::new(&mut self.settings.hover_hide_range_px,8..=64).step_by(4.0).suffix(" 点"))
+                                });
+                                settings_control_row(ui,"停留时间",80.0,|ui|{
+                                    ui.add_sized([ui.available_width().min(300.0),30.0],egui::Slider::new(&mut self.settings.hover_hide_delay_ms,250..=1500).step_by(50.0).suffix(" 毫秒"))
+                                });
+                                settings_hint(ui,"识别范围控制鼠标距岛体多远时出现轮廓并开始计时；停留后当前岛体收起，离开范围后恢复。仅影响鼠标所在的停靠位置。");
+                            }
+                            ui.separator();
+                            ui.horizontal(|ui|{
+                                ui.label(egui::RichText::new("极简刘海").size(12.5).color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
+                                    for dock in [crate::model::Dock::Right,crate::model::Dock::Left,crate::model::Dock::Top]{
+                                        let mut enabled=self.settings.minimal_on(dock);
+                                        let label=match dock{crate::model::Dock::Top=>"顶部",crate::model::Dock::Left=>"左侧",crate::model::Dock::Right=>"右侧"};
+                                        if ui.checkbox(&mut enabled,label).changed(){
+                                            let current=self.dock();
+                                            if current==dock {self.set_minimal(enabled)}
+                                            else {self.settings.set_minimal_on(dock,enabled);if enabled&&dock==self.settings.dock{self.settings.pet=false;}self.settings.save();}
+                                        }
+                                    }
+                                });
+                            });
+                            settings_hint(ui,"分别控制顶部、左侧、右侧收起后的刘海样式");
                             ui.separator();
 
                             let mut pet=self.settings.pet;
@@ -1816,14 +1796,14 @@ impl App {
                             ui.label(egui::RichText::new("保存文件位置，移除条目不会删除原文件。").size(13.0));
                             ui.label(egui::RichText::new(format!("当前 {} 项",self.shelf.items.len())).size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             ui.add_space(5.0);
-                            if ui.add_sized([120.0,32.0],egui::Button::new("打开置物架")).clicked(){self.settings_open=false;self.shelf_tab=0;self.show_page(3);}
+                            if ui.add_sized([120.0,32.0],egui::Button::new("打开置物架")).clicked(){self.settings_open=false;self.show_page(3);}
                         });
                         settings_label(ui,"剪贴板");
                         settings_card(ui,|ui|{
                             setting_row(ui,"记录剪贴板","在置物架的「剪贴板」里查看最近复制的文字，点一下再次复制",&mut self.settings.clipboard_history);
                             ui.label(egui::RichText::new(format!("本机保存最近 {} 条，重新打开后可继续使用。关闭记录会暂停收集，手动清空会保留固定条目。密码管理器标记为敏感的内容不会记录。",crate::clipboard::MAX_RECENT)).size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             ui.add_space(5.0);
-                            if ui.add_sized([120.0,32.0],egui::Button::new("打开剪贴板")).clicked(){self.settings_open=false;self.shelf_tab=1;self.show_page(3);}
+                            if ui.add_sized([120.0,32.0],egui::Button::new("打开剪贴板")).clicked(){self.settings_open=false;self.show_page(9);}
                         });
                     }
                     6=>{

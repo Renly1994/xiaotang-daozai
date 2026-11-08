@@ -167,7 +167,7 @@ impl Shell {
         #[cfg(windows)]
         let tray = daozai::tray::Tray::start(daozai::tray::State {
             pet: app.settings.pet,
-            minimal: app.settings.minimal,
+            minimal: app.settings.minimal_docks==7,
             autostart,
         });
         diagnostics::startup("初始化通知监听");
@@ -249,8 +249,9 @@ impl Shell {
                     self.app.say(if self.app.settings.pet { "吉祥物已打开" } else { "吉祥物已关闭" });
                 }
                 Event::ToggleMinimal => {
-                    self.app.set_minimal(!self.app.settings.minimal);
-                    self.app.say(if self.app.settings.minimal { "极简刘海已打开" } else { "极简刘海已关闭" });
+                    let enabled=self.app.settings.minimal_docks!=7;
+                    self.app.set_minimal_all(enabled);
+                    self.app.say(if enabled { "所有岛体的极简刘海已打开" } else { "所有岛体的极简刘海已关闭" });
                 }
                 Event::ToggleAutostart => {
                     let want = !self.autostart;
@@ -265,7 +266,7 @@ impl Shell {
             }
         }
         if let Some(t) = &self.tray {
-            t.sync(tray::State { pet: self.app.settings.pet, minimal: self.app.settings.minimal, autostart: self.autostart });
+            t.sync(tray::State { pet: self.app.settings.pet, minimal: self.app.settings.minimal_docks==7, autostart: self.autostart });
         }
     }
 
@@ -383,7 +384,8 @@ impl Shell {
                         if hidden {empty} else {rect(out.hit)},
                         if hidden {None} else {out.notice_hit.map(rect)},
                         if hidden {None} else {out.file_drop_zone.map(rect)},
-                        if hidden {None} else {out.glass.as_deref()}, ppp, out.editing, !hidden && out.expanded);
+                        if hidden {None} else {out.glass.as_deref()}, ppp, out.editing, !hidden && out.expanded,
+                        hidden || out.mouse_passthrough);
                     if positioned && !island.placed {
                         island.placed = true;
                         child.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -623,7 +625,8 @@ impl eframe::App for Shell {
             let hidden = self.hidden || !primary_active;
             let region=if hidden && !self.app.steam_fullscreen_notice() {(0.0,0.0,0.0,0.0)} else {r(out.region)};
             let hit=if hidden {(0.0,0.0,0.0,0.0)} else {r(out.hit)};
-            native.update(region, hit, if hidden{None}else{out.notice_hit.map(r)},if hidden{None}else{out.file_drop_zone.map(r)},if hidden{None}else{out.glass.as_deref()},ctx.pixels_per_point()*eframe::root_frame_paint_scale(), out.editing, !hidden && out.expanded);
+            native.update(region, hit, if hidden{None}else{out.notice_hit.map(r)},if hidden{None}else{out.file_drop_zone.map(r)},if hidden{None}else{out.glass.as_deref()},ctx.pixels_per_point()*eframe::root_frame_paint_scale(), out.editing, !hidden && out.expanded,
+                hidden || out.mouse_passthrough);
         }
         let mut commands: Vec<_> = out.cmds.into_iter().map(|command| (egui::ViewportId::ROOT, command)).collect();
         #[cfg(windows)]
@@ -664,6 +667,10 @@ impl eframe::App for Shell {
                     if let Some(url)=daozai::mail::web_url(&url) {
                         if open_path(std::path::Path::new(&url)).is_err(){self.app.say("无法打开默认浏览器，请检查 Windows 默认应用设置");}
                     }
+                },
+                Cmd::LaunchSteamGame(app_id)=>{
+                    let uri=format!("steam://rungameid/{app_id}");
+                    if let Err(error)=open_path(std::path::Path::new(&uri)){self.app.say(format!("无法启动 Steam 游戏：{error}"));}
                 },
                 Cmd::CalendarImport=>{
                     #[cfg(windows)] match daozai::system::pick_files_for("选择要导入的日历文件（.ics）",true){

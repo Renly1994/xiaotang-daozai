@@ -110,6 +110,162 @@ pub struct Game {
     pub name: String,
     pub icon: Option<std::path::PathBuf>,
 }
+
+/// Locally installed Steam titles, discovered from each library's app manifests.
+pub fn installed_games() -> Vec<Game> {
+    use std::{collections::HashSet, fs};
+    let Some(root)=steam_install_root() else{return Vec::new()};
+    let mut libraries=vec![root.clone()];
+    if let Ok(vdf)=fs::read_to_string(root.join("steamapps/libraryfolders.vdf")){
+        for line in vdf.lines(){
+            let mut values=line.split('"').skip(1).step_by(2);
+            let Some(key)=values.next() else{continue};
+            let Some(value)=values.next() else{continue};
+            // 新版 VDF 用 path 字段，旧版则直接用 "1" "D:\\SteamLibrary"。
+            if key!="path"&&key.parse::<usize>().is_err(){continue;}
+            let path=std::path::PathBuf::from(value.replace("\\\\","\\"));
+            if path.join("steamapps").is_dir()&&!libraries.contains(&path){libraries.push(path);}
+        }
+    }
+    let mut seen=HashSet::new();
+    let mut games=Vec::new();
+    for library in libraries{
+        let apps=library.join("steamapps");
+        let Ok(entries)=fs::read_dir(&apps) else{continue};
+        for entry in entries.flatten(){
+            let path=entry.path();
+            let Some(filename)=path.file_name().and_then(|name|name.to_str()) else{continue};
+            if !filename.starts_with("appmanifest_")||!filename.ends_with(".acf"){continue;}
+            let Ok(text)=fs::read_to_string(&path) else{continue};
+            let Some(id)=vdf_value(&text,"appid").and_then(|id|id.parse::<u32>().ok()).filter(|id|*id>0) else{continue};
+            if !seen.insert(id){continue;}
+            let name=vdf_value(&text,"name").filter(|name|!name.is_empty()).unwrap_or_else(||format!("游戏 {id}"));
+            let icon=local_game_icon(&root,id);
+            games.push(Game{id,name,icon});
+        }
+    }
+    games.sort_by(|a,b|a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.id.cmp(&b.id)));
+    games
+}
+
+fn local_game_icon(root:&std::path::Path,app_id:u32)->Option<std::path::PathBuf>{
+    use std::fs;
+    let caches=[root.join("appcache/librarycache"),root.join("steamapps/librarycache")];
+    for cache in &caches {
+        let app_cache=cache.join(app_id.to_string());
+        let hashed=fs::read_dir(&app_cache).ok().into_iter().flatten().flatten()
+            .map(|entry|entry.path())
+            .filter(|path|path.extension().is_some_and(|ext|ext.eq_ignore_ascii_case("jpg")))
+            .filter(|path|path.file_stem().is_some_and(|stem|{
+                let value=stem.to_string_lossy();
+                value.len()==40&&value.bytes().all(|byte|byte.is_ascii_hexdigit())
+            }))
+            .min();
+        if hashed.is_some(){return hashed;}
+        let names=[
+            format!("{app_id}_icon.jpg"),format!("{app_id}_icon.png"),
+            format!("{app_id}_library_600x900.jpg"),format!("{app_id}_library_600x900.png"),
+            format!("{app_id}_header.jpg"),format!("{app_id}_header.png"),
+        ];
+        if let Some(icon)=names.iter().map(|name|cache.join(name)).find(|path|path.is_file()){
+            return Some(icon);
+        }
+    }
+    None
+}
+
+fn vdf_value(text:&str,key:&str)->Option<String>{
+    text.lines().find_map(|line|{
+        let mut fields=line.split('"');
+        fields.next()?;
+        if fields.next()?!=key{return None;}
+        fields.next()?;
+        fields.next().map(|value|value.replace("\\\"","\"").replace("\\\\","\\"))
+    })
+}
+
+#[cfg(windows)]
+pub(crate) fn steam_install_root()->Option<std::path::PathBuf>{
+    steam_registry_roots().into_iter().chain(steam_process_root()).chain(steam_common_roots())
+        .find(|root|root.join("steamapps").is_dir())
+}
+
+#[cfg(windows)]
+fn steam_registry_roots()->Vec<std::path::PathBuf>{
+    use std::os::windows::ffi::OsStringExt;
+    use windows::{core::w,Win32::System::Registry::{RegGetValueW,HKEY_CURRENT_USER,HKEY_LOCAL_MACHINE,RRF_RT_REG_SZ,RRF_SUBKEY_WOW6432KEY,RRF_SUBKEY_WOW6464KEY}};
+    let mut roots=Vec::new();
+    for hive in [HKEY_CURRENT_USER,HKEY_LOCAL_MACHINE]{
+        for view in [0,RRF_SUBKEY_WOW6432KEY.0,RRF_SUBKEY_WOW6464KEY.0]{
+            for name in [w!("SteamPath"),w!("InstallPath")]{
+                let mut value=[0u16;2048];let mut bytes=(value.len()*2) as u32;
+                let flags=RRF_RT_REG_SZ | windows::Win32::System::Registry::REG_ROUTINE_FLAGS(view);
+                let status=unsafe{RegGetValueW(hive,w!("Software\\Valve\\Steam"),name,flags,None,Some(value.as_mut_ptr().cast()),Some(&mut bytes))};
+                if status.is_ok(){
+                    let end=value.iter().position(|unit|*unit==0).unwrap_or(value.len());
+                    if end>0 {
+                        let root=std::path::PathBuf::from(std::ffi::OsString::from_wide(&value[..end]));
+                        if !roots.contains(&root){roots.push(root);}
+                    }
+                }
+            }
+        }
+    }
+    roots
+}
+
+#[cfg(windows)]
+fn steam_process_root()->Option<std::path::PathBuf>{
+    use std::os::windows::ffi::OsStringExt;
+    use windows::{Win32::{Foundation::CloseHandle,System::{Diagnostics::ToolHelp::{CreateToolhelp32Snapshot,Process32FirstW,Process32NextW,PROCESSENTRY32W,TH32CS_SNAPPROCESS},Threading::{OpenProcess,QueryFullProcessImageNameW,PROCESS_NAME_WIN32,PROCESS_QUERY_LIMITED_INFORMATION}}},core::PWSTR};
+    let snapshot=unsafe{CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0).ok()?};
+    let mut entry:PROCESSENTRY32W=unsafe{std::mem::zeroed()};
+    entry.dwSize=std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut result=None;
+    if unsafe{Process32FirstW(snapshot,&mut entry)}.is_ok(){
+        loop{
+            let end=entry.szExeFile.iter().position(|unit|*unit==0).unwrap_or(entry.szExeFile.len());
+            let name=std::ffi::OsString::from_wide(&entry.szExeFile[..end]);
+            if name.to_string_lossy().eq_ignore_ascii_case("steam.exe"){
+                if let Ok(process)=unsafe{OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,false,entry.th32ProcessID)}{
+                    let mut path=[0u16;32768];let mut length=path.len() as u32;
+                    let image=unsafe{QueryFullProcessImageNameW(process,PROCESS_NAME_WIN32,PWSTR(path.as_mut_ptr()),&mut length)};
+                    let _=unsafe{CloseHandle(process)};
+                    if image.is_ok(){
+                        let executable=std::path::PathBuf::from(std::ffi::OsString::from_wide(&path[..length as usize]));
+                        if let Some(root)=executable.parent().filter(|path|path.join("steamapps").is_dir()){
+                            result=Some(root.to_path_buf());
+                            break;
+                        }
+                    }
+                }
+            }
+            if unsafe{Process32NextW(snapshot,&mut entry)}.is_err(){break;}
+        }
+    }
+    let _=unsafe{CloseHandle(snapshot)};
+    result
+}
+
+#[cfg(windows)]
+fn steam_common_roots()->Vec<std::path::PathBuf>{
+    let mut roots=Vec::new();
+    for variable in ["ProgramFiles(x86)","ProgramFiles","LOCALAPPDATA"]{
+        if let Some(base)=std::env::var_os(variable).map(std::path::PathBuf::from){
+            for relative in if variable=="LOCALAPPDATA" {vec!["Steam","Programs/Steam"]}else{vec!["Steam"]}{
+                let root=base.join(relative);
+                if !roots.contains(&root){roots.push(root);}
+            }
+        }
+    }
+    roots
+}
+
+#[cfg(not(windows))]
+pub(crate) fn steam_install_root()->Option<std::path::PathBuf>{
+    let home=std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+    [home.join(".steam/steam"),home.join(".local/share/Steam")].into_iter().find(|path|path.join("steamapps").is_dir())
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Player {
     pub steamid: String,

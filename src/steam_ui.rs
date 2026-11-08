@@ -16,6 +16,9 @@ pub(crate) struct State {
     watch_input: String,
     pub note: String,
     pub error: bool,
+    pub installed_games: Vec<steam::Game>,
+    library_scan_at: std::time::Instant,
+    library_first: usize,
 }
 impl State {
     pub fn load() -> Self {
@@ -35,6 +38,16 @@ impl State {
             watch_input,
             note: String::new(),
             error: false,
+            installed_games: steam::installed_games(),
+            library_scan_at: std::time::Instant::now(),
+            library_first: 0,
+        }
+    }
+    pub(crate) fn refresh_installed_games(&mut self){
+        if self.library_scan_at.elapsed()>=std::time::Duration::from_secs(60){
+            self.installed_games=steam::installed_games();
+            self.library_scan_at=std::time::Instant::now();
+            self.library_first=self.library_first.min(self.installed_games.len().saturating_sub(6));
         }
     }
     pub fn game(&self) -> Option<&steam::Game> {
@@ -517,18 +530,18 @@ impl App {
 
     pub(crate) fn draw_steam_shortcut(&mut self, c: &Card<'_>, x: f32, y: f32) {
         let badge = self.steam.badge();
-        let icon = badge.and_then(|(_, game)| game.icon.as_deref());
+        let fallback=self.steam.game().or_else(||self.steam.installed_games.first()).or_else(||badge.map(|(_,game)|game));
+        let icon = fallback.and_then(|game| game.icon.as_deref());
         if let Some(texture) = self.steam_images.get(c.ui.ctx(), icon, None) {
             c.painter.image(texture, c.rect(x-9.0,y-9.0,18.0,18.0),
                 egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
         } else {
             crate::extras::device_icon(c, crate::bt::DeviceKind::Gamepad, x-9.0, y-9.0, 18.0);
         }
-        let (id, tip) = match badge {
-            Some((label, game)) if !label.is_empty() => ("steam-current-game", format!("{label} · {}", game.name)),
-            Some((_, game)) => ("steam-current-game", game.name.clone()),
-            None => ("steam-shortcut", "打开 Steam 页面".to_owned()),
-        };
+        let (id, tip) = if let Some(game)=self.steam.game(){("steam-current-game",format!("正在玩 · {}",game.name))}
+            else if let Some(game)=self.steam.installed_games.first(){("steam-shortcut",format!("{} · 打开 Steam 游戏列表",game.name))}
+            else if let Some((_,game))=badge{("steam-shortcut",game.name.clone())}
+            else {("steam-shortcut","打开 Steam 页面".to_owned())};
         if c.hit(x-13.0,y-13.0,26.0,26.0,id).on_hover_text(tip).clicked() { self.show_page(8); }
     }
 
@@ -551,14 +564,11 @@ impl App {
         }
     }
 
-    pub(crate) fn page_steam(&mut self, c: &Card<'_>) {
+    pub(crate) fn page_steam(&mut self, c: &Card<'_>, cmds:&mut Vec<Cmd>) {
         let side = self.side();
         if !side { self.draw_steam_avatar(c); }
-        if let Some((_, game)) = self
-            .steam
-            .badge()
-            .map(|(label, game)| (label, game.clone()))
-        {
+        self.steam.refresh_installed_games();
+        if let Some(game)=self.steam.game().cloned() {
             let icon = self
                 .steam_images
                 .get(c.ui.ctx(), game.icon.as_deref(), None);
@@ -620,6 +630,46 @@ impl App {
                     c.painter.image(texture,c.rect(x,y,30.0,30.0),egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)),Color32::WHITE);
                 }
                 c.hit(x,y-2.0,30.0,34.0,("steam-recent-achievement",index)).on_hover_text(&achievement.name);
+            }
+        } else if !self.steam.installed_games.is_empty() {
+            let games=self.steam.installed_games.clone();
+            let capacity=if side {5}else{6};
+            let first=self.steam.library_first.min(games.len().saturating_sub(capacity));
+            if side {
+                for (row,game) in games.iter().skip(first).take(5).enumerate(){
+                    let y=54.0+row as f32*45.0;
+                    if let Some(icon)=self.steam_images.get(c.ui.ctx(),game.icon.as_deref(),None){
+                        c.painter.image(icon,c.rect(19.0,y+3.0,34.0,34.0),egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)),Color32::WHITE);
+                    }
+                    c.scrolling_title((61.0,y+20.0,78.0),&game.name,11.5,self.t,&format!("steam-installed-title-{}",game.id));
+                    let response=c.hit(15.0,y,126.0,40.0,("steam-installed-game",game.id)).on_hover_text(format!("点击通过 Steam 启动 {}",game.name));
+                    if response.clicked(){cmds.push(Cmd::LaunchSteamGame(game.id));}
+                }
+                if games.len()>5 {
+                    let previous=c.hit(18.0,282.0,38.0,22.0,"steam-library-prev");
+                    let next=c.hit(99.0,282.0,38.0,22.0,"steam-library-next");
+                    c.centered_text(37.0,297.0,"‹",14.0,W::Bold,theme::GRAY,H::Center);
+                    c.centered_text(118.0,297.0,"›",14.0,W::Bold,theme::GRAY,H::Center);
+                    if previous.clicked(){self.steam.library_first=first.saturating_sub(5);}
+                    if next.clicked(){self.steam.library_first=(first+5).min(games.len().saturating_sub(1));}
+                }
+            }else{
+                let shown=games.iter().skip(first).take(6).collect::<Vec<_>>();
+                let cell=58.0;let start=209.5-(shown.len() as f32*cell-8.0)/2.0;
+                for (index,game) in shown.into_iter().enumerate(){
+                    let x=start+index as f32*cell+21.0;
+                    if let Some(icon)=self.steam_images.get(c.ui.ctx(),game.icon.as_deref(),None){
+                        c.painter.image(icon,c.rect(x-21.0,58.0,42.0,42.0),egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)),Color32::WHITE);
+                    }
+                    let response=c.hit(x-24.0,55.0,48.0,48.0,("steam-installed-game",game.id)).on_hover_text(format!("点击通过 Steam 启动 {}",game.name));
+                    if response.clicked(){cmds.push(Cmd::LaunchSteamGame(game.id));}
+                }
+                if games.len()>6{
+                    if c.hit(373.0,51.0,22.0,54.0,"steam-library-next").clicked(){self.steam.library_first=(first+capacity).min(games.len().saturating_sub(capacity));}
+                    if c.hit(24.0,51.0,22.0,54.0,"steam-library-prev").clicked(){self.steam.library_first=first.saturating_sub(capacity);}
+                    c.centered_text(35.0,78.0,"‹",16.0,W::Bold,theme::GRAY,H::Center);
+                    c.centered_text(384.0,78.0,"›",16.0,W::Bold,theme::GRAY,H::Center);
+                }
             }
         } else if side {
             crate::extras::device_icon(c, crate::bt::DeviceKind::Gamepad, 62.0, 22.0, 32.0);

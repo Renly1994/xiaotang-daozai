@@ -50,7 +50,7 @@ fn pill_shadow(painter:&egui::Painter,rect:Rect,radius:f32,strength:f32){
         painter.rect_filled(r,radius+grow*0.8,Color32::from_black_alpha((255.0*a*strength) as u8));
     }
 }
-pub(crate) const PAGE_NAMES: [&str; 9] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "Steam"];
+pub(crate) const PAGE_NAMES: [&str; 10] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "Steam", "剪贴板"];
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
@@ -153,6 +153,7 @@ pub enum Cmd {
     Open(PathBuf),
     ViewMessenger(Unread),
     OpenUrl(String),
+    LaunchSteamGame(u32),
     /// 需要键盘输入：外壳应让窗口可激活并取得焦点。
     Focus,
     Reveal(PathBuf),
@@ -379,6 +380,8 @@ pub struct FrameOut {
     pub glass: Option<Vec<GlassShape>>,
     /// 鼠标命中区（相对 `win` 左上角），区域外点击穿透到下层窗口。
     pub hit: Rect,
+    /// 临时让开或全局隐藏时，要求原生窗口把鼠标事件交给其它进程的窗口。
+    pub mouse_passthrough: bool,
     pub notice_hit: Option<Rect>,
     /// 文件拖入感应区；独立于普通鼠标命中区。
     pub file_drop_zone: Option<Rect>,
@@ -599,6 +602,12 @@ dock_view! { dock, width, height;
     h: Spring = Spring::new(height, CLOSE.0, CLOSE.1),
     open: bool = false,
     hover_since: Option<f64> = None,
+    hover_hide_since: Option<f64> = None,
+    hover_hide_active: bool = false,
+    hover_hide_restoring: bool = false,
+    hover_hide_bounds: Option<Rect> = None,
+    hover_hide_cursor: Option<Pos2> = None,
+    hover_hide_ring: f32 = 0.0,
     hover_page_target: Option<usize> = None,
     hover_page_since: Option<f64> = None,
     leave_since: Option<f64> = None,
@@ -612,7 +621,7 @@ dock_view! { dock, width, height;
     page_dir: f32 = 1.0,
     page_t0: f64 = -10.0,
     slide: Spring = Spring::new(0.0, 260.0, 0.92),
-    dots: [Spring; 9] = [Spring::new(4.0, 380.0, 0.86); 9],
+    dots: [Spring; 10] = [Spring::new(4.0, 380.0, 0.86); 10],
     wheel_delta: f32 = 0.0,
     wheel_at: f64 = -1.0,
     wheel_page_at: f64 = -1.0,
@@ -620,7 +629,6 @@ dock_view! { dock, width, height;
     drag_hot: bool = false,
     drag_a: f32 = 0.0,
     drag_saved: Option<usize> = None,
-    shelf_tab: usize = 0,
     shelf_menu_rect: Option<Rect> = None,
     confirm_clear: Option<f64> = None,
     subpage: Option<usize> = None,
@@ -668,6 +676,12 @@ pub struct App {
     pub(crate) h: Spring,
     pub(crate) open: bool,
     hover_since: Option<f64>,
+    hover_hide_since: Option<f64>,
+    hover_hide_active: bool,
+    hover_hide_restoring: bool,
+    hover_hide_bounds: Option<Rect>,
+    hover_hide_cursor: Option<Pos2>,
+    hover_hide_ring: f32,
     hover_page_target: Option<usize>,
     hover_page_since: Option<f64>,
     leave_since: Option<f64>,
@@ -684,7 +698,7 @@ pub struct App {
     page_dir: f32,
     page_t0: f64,
     slide: Spring,
-    dots: [Spring; 9],
+    dots: [Spring; 10],
     wheel_delta: f32,
     wheel_at: f64,
     wheel_page_at: f64,
@@ -704,7 +718,6 @@ pub struct App {
     pub(crate) avoidance: crate::avoidance::Picker,
     pub(crate) confirm_clear: Option<f64>,
     /// 置物架页的两个分栏：0 = 文件，1 = 剪贴板。
-    pub(crate) shelf_tab: usize,
     pub clipboard: crate::clipboard::Shared,
     pub(crate) clip_first: usize,
     pub(crate) clip_confirm_clear: Option<f64>,
@@ -822,7 +835,7 @@ impl App {
         let settings = model::Settings::load();
         let clipboard_on = settings.clipboard_history;
         let initial_dock = settings.dock;
-        let (bw, bh) = match (initial_dock.is_side(), settings.minimal) {
+        let (bw, bh) = match (initial_dock.is_side(), settings.minimal_on(initial_dock)) {
             (true, true) => (BAR_H_MIN, BAR_W_MIN),
             (true, false) => (crate::side_dock::SIDE_BAR_W, 60.0),
             (false, true) => (BAR_W_MIN, BAR_H_MIN),
@@ -830,7 +843,7 @@ impl App {
         };
         let focus_seconds=settings.focus_minutes as f32*60.0;
         let initial_lyrics=settings.lyrics_enabled;
-        let initial_page=settings.page_order.iter().copied().find(|page|settings.visible_pages[*page]).unwrap_or(0);
+        let initial_page=settings.page_order.iter().copied().find(|page|settings.page_visible(*page)).unwrap_or(0);
         Self {
             opts,
             settings,
@@ -844,6 +857,12 @@ impl App {
             h: Spring::new(bh, CLOSE.0, CLOSE.1),
             open: false,
             hover_since: None,
+            hover_hide_since: None,
+            hover_hide_active: false,
+            hover_hide_restoring: false,
+            hover_hide_bounds: None,
+            hover_hide_cursor: None,
+            hover_hide_ring: 0.0,
             hover_page_target: None,
             hover_page_since: None,
             leave_since: None,
@@ -874,7 +893,6 @@ impl App {
             icons: Default::default(),
             avoidance: Default::default(),
             confirm_clear: None,
-            shelf_tab: 0,
             clipboard: crate::clipboard::Shared::new(clipboard_on),
             clip_first: 0,
             clip_confirm_clear: None,
@@ -1495,8 +1513,8 @@ impl App {
     }
 
     pub fn show_page(&mut self,page:usize) {
-        if !self.settings.visible_pages[page] {
-            self.settings_tab=[1,2,3,5,4,7,11,8, 12][page];
+        if !self.settings.page_visible(page) {
+            self.settings_tab=[1,2,3,5,4,7,11,8,12,5][page];
             self.open_settings();
             return;
         }
@@ -1535,11 +1553,11 @@ impl App {
     }
 
     pub(crate) fn set_page_visible(&mut self,page:usize,visible:bool) {
-        if !visible && self.settings.visible_pages.iter().filter(|enabled|**enabled).count()==1
-            && self.settings.visible_pages[page] { return; }
-        self.settings.visible_pages[page]=visible;
-        if !self.settings.visible_pages[self.page] {
-            if let Some(first)=self.settings.page_order.iter().copied().find(|page|self.settings.visible_pages[*page]) { self.go(first,1.0); }
+        let count=self.settings.visible_pages.iter().filter(|enabled|**enabled).count()+usize::from(self.settings.clipboard_visible);
+        if !visible && count==1 && self.settings.page_visible(page) { return; }
+        if page==9 {self.settings.clipboard_visible=visible;} else {self.settings.visible_pages[page]=visible;}
+        if !self.settings.page_visible(self.page) {
+            if let Some(first)=self.settings.page_order.iter().copied().find(|page|self.settings.page_visible(*page)) { self.go(first,1.0); }
         }
     }
 
@@ -1686,8 +1704,11 @@ impl App {
         self.island_lyric_layout=Some(galley);
     }
 
-    pub(crate) fn effective_minimal(&self)->bool {self.settings.minimal || self.browser_minimal_active}
-    pub(crate) fn pet_enabled(&self)->bool {self.settings.pet && !self.effective_minimal() && !self.side()}
+    pub(crate) fn effective_minimal(&self)->bool {
+        self.settings.minimal || self.settings.minimal_on(self.dock()) || self.browser_minimal_active
+            || self.hover_hide_active && !self.hover_hide_restoring
+    }
+    pub(crate) fn pet_enabled(&self)->bool {self.settings.pet && !self.settings.minimal && !self.settings.minimal_on(self.settings.dock) && !self.side()}
     pub(crate) fn pet_space(&self)->f32 {if self.pet_enabled(){44.0}else{0.0}}
     fn lyric_focus_space(&self)->f32 {if self.pomo.running && self.page_on_dock(1){crate::focus_bar::LYRIC_WIDTH+10.0}else{0.0}}
     fn lyric_bar_width(&self)->f32 {LYRIC_BAR_W+if self.pet_enabled(){48.0}else{0.0}+self.lyric_focus_space()}
@@ -1698,22 +1719,36 @@ impl App {
         (width,height)
     }
     pub fn set_pet(&mut self,enabled:bool) {
-        self.settings.pet=enabled;if enabled {self.settings.minimal=false;}self.settings.save();
+        self.settings.pet=enabled;if enabled {self.settings.set_minimal_on(self.settings.dock,false);}self.settings.save();
     }
     pub fn set_minimal(&mut self,enabled:bool) {
-        self.settings.minimal=enabled;if enabled {self.settings.pet=false;}self.settings.save();
+        let dock=self.dock();
+        self.settings.set_minimal_on(dock,enabled);
+        if enabled && dock==self.settings.dock {self.settings.pet=false;}
+        self.settings.save();
+    }
+    pub fn set_minimal_all(&mut self,enabled:bool){
+        for dock in model::Dock::ALL {self.settings.set_minimal_on(dock,enabled);}
+        if enabled {self.settings.pet=false;}
+        self.settings.save();
     }
     fn base_size(&self) -> (f32, f32) {
+        // 临时让开时先收至极简形态；恢复过程中保留当前形态标记，
+        // 但让弹簧连续地回到常规胶囊尺寸，避免顶部岛体切换基准时跳动。
+        if self.hover_hide_active && !self.hover_hide_restoring {
+            return if self.side() { (BAR_H_MIN, BAR_W_MIN) } else { (BAR_W_MIN, BAR_H_MIN) };
+        }
+        let configured_minimal=self.settings.minimal || self.settings.minimal_on(self.dock()) || self.browser_minimal_active;
         if !self.compact_notices()&&!self.open {
             if let Some(a)=&self.notice {let (width,height)=self.notice_size(a);return (width+self.pet_space(),height);}
         }
         if self.side() {
             // 左右停靠：竖向胶囊（通知仍是贴边滑出的横向卡片，见上）。
-            return self.side_base_size(self.effective_minimal()&&self.t>=self.notification_bell_until&&(self.browser_minimal_active||self.pending_messengers.is_empty()));
+            return self.side_base_size(configured_minimal&&self.t>=self.notification_bell_until&&(self.browser_minimal_active||self.pending_messengers.is_empty()));
         }
         if self.island_lyrics_active() {
             (self.lyric_bar_width(),BAR_H)
-        } else if self.effective_minimal()&&self.t>=self.notification_bell_until {
+        } else if configured_minimal&&self.t>=self.notification_bell_until {
             (BAR_W_MIN, BAR_H_MIN)
         } else {
             (self.resident.target.width.min(WIN_W-32.0), BAR_H)
@@ -1732,7 +1767,27 @@ impl App {
     }
 
     pub(crate) fn expanded_width(&self) -> f32 {
-        self.settings.dock_size(self.dock()).0
+        let dock=self.dock();
+        let (maximum,_)=self.settings.dock_size(dock);
+        if dock.is_side() || self.subpage==Some(self.page) {return maximum.min(PW);}
+        match self.page {
+            3 => {
+                // 置物架先扩列；横向达到用户上限后，再用高度增加行数。
+                let columns=(self.shelf.items.len().max(1)).min(Self::shelf_columns_for_width(maximum));
+                (72.0+columns as f32*68.0).max(PW).min(maximum)
+            }
+            5 => self.mail_content_width(maximum),
+            _ => PW,
+        }
+    }
+
+    fn mail_content_width(&self, maximum:f32)->f32 {
+        let text_width=|text:&str|text.chars().map(|ch|if ch.is_ascii(){5.7}else{10.5}).sum::<f32>();
+        let widest=self.mail.recent.iter().map(|item|text_width(&item.subject)).max_by(f32::total_cmp).unwrap_or(0.0);
+        let detail_width=self.mail.open_uid.as_ref().and_then(|(account,uid)|self.mail.recent.iter().find(|item|item.uid==*uid&&item.account.eq_ignore_ascii_case(account)))
+            .map(|item|text_width(&item.subject).max(text_width(&item.summary.chars().take(96).collect::<String>()))).unwrap_or(0.0);
+        // 默认宽度大致能放下 38 个英文字母的主题；更长的邮件才逐步占用额外宽度。
+        (PW.max(210.0+widest.max(detail_width))).min(maximum)
     }
 
     pub(crate) fn fold_side_player(&mut self) {
@@ -1758,10 +1813,40 @@ impl App {
             let available = self.screen.map(|screen| (screen.height()-48.0).max(120.0));
             return available.unwrap_or(crate::side_dock::SIDE_PLAYER_H).min(crate::side_dock::SIDE_PLAYER_H);
         }
-        let height = self.settings.dock_size(self.dock()).1;
-        if self.side() { return height; }
-        let required = if self.calendar.draft.is_some(){CALENDAR_EDITOR_H}else if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH};
-        height.max(required)
+        let (_,maximum)=self.settings.dock_size(self.dock());
+        if self.side() { return maximum; }
+        if self.subpage==Some(self.page) {return PH;}
+        match self.page {
+            3 => {
+                let columns=Self::shelf_columns_for_width(self.expanded_width());
+                let count=self.shelf.items.len().max(1);
+                let rows=count.div_ceil(columns).min(Self::shelf_rows_for_height(maximum)).max(1);
+                let required=match rows {1=>PH,2=>272.0,_=>350.0};
+                required.min(maximum)
+            }
+            5 => {
+                // 邮件正文的默认可用视口高于普通页面；用户设置在此基础上限制额外扩展。
+                let mail_maximum=maximum.max(236.0);
+                let needed=if let Some((account,uid))=&self.mail.open_uid {
+                    self.mail.recent.iter().find(|item|item.uid==*uid&&item.account.eq_ignore_ascii_case(account)).map(|item|{
+                        let width=(self.expanded_width()-92.0).max(180.0);
+                        let chars_per_line=(width/6.0).floor().max(20.0) as usize;
+                        let lines=item.summary.chars().count().div_ceil(chars_per_line).max(1);
+                        let content_lines=lines.saturating_add(item.links.len());
+                        if content_lines>6 {mail_maximum}else{236.0}
+                    }).unwrap_or(236.0)
+                } else {
+                    let row=if self.visible_mail_code().is_some(){34.0}else{21.5};
+                    let visible=((PH-54.0)/row).floor().max(1.0) as usize;
+                    if self.mail.recent.len()>visible {maximum}else{PH}
+                };
+                PH.max(needed.min(mail_maximum))
+            }
+            _ => {
+                let required=if self.calendar.draft.is_some(){CALENDAR_EDITOR_H}else if self.page==CALENDAR_PAGE {CALENDAR_H}else{PH};
+                required
+            }
+        }
     }
 
     // ---------------------------------------------------------------
@@ -1828,9 +1913,6 @@ impl App {
                 self.go(page, 1.0);
             }
         }
-        if !self.settings.shelf_tab_on(self.shelf_tab, self.dock()) {
-            self.shelf_tab = usize::from(!self.settings.shelf_tab_on(0, self.dock()));
-        }
         if self.view_dock.is_none() { self.quota_tick(); }
         self.current_hour=env.hour();
         self.system_idle=env.idle_seconds;
@@ -1840,6 +1922,12 @@ impl App {
         if self.dock() != self.last_dock {
             self.last_dock = self.dock();
             self.side_player_folded = false;
+            self.hover_hide_since=None;
+            self.hover_hide_active=false;
+            self.hover_hide_restoring=false;
+            self.hover_hide_bounds=None;
+            self.hover_hide_cursor=None;
+            self.hover_hide_ring=0.0;
             let (width, height) = self.base_size();
             self.w.snap(width);
             self.h.snap(height);
@@ -1870,6 +1958,7 @@ impl App {
             self.tick(env, dt, elapsed);
             self.sync_device(env);
             self.update_media(env,&ctx);
+            self.steam.refresh_installed_games();
             if self.opts.fetch_lyrics { self.poll_lyrics(); }
         }
         self.tick_alerts();
@@ -1884,8 +1973,8 @@ impl App {
         if self.compact_notices(){self.notice_width.step(dt);}else{self.notice_width.snap(0.0);self.notice_details=false;}
         let bell=self.t<self.notification_bell_until&&!self.compact_notices();
         self.resident_power=(env.battery,env.charging);
-        let mut pinned=self.settings.resident_pages;
-        for (page,on) in pinned.iter_mut().enumerate(){*on &= self.page_on_dock(page);}
+        let mut pinned=[false;10];
+        for (page,on) in pinned.iter_mut().enumerate(){*on=self.settings.page_resident(page)&&self.page_on_dock(page);}
         let focus_width=if self.pomo.running {crate::focus_bar::WIDTH}else{20.0};
         let quota_on = self.page_on_dock(6);
         let quotas = if quota_on { self.quota_bar_indices().len().max(usize::from(pinned[6])) } else { 0 };
@@ -1895,7 +1984,7 @@ impl App {
             self.page_on_dock(1) && (self.pomo.running || pinned[1]),
             bell, self.pet_enabled(), focus_width,
         );
-        layout.add_pages(pinned,self.page_on_dock(8)&&self.steam.badge().is_some());
+        layout.add_pages(pinned,self.page_on_dock(8)&&(self.steam.badge().is_some()||!self.steam.installed_games.is_empty()));
         if !self.clock_on_dock() { layout.remove_clock(); }
         layout.reorder(&self.settings.resident_order);
         if quota_on {
@@ -1920,7 +2009,7 @@ impl App {
         let dock = self.dock();
 
         // ---------- 输入：拖放 ----------
-        let shelf_available = self.page_on_dock(3) && self.settings.shelf_tab_on(0, dock);
+        let shelf_available = self.page_on_dock(3);
         let (hovering_files, dropped) = ctx.input(|i| {
             (
                 shelf_available && !i.raw.hovered_files.is_empty(),
@@ -1928,7 +2017,6 @@ impl App {
             )
         });
         if !dropped.is_empty() && shelf_available {
-            self.shelf_tab = 0;
             self.on_drop(dropped);
             self.show_page(3);
         } else if hovering_files && !self.drag_hot {
@@ -1951,6 +2039,55 @@ impl App {
         let hit = if side { self.side_hit_rect(win, p_prev) } else { self.hit_rect(cx, top, p_prev) };
         let previous_menu = self.shelf_menu_rect.take();
         let inside = env.cursor.is_some_and(|c| hit.contains(c) || previous_menu.is_some_and(|r| r.contains(c)));
+        let escape_blocked=!self.settings.hover_hide_enabled || self.settings.minimal || self.settings.minimal_on(self.dock())
+            || self.browser_minimal_active || self.notice.is_some()
+            || self.t<self.notification_bell_until || self.is_editing() || self.drag_hot || self.dock_dragging
+            || self.toast.is_some() || self.open;
+        if self.hover_hide_active {
+            let left_zone=!self.hover_hide_restoring && env.cursor.is_some_and(|cursor|self.hover_hide_bounds.is_some_and(|bounds|!bounds.contains(cursor)));
+            if !self.hover_hide_restoring && (escape_blocked || left_zone) {
+                self.hover_hide_restoring=true;
+                self.hover_hide_bounds=None;
+                self.hover_hide_since=None;
+                self.hover_hide_cursor=None;
+                self.hover_lock=true;
+            }
+        }
+        let ring_panel=self.island_rect(win,self.w.pos.max(1.0),self.h.pos.max(1.0));
+        let escape_range=self.settings.hover_hide_range_px.clamp(8,64) as f32;
+        let near_escape=if !self.hover_hide_active && !escape_blocked && !self.open && p_prev<0.04
+            && !ctx.input(|i|i.pointer.any_down()) {
+            env.cursor.is_some_and(|cursor|{
+                let edge_hit=if side {ring_panel.expand2(Vec2::new(5.0,7.0))}else{hit};
+                ring_panel.expand(escape_range).contains(cursor) && !edge_hit.contains(cursor)
+            })
+        }else{false};
+        if near_escape {
+            if let Some(cursor)=env.cursor {
+                let moved=self.hover_hide_cursor.is_some_and(|last|last.distance(cursor)>2.0);
+                if self.hover_hide_since.is_none()||moved {self.hover_hide_since=Some(env.t);}
+                self.hover_hide_cursor=Some(cursor);
+                let delay=self.settings.hover_hide_delay_ms as f64/1000.0;
+                if self.hover_hide_since.is_some_and(|since|env.t-since>=delay) {
+                    self.hover_hide_active=true;
+                    self.hover_hide_restoring=false;
+                    self.hover_hide_bounds=Some(ring_panel.expand(escape_range+8.0));
+                    self.hover_hide_since=None;
+                    self.hover_hide_cursor=None;
+                    self.hover_since=None;
+                    self.hover_page_since=None;
+                    self.hover_page_target=None;
+                    self.open=false;
+                    self.leave_since=None;
+                }
+            }
+        }else if !self.hover_hide_active {
+            self.hover_hide_since=None;
+            self.hover_hide_cursor=None;
+        }
+        let ring_target=near_escape&&!self.hover_hide_active;
+        let animations=ctx.style().animation_time>0.0&&bar::animations_enabled();
+        self.hover_hide_ring=if animations {anim::approach(self.hover_hide_ring,if ring_target{1.0}else{0.0},16.0,dt)}else{if ring_target{1.0}else{0.0}};
         if !self.open && p_prev < 0.1 && inside && !self.hover_lock && self.notice.is_none() && !self.is_editing() {
             if let Some(cursor) = env.cursor {
                 let layout = self.resident.current();
@@ -1959,6 +2096,7 @@ impl App {
                         (bar::FOCUS, 1, if self.pomo.running {24.0}else{11.0}),
                         (bar::WATER, 2, 11.0),
                         (bar::SHELF, 3, 11.0),
+                        (bar::CLIPBOARD, 9, 11.0),
                         (bar::TODO, 4, 11.0),
                         (bar::MAIL, 5, 11.0),
                         (bar::QUOTA, 6, 15.0),
@@ -2024,20 +2162,22 @@ impl App {
                 else if let Some(next) = self.wheel_step(scroll) {
                     let calendar_max=if self.page==CALENDAR_PAGE {self.calendar_scroll_max(env)}else{0};
                         let calendar_body=self.page==CALENDAR_PAGE && Rect::from_min_max(Pos2::new(163.0,52.0),Pos2::new(378.0,208.0)).contains(cursor);
-                        let clipboard_tab=self.page==3 && self.shelf_tab==1;
+                        let clipboard_tab=self.page==9;
+                        let shelf_body=self.page==3&&self.shelf_list_bounds().contains(cursor);
+                        let shelf_step=self.shelf_page_capacity().max(1);
                         let list=match self.page {
                             CALENDAR_PAGE if calendar_body=>Some((&mut self.calendar.view.first,calendar_max)),
                             4 if Rect::from_min_max(Pos2::new(196.0,31.0),Pos2::new(377.0,124.0)).contains(cursor)
                                 =>Some((&mut self.todo_first,self.todos.items.len().saturating_sub(3))),
-                            3 if clipboard_tab
+                            9 if clipboard_tab
                                 =>Some((&mut self.clip_first,self.clipboard.lock().items.len().saturating_sub(crate::pages::CLIP_ROWS))),
-                            3 if Rect::from_min_max(Pos2::new(36.0,28.0),Pos2::new(383.0,128.0)).contains(cursor)
-                                =>Some((&mut self.shelf_first,self.shelf.items.len().saturating_sub(5))),
+                            3 if shelf_body=>Some((&mut self.shelf_first,self.shelf.items.len().saturating_sub(1))),
                             _=>None,
                         };
-                        let content_scrolls=(clipboard_tab || calendar_body) && list.as_ref().is_some_and(|(_,max)|*max>0);
+                        let content_scrolls=(clipboard_tab || calendar_body || shelf_body) && list.as_ref().is_some_and(|(_,max)|*max>0);
                         let scrolled=list.is_some_and(|(first,max)|{
-                            let target=if next {(*first+1).min(max)}else{first.saturating_sub(1)};
+                            let step=if self.page==3 {shelf_step}else{1};
+                            let target=if next {first.saturating_add(step).min(max)}else{first.saturating_sub(step)};
                             let changed=target!=*first;*first=target;changed
                         });
                         // 列表溢出时滚动内容；未溢出时滚轮切换功能页。
@@ -2048,12 +2188,20 @@ impl App {
                 }
             }
         } else {self.wheel_delta=0.0;}
-        let want = self.dock_dragging || !self.side_player_is_folded() &&
+        let want = !self.hover_hide_active && (self.dock_dragging || !self.side_player_is_folded() &&
             ((inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open))
             || self.open && on_notice || (self.open && self.t<self.forced_open_until)
-            || self.drag_hot || (self.is_editing() && self.open));
+            || self.drag_hot || (self.is_editing() && self.open)));
         self.morph(want, inside, env.t, dt);
         self.update_pet(env, cx);
+        if self.hover_hide_active && self.hover_hide_restoring {
+            let (bw,bh)=self.base_size();
+            if self.w.settled(bw) && self.h.settled(bh) {
+                self.hover_hide_active=false;
+                self.hover_hide_restoring=false;
+                self.hover_hide_bounds=None;
+            }
+        }
 
         // ---------- 绘制 ----------
         let p = self.progress();
@@ -2067,7 +2215,8 @@ impl App {
         let feather = 1.0 / ctx.pixels_per_point();
         let body=messenger_rect.filter(|_|outside_badge.is_none()).map_or(panel,|badge|panel.union(badge));
         let minimal_pill = self.effective_minimal() && !self.side_player_is_folded()
-            && !self.island_lyrics_available() && self.notice.is_none() && self.t>=self.notification_bell_until && pc < 0.02;
+            && (!self.island_lyrics_available() || self.hover_hide_active && !self.hover_hide_restoring)
+            && self.notice.is_none() && self.t>=self.notification_bell_until && pc < 0.02;
         let flare = if minimal_pill || pill { 0.0 } else { lerp(5.0, FLARE, pc) };
         let k = (w / if self.is_side_player() { 220.0 } else { PW }).clamp(0.3, 1.1);
         let thickness = if side { crate::side_dock::SIDE_BAR_W } else { BAR_H };
@@ -2109,6 +2258,9 @@ impl App {
         }
         self.paint_body(&painter, body, flare, flare_h, radius, feather);
         if let Some(r)=notice_shape {self.paint_body(&painter,r,5.0,8.0,12.5,feather);}
+        if self.hover_hide_ring>0.004 && !self.hover_hide_active {
+            self.paint_hover_hide_ring(&painter,panel,flare,flare_h,radius,pill);
+        }
         let content_from=crate::skin_paint::shape_count(&ctx,layer);
 
         // 内容只随形体「揭开」：不缩放，按面板裁剪，到 55% 才开始淡入
@@ -2225,6 +2377,8 @@ impl App {
         if !side && self.calendar.draft.is_some() && reveal>0.9 {self.calendar_editor_inputs(ui,origin,&mut cmds);}
 
         // ---------- 输出 ----------
+        let hover_hide_settled=self.hover_hide_active && !self.hover_hide_restoring
+            && self.w.settled(self.base_size().0) && self.h.settled(self.base_size().1);
         let rel = |r: Rect| r.translate(-win.min.to_vec2());
         let mut region = if side {
             // 侧边：面板从边缘滑出，区域包含肩部（沿边缘上下）与外侧阴影，并一直延伸到屏幕边缘。
@@ -2268,6 +2422,8 @@ impl App {
                 }
             }
         });
+        // 自动让开时始终保留极简岛体的绘制轮廓；鼠标穿透单独开启，
+        // 这样用户可以操作岛体后方内容，同时仍能看见极简岛体。
         // 毛玻璃：窗口区域只取岛体与浮层的真实轮廓，系统模糊不会溢出到透明画布上。
         let glass_region=(glass_skin && self.settings.glass_blur || env.opaque_surface).then(||{
             let outline=|r:Rect,flare:f32,flare_h:f32,radius:f32| if pill {GlassShape::Round(rel(r),radius.min(r.height().min(r.width())*0.5))}
@@ -2283,6 +2439,9 @@ impl App {
             shapes.extend(tooltips.iter().map(|r|GlassShape::Round(rel(*r),6.0)));
             shapes
         });
+        let hover_hide_animating=self.hover_hide_since.is_some()
+            || (self.hover_hide_ring>0.002&&self.hover_hide_ring<0.998)
+            || self.hover_hide_active&&!hover_hide_settled;
         let transitioning = self.dock_dragging || !self.w.settled(self.expanded_width())
             || !self.h.settled(self.expanded_height())
             || self.page_e() < 0.7
@@ -2304,16 +2463,19 @@ impl App {
         let ambient=self.settings.skin==model::Skin::Fluid && self.fluid.animating() || self.pomo.running && (self.open && self.page==1 || !self.open && !minimal_pill && self.notice.is_none() && bar::animations_enabled())
             || self.media.playing && (self.open && self.page==0 || !self.open && !minimal_pill && self.notice.is_none() && self.media.is_music())
             || self.notice.as_ref().is_some_and(|notice|notice.meeting.is_some());
-        let animating=transitioning || ambient || pet_visible && self.pet.state!=PetState::Sleeping;
+        let animating=transitioning || ambient || pet_visible && self.pet.state!=PetState::Sleeping || hover_hide_animating;
         // 交互形变保持 60 帧，媒体 30 帧；小表情 20 帧，睡眠 10 帧，静态界面每秒核对提醒。
-        let repaint_after=std::time::Duration::from_secs_f64(if transitioning{1.0/60.0}else if ambient{1.0/30.0}else if pet_visible{if self.pet.state==PetState::Sleeping{0.1}else{0.05}}else{1.0});
+        let repaint_after=std::time::Duration::from_secs_f64(if transitioning||hover_hide_animating{1.0/60.0}
+            else if self.settings.hover_hide_enabled||self.hover_hide_active{0.05}
+            else if ambient{1.0/30.0}else if pet_visible{if self.pet.state==PetState::Sleeping{0.1}else{0.05}}else{1.0});
         cmds.append(&mut self.pending);
         FrameOut {
             region: rel(floating_toast.into_iter().chain(self.shelf_menu_rect.map(|r|r.union(r + ctx.style().visuals.popup_shadow.margin()).expand(1.0 / ctx.pixels_per_point()))).fold(region,Rect::union).intersect(ui.max_rect())),
             glass: glass_region,
-            hit: rel(if side {self.side_hit_rect(win,self.progress())} else {self.hit_rect(cx, top, self.progress())}),
-            notice_hit:notice_shape.into_iter().chain(notice_details).chain(messenger_rect).chain(self.shelf_menu_rect).reduce(|a,b|a.union(b)).map(rel),
-            file_drop_zone:shelf_available.then(||rel(if side {self.island_rect(win,self.expanded_width(),self.expanded_height())} else {Rect::from_min_size(Pos2::new(cx-PW/2.0,top),Vec2::new(PW,96.0))})),
+            hit: if self.hover_hide_active {Rect::NOTHING}else{rel(if side {self.side_hit_rect(win,self.progress())} else {self.hit_rect(cx, top, self.progress())})},
+            mouse_passthrough:self.hover_hide_active,
+            notice_hit:if self.hover_hide_active {None}else{notice_shape.into_iter().chain(notice_details).chain(messenger_rect).chain(self.shelf_menu_rect).reduce(|a,b|a.union(b)).map(rel)},
+            file_drop_zone:(!self.hover_hide_active&&shelf_available).then(||rel(if side {self.island_rect(win,self.expanded_width(),self.expanded_height())} else {Rect::from_min_size(Pos2::new(cx-self.expanded_width()/2.0,top),Vec2::new(self.expanded_width(),96.0))})),
             expanded: self.open,
             editing: self.is_editing(),
             animating,
@@ -2538,6 +2700,27 @@ impl App {
         Color32::from_white_alpha((255.0*strength).round() as u8)
     }
 
+    /// 鼠标靠近时沿当前岛体皮肤描一圈细边；绘制在岛体内部，透明窗口不会扩大遮挡范围。
+    fn paint_hover_hide_ring(&self,painter:&egui::Painter,panel:Rect,flare:f32,flare_h:f32,radius:f32,pill:bool){
+        let alpha=(self.hover_hide_ring.clamp(0.0,1.0)*150.0).round() as u8;
+        let color=match self.settings.skin {
+            model::Skin::Cream=>{let [r,g,b]=crate::skin_paint::CREAM.ink;Color32::from_rgba_unmultiplied(r,g,b,alpha)}
+            model::Skin::GlassLight=>{let [r,g,b]=crate::skin_paint::GLASS_LIGHT.ink;Color32::from_rgba_unmultiplied(r,g,b,alpha)}
+            model::Skin::GlassDark=>Color32::from_white_alpha(alpha),
+            model::Skin::Classic|model::Skin::Fluid=>Color32::from_white_alpha(alpha),
+        };
+        let stroke=egui::Stroke::new(1.15_f32,color);
+        let edge=panel.shrink(1.25);
+        if edge.width()<=2.0||edge.height()<=2.0{return;}
+        if pill {
+            painter.rect_stroke(edge,(radius-1.25).max(0.0),stroke,egui::StrokeKind::Inside);
+        }else if self.side(){
+            painter.add(egui::Shape::line(shape::outline_docked(edge,self.dock(),flare,flare_h,(radius-1.25).max(0.0)),stroke));
+        }else{
+            painter.add(egui::Shape::line(shape::outline(edge,flare,flare_h,(radius-1.25).max(0.0)),stroke));
+        }
+    }
+
     /// 绘制岛体（或通知胶囊）的本体：经典皮肤为纯黑；毛玻璃为着色底 + 顶部柔光 + 边缘高光。
     fn paint_body(&self,painter:&egui::Painter,rect:Rect,flare:f32,flare_h:f32,radius:f32,feather:f32){
         let skin=self.settings.skin;
@@ -2726,8 +2909,8 @@ impl App {
         // 顶栏终点布局：[电池][日期][时钟] 作为一组整体居中
         // 其他页面保留日期，Steam 页面才在这个位置显示当前游戏状态。
         let header = if self.page==8 {
-            self.steam.badge().map(|(label,game)|base.fit(
-                &if label.is_empty(){game.name.clone()}else{format!("{label} · {}",game.name)},
+            self.steam.game().map(|game|base.fit(
+                &format!("正在玩 · {}",game.name),
                 size::DATE,W::Regular,160.0,
             )).unwrap_or_else(||env.date.clone())
         } else {env.date.clone()};
@@ -2800,19 +2983,20 @@ impl App {
         }
         if compact_alpha>0.004 {
             let c=base.faded(compact_alpha);let c=if compact_alpha<0.8{c.ghost()}else{c};
-            if self.settings.resident_pages[1] && !self.pomo.running {
+            if self.settings.page_resident(1) && !self.pomo.running {
                 if let Some(x)=layout.x[bar::FOCUS]{let x=local_cx+x;crate::focus_bar::shortcut(&c,x,15.0);if c.hit(x-13.0,2.0,26.0,26.0,"focus-shortcut").on_hover_text("打开番茄专注").clicked(){self.show_page(1);}}
             }
-            if self.settings.resident_pages[6] && self.quota_bar_indices().is_empty() {
+            if self.settings.page_resident(6) && self.quota_bar_indices().is_empty() {
                 if let Some(x)=layout.x[bar::QUOTA]{let x=local_cx+x;c.circle(x,15.0,10.0,Color32::from_rgb(44,78,58));paint::target(&c,x,15.0,theme::SOFT_GREEN);if c.hit(x-13.0,2.0,26.0,26.0,"quota-shortcut").on_hover_text("打开 AI 额度").clicked(){self.show_page(6);}}
             }
             for (slot,page) in [
                 (bar::WATER,2),
                 (bar::SHELF,3),
+                (bar::CLIPBOARD,9),
                 (bar::TODO,4),
                 (bar::MAIL,5),
             ] {
-                if let Some(x)=layout.x[slot]{let x=local_cx+x;match slot{bar::WATER=>paint::resident_water(&c,x,15.0),bar::SHELF=>paint::resident_shelf(&c,x,15.0),bar::TODO=>paint::resident_todo(&c,x,15.0),bar::MAIL=>paint::resident_mail(&c,x,15.0),_=>{}}if c.hit(x-11.0,3.0,22.0,24.0,("page-shortcut",page)).on_hover_text(PAGE_NAMES[page]).clicked(){self.show_page(page);}}
+                if let Some(x)=layout.x[slot]{let x=local_cx+x;match slot{bar::WATER=>paint::resident_water(&c,x,15.0),bar::SHELF=>paint::resident_shelf(&c,x,15.0),bar::CLIPBOARD=>paint::resident_clipboard(&c,x,15.0),bar::TODO=>paint::resident_todo(&c,x,15.0),bar::MAIL=>paint::resident_mail(&c,x,15.0),_=>{}}if c.hit(x-11.0,3.0,22.0,24.0,("page-shortcut",page)).on_hover_text(PAGE_NAMES[page]).clicked(){self.show_page(page);}}
             }
         }
     }
@@ -2860,16 +3044,18 @@ impl App {
     // ---------------------------------------------------------------
     fn panel_body(&mut self, c: &Card, env: &Env, cmds: &mut Vec<Cmd>) {
         if !self.page_on_dock(self.page) {
-            c.centered_text(PW / 2.0, 65.0, "此位置没有可用页面", 13.0, W::Semibold, theme::WHITE, H::Center);
-            if c.hit(135.0, 80.0, 149.0, 28.0, "empty-dock-settings").clicked() {
+            let width=self.expanded_width();
+            c.centered_text(width / 2.0, 65.0, "此位置没有可用页面", 13.0, W::Semibold, theme::WHITE, H::Center);
+            if c.hit(width/2.0-74.5, 80.0, 149.0, 28.0, "empty-dock-settings").clicked() {
                 self.settings_tab = 10;
                 self.open_settings();
             }
-            c.centered_text(PW / 2.0, 94.0, "打开页面管理", 11.0, W::Regular, theme::GRAY, H::Center);
+            c.centered_text(width / 2.0, 94.0, "打开页面管理", 11.0, W::Regular, theme::GRAY, H::Center);
             return;
         }
-        self.page_gear(c, 394.0, self.page_settings_tab());
-        self.dock_drag_handle(c, (140.0, 4.0, 160.0, 26.0), cmds);
+        let page_width=self.expanded_width();
+        self.page_gear(c, page_width-25.0, self.page_settings_tab());
+        self.dock_drag_handle(c, ((page_width-160.0)/2.0, 4.0, 160.0, 26.0), cmds);
         if self.subpage==Some(self.page) {
             self.draw_settings_subpage(c);
             self.nav(c);
@@ -2900,7 +3086,7 @@ impl App {
     }
 
     pub(crate) fn page_settings_tab(&self) -> usize {
-        [1, 2, 3, 5, 4, 7, 11, 8, 12][self.page]
+        [1, 2, 3, 5, 4, 7, 11, 8, 12, 5][self.page]
     }
 
     pub(crate) fn page_gear(&mut self, c: &Card, x: f32, tab: usize) {
@@ -2927,8 +3113,8 @@ impl App {
             CALENDAR_PAGE => ("日程", "", theme::WHITE),
             1 => ("番茄", "专注", theme::RED_TOP),
             2 => ("饮水", "提醒", theme::BLUE),
-            // 置物架的标题就是「置物架 | 剪贴板」分栏，由页面自己画。
-            3 => return,
+            3 => ("置物架", "", theme::WHITE),
+            9 => ("剪贴板", "", theme::CYAN),
             4 => ("待办", "清单", theme::GREEN),
             5 => ("邮箱", "", theme::CYAN),
             6 => ("AI", "额度", theme::SOFT_GREEN),
@@ -2942,7 +3128,8 @@ impl App {
     }
 
     fn nav(&mut self, c: &Card) {
-        self.nav_at(c, PW, 68.0, self.expanded_height()-7.2);
+        let height=self.expanded_height();
+        self.nav_at(c, self.expanded_width(), height*0.5-2.0, height-7.2);
     }
 
     pub(crate) fn nav_at(&mut self, c: &Card, width: f32, arrow_y: f32, dot_y: f32) {
@@ -2995,7 +3182,8 @@ impl App {
             5 => self.page_mail(c, env, cmds),
             6 => self.page_quota(c),
             CALENDAR_PAGE => self.page_calendar(c,env),
-            8 => self.page_steam(c),
+            8 => self.page_steam(c,cmds),
+            9 => self.page_clipboard(c,env,cmds),
             _ => self.page_settings(c),
         }
     }
@@ -3010,16 +3198,17 @@ impl App {
         }
         let a = smoothstep(0.0, 0.16, e) * (1.0 - smoothstep(2.1, 2.4, e));
         let rise = (1.0 - anim::ease_out_cubic(e / 0.3)) * 6.0;
-        let max_width = if self.side() { self.expanded_width() - 52.0 } else { 310.0 };
+        let max_width = if self.side() { self.expanded_width() - 52.0 } else { (self.expanded_width()-80.0).min(430.0) };
         let msg=c.fit(&msg,size::BODY,W::Regular,max_width);
         let w = c.text_w(&msg, size::BODY, W::Regular) + 26.0;
         let tc = c.faded(a);
         let y = base_y + rise;
-        tc.fill(PW / 2.0 - w / 2.0, y, w, 22.0, 11.0, Color32::from_rgb(44, 44, 48),
+        let center=if self.side(){PW/2.0}else{self.expanded_width()/2.0};
+        tc.fill(center - w / 2.0, y, w, 22.0, 11.0, Color32::from_rgb(44, 44, 48),
         );
-        tc.text(PW / 2.0, y + 15.0, &msg, size::BODY, W::Regular, theme::WHITE, H::Center,
+        tc.text(center, y + 15.0, &msg, size::BODY, W::Regular, theme::WHITE, H::Center,
         );
-        Some(tc.rect(PW/2.0-w/2.0,y,w,22.0))
+        Some(tc.rect(center-w/2.0,y,w,22.0))
     }
 
     // ---------------------------------------------------------------
@@ -3246,7 +3435,7 @@ impl App {
     }
 
     pub fn on_drop(&mut self, files: Vec<PathBuf>) {
-        if !self.settings.visible_pages[3] || files.is_empty() { return; }
+        if !self.settings.page_visible(3) || files.is_empty() { return; }
         self.drag_hot = false;
         self.drag_saved = None;
         if self.page != 3 {
@@ -3277,7 +3466,7 @@ impl App {
         self.say(message);
         if added>0 {
             self.pet.react(PetState::Happy);
-            self.shelf_first = self.shelf.items.len().saturating_sub(5);
+            self.shelf_first = if self.side(){self.shelf.items.len().saturating_sub(5)}else{self.shelf_last_page_start()};
         }
     }
 

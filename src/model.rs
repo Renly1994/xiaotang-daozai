@@ -204,21 +204,30 @@ pub struct Settings {
     pub clipboard_docks: u8,
     pub settings_theme: crate::settings_theme::SettingsTheme,
     pub pet: bool,
+    /// Legacy all-docks value. Kept for tray compatibility and old settings migration.
     pub minimal: bool,
+    /// Bit mask of docks that collapse to the minimal notch when idle.
+    pub minimal_docks: u8,
     pub browser_minimal: bool,
     pub avoid_browsers: bool,
     pub avoid_apps: Vec<(String,String)>,
     pub visible_pages: [bool; 9],
-    pub page_order: [usize; 9],
+    pub clipboard_visible: bool,
+    pub page_order: [usize; 10],
     pub steam_notice_seconds: u32,
     pub show_battery: bool,
     pub clock_12h: bool,
     pub clock_period: u8,
     pub resident_order: Vec<usize>,
     pub resident_pages: [bool;9],
+    pub clipboard_resident: bool,
     /// 鼠标悬停在时钟上时是否自动打开日程；时钟本身始终显示。
     pub calendar_resident: bool,
     pub hover_page_delay_ms: u32,
+    pub hover_hide_enabled: bool,
+    pub hover_hide_delay_ms: u32,
+    /// 鼠标靠近岛体外轮廓时开始显示提示与计时的距离（逻辑点）。
+    pub hover_hide_range_px: u32,
     pub system_hud: bool,
     pub bluetooth_notifications: bool,
     pub read_notifications:bool,
@@ -256,7 +265,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, split_docks: false, status_docks: [Dock::Top; 4], dock_sizes: [[419, 140], [156, 380], [156, 380]], page_docks: [7, 7, 7, 7, 7, 1, 7, 7, 7], clipboard_docks: 1, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 9], page_order: [0,1,2,3,4,5,6,7,8], steam_notice_seconds: 8, show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), resident_pages:[false;9], calendar_resident:true, hover_page_delay_ms:500, system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false,wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true }
+        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, split_docks: false, status_docks: [Dock::Top; 4], dock_sizes: [[419, 140], [156, 380], [156, 380]], page_docks: [7, 7, 7, 7, 7, 1, 7, 7, 7], clipboard_docks: 1, settings_theme: Default::default(), pet: true, minimal: false, minimal_docks: 0, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 9], clipboard_visible: true, page_order: [0,1,2,3,9,4,5,6,7,8], steam_notice_seconds: 8, show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), resident_pages:[false;9], clipboard_resident:false, calendar_resident:true, hover_page_delay_ms:500, hover_hide_enabled:true, hover_hide_delay_ms:600, hover_hide_range_px:26, system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false,wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true }
     }
 }
 
@@ -285,19 +294,17 @@ impl Settings {
         }
     }
 
-    pub fn shelf_tab_on(&self, tab: usize, dock: Dock) -> bool {
-        let mask = if tab == 0 { self.page_docks[3] } else { self.clipboard_docks };
-        if self.split_docks { self.owner(mask) == dock }
-        else if self.has_explicit_dock_assignments() { dock == self.dock }
-        else { mask & dock.bit() != 0 }
-    }
-
     pub fn page_on(&self, page: usize, dock: Dock) -> bool {
+        if page == 9 {
+            let here = if self.split_docks { self.clipboard_dock() == dock }
+                else if self.has_explicit_dock_assignments() { dock == self.dock }
+                else { self.clipboard_docks & dock.bit() != 0 };
+            return self.clipboard_visible && here;
+        }
         let here = if self.split_docks { self.page_dock(page) == dock }
         else if self.has_explicit_dock_assignments() { dock == self.dock }
         else { self.page_docks[page] & dock.bit() != 0 };
-        self.visible_pages[page] && (here
-            || page == 3 && self.shelf_tab_on(1, dock))
+        self.visible_pages[page] && here
     }
 
     fn owner(&self, mask: u8) -> Dock {
@@ -305,8 +312,19 @@ impl Settings {
         else { Dock::ALL.into_iter().find(|dock| mask & dock.bit() != 0).unwrap_or(self.dock) }
     }
 
-    pub fn page_dock(&self, page: usize) -> Dock { self.owner(self.page_docks[page]) }
+    pub fn page_dock(&self, page: usize) -> Dock { if page==9 {self.clipboard_dock()} else {self.owner(self.page_docks[page])} }
     pub fn clipboard_dock(&self) -> Dock { self.owner(self.clipboard_docks) }
+    pub fn page_visible(&self,page:usize)->bool { if page==9 {self.clipboard_visible} else {self.visible_pages[page]} }
+    pub fn page_resident(&self,page:usize)->bool { if page==9 {self.clipboard_resident} else {self.resident_pages[page]} }
+    pub fn set_page_resident(&mut self,page:usize,on:bool){if page==9{self.clipboard_resident=on}else{self.resident_pages[page]=on}}
+    pub fn set_page_dock(&mut self,page:usize,dock:Dock){if page==9{self.clipboard_docks=dock.bit()}else{self.page_docks[page]=dock.bit()}}
+
+    pub fn minimal_on(&self,dock:Dock)->bool { self.minimal_docks & dock.bit()!=0 }
+    pub fn set_minimal_on(&mut self,dock:Dock,on:bool){
+        if on {self.minimal_docks|=dock.bit()} else {self.minimal_docks&=!dock.bit()}
+        self.minimal_docks&=7;
+        self.minimal=self.minimal_docks==7;
+    }
 
     pub fn enable_split_docks(&mut self) {
         self.page_docks = self.page_docks.map(|mask| self.owner(mask).bit());
@@ -355,6 +373,7 @@ impl Settings {
 
     pub fn load() -> Self {
         let mut s = Self::default();
+        let mut has_minimal_docks=false;
         for (k, v) in read_kv(&config_dir().join("settings.txt")) {
             match k.as_str() {
                 "settings_theme" => s.settings_theme=crate::settings_theme::SettingsTheme::parse(&v),
@@ -390,6 +409,9 @@ impl Settings {
                 "island_offset" => s.island_offset = v.parse::<i32>().unwrap_or(0).clamp(-ISLAND_OFFSET_MAX, ISLAND_OFFSET_MAX),
                 "pet" => s.pet = v == "1" || v.eq_ignore_ascii_case("true"),
                 "minimal" => s.minimal = v == "1" || v.eq_ignore_ascii_case("true"),
+                "minimal_docks" => {
+                    if let Ok(mask)=v.parse::<u8>() {s.minimal_docks=mask&7;has_minimal_docks=true;}
+                }
                 "browser_minimal" => s.browser_minimal = v == "1",
                 "avoid_browsers" => s.avoid_browsers = v != "0",
                 "avoid_apps" => s.avoid_apps = serde_json::from_str(&v).unwrap_or_default(),
@@ -400,14 +422,28 @@ impl Settings {
                 "resident_pages" if v.len()==9 && v.bytes().all(|b|b==b'0'||b==b'1')=>{
                     for (on,value) in s.resident_pages.iter_mut().zip(v.bytes()){*on=value==b'1';}
                 }
+                "clipboard_visible"=>s.clipboard_visible=v!="0",
+                "clipboard_resident"=>s.clipboard_resident=v=="1",
                 "calendar_resident" => s.calendar_resident = v != "0",
                 "hover_page_delay_ms" => s.hover_page_delay_ms=v.parse::<u32>().unwrap_or(500).clamp(200,1500),
+                "hover_hide_enabled" => s.hover_hide_enabled=v!="0",
+                "hover_hide_delay_ms" => s.hover_hide_delay_ms=v.parse::<u32>().unwrap_or(600).clamp(250,1500),
+                "hover_hide_range_px" => s.hover_hide_range_px=v.parse::<u32>().unwrap_or(26).clamp(8,64),
                 "page_order" => {
                     if let Ok(order)=v.split(',').map(str::parse::<usize>).collect::<Result<Vec<_>,_>>() {
-                        if order.len()==9 && (0..9).all(|page|order.contains(&page)) {
+                        if order.len()==10 && (0..10).all(|page|order.contains(&page)) {
                             s.page_order.copy_from_slice(&order);
+                        } else if order.len()==9 && (0..9).all(|page|order.contains(&page)) {
+                            let mut migrated=order;
+                            let at=migrated.iter().position(|page|*page==3).map(|i|i+1).unwrap_or(migrated.len());
+                            migrated.insert(at,9);
+                            s.page_order.copy_from_slice(&migrated);
                         } else if order.len()==8 && (0..8).all(|page|order.contains(&page)) {
-                            s.page_order[..8].copy_from_slice(&order);
+                            let mut migrated=order;
+                            let at=migrated.iter().position(|page|*page==3).map(|i|i+1).unwrap_or(migrated.len());
+                            migrated.insert(at,9);
+                            migrated.push(8);
+                            s.page_order.copy_from_slice(&migrated);
                         }
                     }
                 }
@@ -451,6 +487,8 @@ impl Settings {
                 _ => {}
             }
         }
+        if !has_minimal_docks && s.minimal {s.minimal_docks=7;}
+        s.minimal=s.minimal_docks==7;
         if !s.visible_pages.contains(&true) { s.visible_pages[0]=true; }
         if s.split_docks { s.enable_split_docks(); }
         s
@@ -475,16 +513,22 @@ impl Settings {
                 ("settings_theme".into(),self.settings_theme.key().into()),
                 ("pet".into(), if self.pet { "1".to_string() } else { "0".to_string() }),
                 ("minimal".into(), if self.minimal { "1".to_string() } else { "0".to_string() }),
+                ("minimal_docks".into(),self.minimal_docks.to_string()),
                 ("browser_minimal".into(), (self.browser_minimal as u8).to_string()),
                 ("avoid_browsers".into(), (self.avoid_browsers as u8).to_string()),
                 ("avoid_apps".into(), serde_json::to_string(&self.avoid_apps).unwrap_or_default()),
                 ("visible_pages".into(), self.visible_pages.iter().map(|enabled|if *enabled {'1'}else{'0'}).collect()),
+                ("clipboard_visible".into(),(self.clipboard_visible as u8).to_string()),
                 ("page_order".into(),self.page_order.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
                 ("steam_notice_seconds".into(),self.steam_notice_seconds.to_string()),
                 ("resident_order".into(),self.resident_order.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
                 ("resident_pages".into(),self.resident_pages.iter().map(|on|if *on{'1'}else{'0'}).collect()),
+                ("clipboard_resident".into(),(self.clipboard_resident as u8).to_string()),
                 ("calendar_resident".into(),(self.calendar_resident as u8).to_string()),
                 ("hover_page_delay_ms".into(),self.hover_page_delay_ms.to_string()),
+                ("hover_hide_enabled".into(),(self.hover_hide_enabled as u8).to_string()),
+                ("hover_hide_delay_ms".into(),self.hover_hide_delay_ms.to_string()),
+                ("hover_hide_range_px".into(),self.hover_hide_range_px.to_string()),
                 ("clock_period".into(), self.clock_period.to_string()),
                 ("clock_12h".into(), (self.clock_12h as u8).to_string()),
                 ("show_battery".into(), (self.show_battery as u8).to_string()),
