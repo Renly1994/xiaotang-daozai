@@ -575,6 +575,23 @@ use crate::otp;
 
 #[cfg(windows)]
 pub mod secrets {
+    pub fn load_optional(email: &str) -> Result<Option<String>,String> {
+        let entry=keyring::Entry::new(super::SERVICE,&email.to_ascii_lowercase())
+            .map_err(|_|"凭据管理器不可用")?;
+        match entry.get_password() {
+            Ok(value)=>Ok(Some(value)),
+            Err(keyring::Error::NoEntry)=>Ok(None),
+            Err(_)=>Err("无法读取凭据管理器，请稍后重试".into()),
+        }
+    }
+    pub fn delete_checked(email:&str)->Result<(),String> {
+        let entry=keyring::Entry::new(super::SERVICE,&email.to_ascii_lowercase())
+            .map_err(|_|"凭据管理器不可用")?;
+        match entry.delete_credential() {
+            Ok(())|Err(keyring::Error::NoEntry)=>Ok(()),
+            Err(_)=>Err("无法删除凭据".into()),
+        }
+    }
     /// 凭据只进 Windows 凭据管理器；键是邮箱地址，值是授权码。
     pub fn save(email: &str, password: &str) -> Result<(), String> {
         let entry = keyring::Entry::new(super::SERVICE, &email.to_ascii_lowercase())
@@ -597,6 +614,8 @@ pub mod secrets {
 
 #[cfg(not(windows))]
 pub mod secrets {
+    pub fn load_optional(_email:&str)->Result<Option<String>,String>{Err("仅 Windows 支持凭据管理器".into())}
+    pub fn delete_checked(_email:&str)->Result<(),String>{Err("仅 Windows 支持凭据管理器".into())}
     pub fn save(_email: &str, _password: &str) -> Result<(), String> {
         Err("仅 Windows 支持凭据管理器".into())
     }

@@ -6,11 +6,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+struct Completed {
+    outcome: Outcome,
+    restored: bool,
+    mail_changed: bool,
+}
 struct Pending {
-    rx: Receiver<Result<Outcome, String>>,
-    original: String,
+    rx: Receiver<Result<Completed, String>>,
     identity: String,
-    password: String,
 }
 #[derive(Clone, Copy)]
 enum Notice {
@@ -22,6 +25,7 @@ enum Notice {
 }
 pub(crate) struct State {
     config: Config,
+    bound_identity: Option<String>,
     webdav_password: String,
     password: String,
     note: String,
@@ -43,6 +47,7 @@ impl Default for State {
             .and_then(|v| serde_json::from_slice(&v).ok())
             .unwrap_or_default();
         Self {
+            bound_identity:config.identity().ok(),
             config,
             webdav_password,
             password,
@@ -59,6 +64,12 @@ impl Default for State {
 }
 impl State {
     #[cfg(test)]
+    pub(crate) fn preview_restored(&mut self,mail_changed:bool){
+        let (tx,rx)=mpsc::channel();
+        tx.send(Ok(Completed{outcome:Outcome{snapshot:None,fingerprint:"test".into(),note:"恢复完成".into()},restored:true,mail_changed})).unwrap_or_else(|_|panic!("测试通道关闭"));
+        self.pending=Some(Pending{rx,identity:"test".into()});
+    }
+    #[cfg(test)]
     pub(crate) fn preview_notice(&mut self, success: bool) {
         self.notice = if success {
             Notice::Success
@@ -72,62 +83,59 @@ impl State {
         }
         .into();
     }
-    fn start(&mut self, ctx: &egui::Context, mode: Mode) {
-        if self.pending.is_some() {
-            return;
+    // Run before showing password fields and again before every save/network action.
+    // Invalid intermediate addresses also clear secrets, so A's password cannot leak to B.
+    fn bind_connection(&mut self) {
+        let identity=self.config.identity().ok();
+        if identity!=self.bound_identity {
+            self.webdav_password.clear();
+            self.password.clear();
+            self.show_webdav_password=false;
+            self.show_password=false;
+            if identity.is_some() {
+                self.webdav_password=cloud_sync::load_secret(&self.config,"webdav").unwrap_or_default();
+                self.password=cloud_sync::load_secret(&self.config,"encryption").unwrap_or_default();
+            }
+            self.bound_identity=identity;
         }
-        self.next = Instant::now() + Duration::from_secs(300);
-        let prepare = (|| {
-            let identity = self.config.identity()?;
-            if self.webdav_password.is_empty() {
-                return Err("请填写 WebDAV 应用密码".to_string());
-            }
-            if self.password.chars().count() < 12 {
-                return Err("同步密码至少需要 12 个字符".to_string());
-            }
-            let snapshot = Snapshot::capture()?;
-            let original = snapshot.fingerprint()?;
-            Ok((identity, snapshot, original))
+    }
+    fn start(&mut self, ctx: &egui::Context, mode: Mode) {
+        if self.pending.is_some() {return;}
+        self.bind_connection();
+        self.next=Instant::now()+Duration::from_secs(300);
+        let prepare=(||{
+            let identity=format!("{}:mail-passwords={}",self.config.identity()?,self.config.mail_passwords);
+            if self.webdav_password.is_empty(){return Err("请填写此连接的 WebDAV 应用密码".to_string());}
+            if self.password.chars().count()<12{return Err("同步密码至少需要 12 个字符".to_string());}
+            Ok(identity)
         })();
-        let (identity, snapshot, original) = match prepare {
-            Ok(v) => v,
-            Err(error) => {
-                self.note = error;
-                self.notice = Notice::Error;
-                return;
-            }
-        };
-        let (tx, rx) = mpsc::channel();
-        let cfg = self.config.clone();
-        let webdav_password = self.webdav_password.clone();
-        let password = self.password.clone();
-        let base = self.bases.get(&identity).cloned();
-        let ctx = ctx.clone();
-        match std::thread::Builder::new()
-            .name("daozai-cloud-sync".into())
-            .spawn(move || {
-                let result =
-                    cloud_sync::run(&cfg, &webdav_password, &password, snapshot, base, mode);
-                let _ = tx.send(result);
-                ctx.request_repaint();
-            }) {
-            Ok(_) => {
-                self.pending = Some(Pending {
-                    rx,
-                    original,
-                    identity,
-                    password: self.password.clone(),
-                });
-                self.note = "正在同步…".into();
-                self.notice = Notice::Busy;
-            }
-            Err(_) => {
-                self.note = "无法启动同步，请稍后重试".into();
-                self.notice = Notice::Error;
-            }
+        let identity=match prepare {Ok(v)=>v,Err(error)=>{self.note=error;self.notice=Notice::Error;return;}};
+        let (tx,rx)=mpsc::channel();
+        let cfg=self.config.clone();
+        let webdav_password=self.webdav_password.clone();
+        let password=self.password.clone();
+        let base=self.bases.get(&identity).cloned();
+        let ctx=ctx.clone();
+        match std::thread::Builder::new().name("daozai-cloud-sync".into()).spawn(move||{
+            let result=(||{
+                let snapshot=Snapshot::capture_with_passwords(cfg.mail_passwords)?;
+                let original=snapshot.fingerprint()?;
+                let mut outcome=cloud_sync::run(&cfg,&webdav_password,&password,snapshot,base,mode)?;
+                let restored=outcome.snapshot.is_some();
+                let mail_changed=if let Some(snapshot)=outcome.snapshot.take(){
+                    snapshot.restore_with_passwords(&original,&password,cfg.mail_passwords)?
+                }else{false};
+                Ok(Completed{outcome,restored,mail_changed})
+            })();
+            let _=tx.send(result);
+            ctx.request_repaint();
+        }) {
+            Ok(_)=>{self.pending=Some(Pending{rx,identity});self.note="正在同步…".into();self.notice=Notice::Busy;},
+            Err(_)=>{self.note="无法启动同步，请稍后重试".into();self.notice=Notice::Error;},
         }
     }
     fn save(&mut self) -> Result<(), String> {
+        self.bind_connection();
         self.config.target()?;
         if self.password.chars().count() < 12 {
             return Err("同步密码至少需要 12 个字符".into());
@@ -141,13 +149,13 @@ impl State {
         self.dirty = false;
         Ok(())
     }
-    fn poll(&mut self) -> bool {
+    fn poll(&mut self) -> Option<bool> {
         let Some(pending) = self.pending.as_ref() else {
-            return false;
+            return None;
         };
         let result = match pending.rx.try_recv() {
             Ok(result) => result,
-            Err(mpsc::TryRecvError::Empty) => return false,
+            Err(mpsc::TryRecvError::Empty) => return None,
             Err(mpsc::TryRecvError::Disconnected) => Err("同步线程已退出，请重新同步".into()),
         };
         let pending = self.pending.take().unwrap();
@@ -156,17 +164,10 @@ impl State {
             Err(error) => {
                 self.note = error;
                 self.notice = Notice::Error;
-                return false;
+                return None;
             }
         };
-        let restored = outcome.snapshot.is_some();
-        if let Some(snapshot) = outcome.snapshot {
-            if let Err(error) = snapshot.restore(&pending.original, &pending.password) {
-                self.note = error;
-                self.notice = Notice::Error;
-                return false;
-            }
-        }
+        let Completed{outcome,restored,mail_changed}=outcome;
         self.bases.insert(pending.identity, outcome.fingerprint);
         let save: std::io::Result<()> = (|| {
             let root = crate::model::config_dir();
@@ -190,11 +191,11 @@ impl State {
         } else {
             format!("{}；同步状态未能保存，下次可能需要手动选择", outcome.note)
         };
-        restored
+        restored.then_some(mail_changed)
     }
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         use crate::extras::{settings_card, settings_control_row, settings_hint, settings_label};
-        ui.label("通过 WebDAV，在多台电脑之间同步设置和邮箱授权码。");
+        ui.label("通过 WebDAV，在多台电脑之间同步设置和邮箱账号。");
         settings_label(ui, "连接设置");
         settings_card(ui, |ui| {
             ui.add_enabled_ui(self.pending.is_none(), |ui| {
@@ -218,6 +219,7 @@ impl State {
                     )
                 })
                 .changed();
+                self.bind_connection();
                 let secret_width = (width - 48.0 - ui.spacing().item_spacing.x).max(70.0);
                 self.dirty |= settings_control_row(ui, "应用密码", 72.0, |ui| {
                     let field = ui.add_sized(
@@ -271,6 +273,8 @@ impl State {
                     ui,
                     "同步密码用于加密配置，请与 WebDAV 密码分开设置并妥善保存。",
                 );
+                self.dirty |= ui.checkbox(&mut self.config.mail_passwords,"同时备份和恢复邮箱授权码").changed();
+                settings_hint(ui,"默认只同步通用设置和邮箱账号。勾选后，邮箱授权码也会加密同步；未配置授权码的账号仍可正常恢复。");
                 self.dirty |= ui
                     .checkbox(&mut self.config.automatic, "每 5 分钟自动同步")
                     .changed();
@@ -320,7 +324,7 @@ impl State {
             });
         });
         ui.add_space(8.0);
-        settings_hint(ui,"同步通用设置、邮箱账号和授权码。邮件正文、验证码、待办内容、日程和 AI 登录状态不参与同步。HTTP 建议仅在可信内网或 Tailscale 中使用。");
+        settings_hint(ui,"仅同步明确列出的外观、时钟、专注饮水与收信偏好及邮箱账号；授权码单独选择。邮件正文、验证码、会议信息、设备权限和 AI 登录状态不参与同步。HTTP 建议仅在可信内网或 Tailscale 中使用。");
     }
     fn sync_action(&mut self, ctx: &egui::Context, mode: Mode) {
         match self.save() {
@@ -395,14 +399,16 @@ impl State {
 }
 impl crate::app::App {
     pub(crate) fn poll_cloud_sync(&mut self, ctx: &egui::Context) {
-        if self.cloud_sync.poll() {
+        if let Some(mail_changed)=self.cloud_sync.poll() {
             self.settings = crate::model::Settings::load();
             self.set_page_visible(self.page, self.settings.visible_pages[self.page]);
-            self.mail = crate::app::MailState {
-                accounts: crate::mail::load_accounts(),
-                ..Default::default()
-            };
-            self.pending.push(crate::app::Cmd::MailReconnect);
+            if mail_changed {
+                self.mail = crate::app::MailState {
+                    accounts: crate::mail::load_accounts(),
+                    ..Default::default()
+                };
+                self.pending.push(crate::app::Cmd::MailReconnect);
+            }
         }
         if self.cloud_sync.config.automatic
             && !self.cloud_sync.dirty
@@ -417,5 +423,28 @@ impl crate::app::App {
         if self.cloud_sync.pending.is_some() {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn cloud_sync_changing_connection_never_reuses_old_passwords() {
+        let name=format!("synthetic-{}",std::process::id());
+        let a=Config{folder:"https://a.example.invalid/dav".into(),username:name.clone(),..Default::default()};
+        let b=Config{folder:"https://b.example.invalid/dav".into(),username:name.clone(),..Default::default()};
+        let mut state=State::default();
+        state.config=a.clone();state.bound_identity=a.identity().ok();
+        state.webdav_password="password-for-a".into();state.password="encryption-for-a".into();
+        state.config=b;state.bind_connection();
+        assert!(state.webdav_password.is_empty());assert!(state.password.is_empty());
+        state.webdav_password="password-for-b".into();
+        state.config.username.push_str("-other-user");state.bind_connection();
+        assert!(state.webdav_password.is_empty());
+        state.webdav_password="password-for-other-user".into();
+        state.config.folder="not-a-url".into();state.bind_connection();
+        assert!(state.webdav_password.is_empty());assert!(state.password.is_empty());
+        assert!(!Config::default().mail_passwords);
     }
 }

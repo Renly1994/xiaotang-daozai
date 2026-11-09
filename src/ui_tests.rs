@@ -49,6 +49,71 @@ fn cloud_sync_mail_credentials_restore_into_windows_keyring() {
 }
 
 #[test]
+fn cloud_sync_restore_keeps_device_permissions_and_mail_reader() {
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    let root=crate::model::config_dir();
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("settings.txt"),"skin=cream\nmail_sync_operations=1\nignored_mail_events=private-meeting\nfuture_device_permission=1\n").unwrap();
+    let remote=crate::cloud_sync::Snapshot::capture().unwrap();
+    std::fs::write(root.join("settings.txt"),"skin=classic\nmail_sync_operations=0\nignored_mail_events=local-meeting\nfuture_device_permission=0\n").unwrap();
+    let expected=crate::cloud_sync::Snapshot::capture().unwrap().fingerprint().unwrap();
+    assert!(!remote.restore(&expected,"test-password-123").unwrap(),"外观变化不应标记邮箱变更");
+    let raw=std::fs::read_to_string(root.join("settings.txt")).unwrap();
+    for field in ["skin=cream","mail_sync_operations=0","ignored_mail_events=local-meeting","future_device_permission=0"] {assert!(raw.contains(field));}
+    h.app.mail.note="reading-state-preserved".into();
+    h.app.pending.clear();
+    h.app.cloud_sync.preview_restored(false);
+    h.app.poll_cloud_sync(&h.ctx);
+    assert_eq!(h.app.mail.note,"reading-state-preserved");
+    assert!(!h.app.pending.iter().any(|cmd|matches!(cmd,crate::app::Cmd::MailReconnect)));
+    h.app.cloud_sync.preview_restored(true);
+    h.app.poll_cloud_sync(&h.ctx);
+    assert!(h.app.pending.iter().any(|cmd|matches!(cmd,crate::app::Cmd::MailReconnect)));
+}
+
+#[cfg(windows)]
+#[test]
+fn cloud_sync_missing_credentials_restore_and_failure_rolls_back_exactly() {
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let _h=H::new();
+    let account=crate::mail::Account{email:format!("cloud-rollback-{}@example.invalid",std::process::id()),provider:crate::mail::Provider::Qq,custom:None,enabled:false};
+    let key=account.credential_key();
+    struct Cleanup(String);
+    impl Drop for Cleanup{fn drop(&mut self){crate::mail::secrets::delete(&self.0);}}
+    let _cleanup=Cleanup(key.clone());
+    crate::mail::save_accounts(&[account]);
+    crate::mail::secrets::save(&key,"remote-auth-code").unwrap();
+    let remote=crate::cloud_sync::Snapshot::capture().unwrap();
+    crate::mail::secrets::delete_checked(&key).unwrap();
+    let root=crate::model::config_dir();
+    let settings_path=root.join("settings.txt");
+    std::fs::write(&settings_path,"skin=classic\nmail_sync_operations=0\n").unwrap();
+    let before_settings=std::fs::read(&settings_path).unwrap();
+    let before_accounts=std::fs::read(root.join("mail-accounts.json")).unwrap();
+    let missing=crate::cloud_sync::Snapshot::capture().unwrap();
+    let expected=missing.fingerprint().unwrap();
+    crate::cloud_sync::fail_next_restore_for_test();
+    assert!(remote.restore(&expected,"test-password-123").is_err());
+    assert_eq!(std::fs::read(&settings_path).unwrap(),before_settings);
+    assert_eq!(std::fs::read(root.join("mail-accounts.json")).unwrap(),before_accounts);
+    assert_eq!(crate::mail::secrets::load_optional(&key).unwrap(),None);
+    assert!(remote.restore(&expected,"test-password-123").unwrap());
+    assert_eq!(crate::mail::secrets::load(&key).unwrap(),"remote-auth-code");
+    // Opting out must neither restore nor erase an existing local credential.
+    crate::mail::secrets::save(&key,"local-auth-code").unwrap();
+    let expected=crate::cloud_sync::Snapshot::capture().unwrap().fingerprint().unwrap();
+    crate::cloud_sync::fail_next_restore_for_test();
+    assert!(remote.restore(&expected,"test-password-123").is_err());
+    assert_eq!(crate::mail::secrets::load(&key).unwrap(),"local-auth-code");
+    let expected=crate::cloud_sync::Snapshot::capture_with_passwords(false).unwrap().fingerprint().unwrap();
+    assert!(!remote.restore_with_passwords(&expected,"test-password-123",false).unwrap());
+    assert_eq!(crate::mail::secrets::load(&key).unwrap(),"local-auth-code");
+}
+
+
+
+#[test]
 fn resized_font_atlases_stop_reuploading_and_release_unused_sizes(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let ctx=egui::Context::default();crate::theme::load_fonts(&ctx);

@@ -17,7 +17,18 @@ use std::{
 const LIMIT: usize = 2 * 1024 * 1024;
 const ITERATIONS: u32 = 600_000;
 const AAD: &[u8] = b"Daozai.WebDAV.v1";
-const LOCAL_KEYS: &[&str] = &["display_id", "avoid_apps"];
+#[cfg(test)]
+thread_local! {static FAIL_AFTER_SETTINGS:std::cell::Cell<bool>=const{std::cell::Cell::new(false)};}
+#[cfg(test)]
+pub(crate) fn fail_next_restore_for_test(){FAIL_AFTER_SETTINGS.with(|flag|flag.set(true));}
+// Explicit allowlist: unknown future fields, meeting details and device permissions stay local.
+const SYNC_KEYS: &[&str] = &[
+    "skin","island_shape","dock","glass_blur","island_size","island_offset","settings_theme",
+    "pet","minimal","browser_minimal","visible_pages","page_order","resident_order",
+    "clock_period","clock_12h","show_battery","sound","lyrics_enabled","island_lyrics",
+    "lyric_delay_ms","hide_fullscreen","focus_minutes","rest_minutes","water_minutes",
+    "serving_ml","water_start","water_end","mail_code","mail_code_hide_seconds","mail_interval",
+];
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -25,6 +36,7 @@ pub(crate) struct Config {
     pub folder: String,
     pub username: String,
     pub automatic: bool,
+    pub mail_passwords: bool,
 }
 impl Config {
     pub fn load() -> Self {
@@ -95,7 +107,7 @@ fn settings_map(raw: &str) -> BTreeMap<String, String> {
     raw.trim_start_matches('\u{feff}')
         .lines()
         .filter_map(|line| line.split_once('='))
-        .filter(|(k, _)| !LOCAL_KEYS.contains(&k.trim()))
+        .filter(|(k, _)| SYNC_KEYS.contains(&k.trim()))
         .map(|(k, v)| (k.trim().into(), v.trim().into()))
         .collect()
 }
@@ -108,7 +120,8 @@ fn read_optional(path: &Path, default: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 impl Snapshot {
-    pub fn capture() -> Result<Self, String> {
+    pub fn capture() -> Result<Self, String> { Self::capture_with_passwords(true) }
+    pub fn capture_with_passwords(include_passwords:bool) -> Result<Self,String> {
         let root = crate::model::config_dir();
         let raw = read_optional(&root.join("settings.txt"), b"")?;
         let settings = settings_map(std::str::from_utf8(&raw).map_err(|_| "本机设置编码无效")?);
@@ -121,13 +134,19 @@ impl Snapshot {
             passwords: BTreeMap::new(),
         };
         for account in snapshot.checked_accounts(false)? {
+            if !include_passwords {continue;}
             let key = account.credential_key();
-            let password = crate::mail::secrets::load(&key)
-                .map_err(|_| "有邮箱授权码无法读取，请先在邮箱设置中重新保存授权码")?;
-            snapshot.passwords.insert(key, password);
+            if let Some(password)=crate::mail::secrets::load_optional(&key)? {
+                snapshot.passwords.insert(key,password);
+            }
         }
         snapshot.validate()?;
         Ok(snapshot)
+    }
+    fn scoped(mut self,include_passwords:bool)->Self {
+        self.settings.retain(|key,_|SYNC_KEYS.contains(&key.as_str()));
+        if !include_passwords {self.passwords.clear();}
+        self
     }
     fn checked_accounts(
         &self,
@@ -162,15 +181,9 @@ impl Snapshot {
                 return Err(invalid());
             }
         }
-        if require_passwords
-            && (self.passwords.len() != keys.len()
-                || keys.iter().any(|key| {
-                    self.passwords
-                        .get(key)
-                        .is_none_or(|p| p.is_empty() || p.len() > 4096)
-                }))
-        {
-            return Err("同步文件缺少邮箱授权码，未恢复任何配置".into());
+        let _=require_passwords; // Missing credentials are a valid backup/restore state.
+        if self.passwords.iter().any(|(key,password)|!keys.contains(key) || password.is_empty() || password.len()>4096) {
+            return Err("同步文件中的邮箱授权码无效".into());
         }
         Ok(accounts)
     }
@@ -183,7 +196,6 @@ impl Snapshot {
                 k.is_empty()
                     || k.contains(['\n', '\r', '='])
                     || v.contains(['\n', '\r'])
-                    || LOCAL_KEYS.contains(&k.as_str())
             })
         {
             return Err("同步设置格式无效".into());
@@ -195,10 +207,13 @@ impl Snapshot {
         Ok(hash(&serde_json::to_vec(self).map_err(|_| "无法编码配置")?))
     }
     /// Backup ciphertext first; rollback both files and keyring if any restore step fails.
-    pub fn restore(&self, expected: &str, password: &str) -> Result<(), String> {
+    pub fn restore(&self,expected:&str,password:&str)->Result<bool,String> {
+        self.restore_with_passwords(expected,password,true)
+    }
+    pub fn restore_with_passwords(&self, expected: &str, password: &str, include_passwords:bool) -> Result<bool, String> {
         self.validate()?;
         let previous = Self::capture()?;
-        if previous.fingerprint()? != expected {
+        if Self::capture_with_passwords(include_passwords)?.fingerprint()? != expected {
             return Err("同步期间本机配置有修改，请再次同步".into());
         }
         let root = crate::model::config_dir();
@@ -217,36 +232,58 @@ impl Snapshot {
                 Err(_) => Err("无法读取本机备份".to_string()),
             })
             .collect::<Result<_, _>>()?;
-        let mut settings = self.settings.clone();
+        // Preserve every local field outside the explicit sync allowlist, including future fields.
+        let mut settings=BTreeMap::<String,String>::new();
         let existing = String::from_utf8(old[0].clone().unwrap_or_default())
             .map_err(|_| "本机设置编码无效")?;
         for line in existing.lines() {
             if let Some((k, v)) = line.split_once('=') {
-                if LOCAL_KEYS.contains(&k.trim()) {
-                    settings.insert(k.trim().into(), v.trim().into());
-                }
+                settings.insert(k.trim().into(), v.trim().into());
             }
+        }
+        for (key,value) in &self.settings {
+            if SYNC_KEYS.contains(&key.as_str()) {settings.insert(key.clone(),value.clone());}
         }
         let text: String = settings.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
         let accounts = serde_json::to_vec(&self.accounts).map_err(|_| "邮箱配置编码失败")?;
+        let incoming=if include_passwords {self.passwords.clone()}else{BTreeMap::new()};
+        // Include credentials not present in the old account list, too: rollback must restore their exact state.
+        let previous_credentials=incoming.keys().map(|key|Ok((key.clone(),crate::mail::secrets::load_optional(key)?)))
+            .collect::<Result<BTreeMap<_,_>,String>>()?;
+        let mail_changed=crate::mail::decode_accounts(&old[1].clone().unwrap_or_else(||b"[]".to_vec()))
+            !=self.checked_accounts(false)? || incoming.iter().any(|(key,value)|previous_credentials.get(key).and_then(|v|v.as_ref())!=Some(value));
+        if Self::capture_with_passwords(include_passwords)?.fingerprint()? != expected {
+            return Err("同步期间本机配置有修改，请再次同步".into());
+        }
+        // Recheck raw files as well: local-only edits must not be lost during backup encryption.
+        for (path,before) in paths.iter().zip(&old) {
+            let now=match fs::read(path){Ok(value)=>Some(value),Err(e) if e.kind()==std::io::ErrorKind::NotFound=>None,Err(_)=>return Err("无法检查本机配置".into())};
+            if &now!=before{return Err("同步期间本机配置有修改，请再次同步".into());}
+        }
         let result = (|| {
-            for (key, value) in &self.passwords {
+            for (key, value) in &incoming {
                 crate::mail::secrets::save(key, value)
                     .map_err(|_| "无法恢复邮箱授权码".to_string())?;
             }
-            crate::model::atomic_write(&paths[0], text.as_bytes())
-                .map_err(|_| "无法恢复通用设置".to_string())?;
-            crate::model::atomic_write(&paths[1], &accounts)
-                .map_err(|_| "无法恢复邮箱设置".to_string())?;
+            if old[0].as_deref()!=Some(text.as_bytes()) {
+                crate::model::atomic_write(&paths[0], text.as_bytes())
+                    .map_err(|_| "无法恢复通用设置".to_string())?;
+            }
+            #[cfg(test)]
+            if FAIL_AFTER_SETTINGS.with(|flag|flag.replace(false)){return Err("模拟恢复中断".into());}
+            if old[1].as_deref()!=Some(accounts.as_slice()) {
+                crate::model::atomic_write(&paths[1], &accounts)
+                    .map_err(|_| "无法恢复邮箱设置".to_string())?;
+            }
             Ok(())
         })();
         if let Err(error) = result {
             let mut rollback_ok = true;
-            for key in self.passwords.keys() {
-                if let Some(value) = previous.passwords.get(key) {
+            for (key,value) in &previous_credentials {
+                if let Some(value) = value {
                     rollback_ok &= crate::mail::secrets::save(key, value).is_ok();
                 } else {
-                    crate::mail::secrets::delete(key);
+                    rollback_ok &= crate::mail::secrets::delete_checked(key).is_ok();
                 }
             }
             for (path, value) in paths.iter().zip(old) {
@@ -262,7 +299,7 @@ impl Snapshot {
             });
         }
         // Keep removed accounts' credentials for rollback; they are no longer monitored or uploaded.
-        Ok(())
+        Ok(mail_changed)
     }
 }
 fn hash(bytes: &[u8]) -> String {
@@ -411,7 +448,8 @@ pub(crate) fn run(
     base: Option<String>,
     mode: Mode,
 ) -> Result<Outcome, String> {
-    transfer(
+    let local=local.scoped(cfg.mail_passwords);
+    transfer_scoped(
         &cfg.target()?,
         cfg.username.trim(),
         webdav_password,
@@ -419,9 +457,14 @@ pub(crate) fn run(
         local,
         base,
         mode,
+        cfg.mail_passwords,
     )
 }
-fn transfer(
+#[cfg(test)]
+fn transfer(target:&str,username:&str,webdav_password:&str,password:&str,local:Snapshot,base:Option<String>,mode:Mode)->Result<Outcome,String>{
+    transfer_scoped(target,username,webdav_password,password,local,base,mode,true)
+}
+fn transfer_scoped(
     target: &str,
     username: &str,
     webdav_password: &str,
@@ -429,6 +472,7 @@ fn transfer(
     local: Snapshot,
     base: Option<String>,
     mode: Mode,
+    include_passwords:bool,
 ) -> Result<Outcome, String> {
     if password.chars().count() < 12 {
         return Err("同步密码至少需要 12 个字符".into());
@@ -451,7 +495,7 @@ fn transfer(
                 .take((LIMIT + 1) as u64)
                 .read_to_end(&mut raw)
                 .map_err(|_| "云端文件读取失败")?;
-            Some((decrypt(&raw, password)?, etag))
+            Some((decrypt(&raw, password)?.scoped(include_passwords), etag))
         }
         Err(ureq::Error::Status(404, _)) => None,
         Err(error) => return Err(network_error(error)),
@@ -469,7 +513,7 @@ fn transfer(
             Ok(Outcome {
                 fingerprint: snapshot.fingerprint()?,
                 snapshot: Some(snapshot),
-                note: "已恢复云端配置和邮箱授权码".into(),
+                note: if include_passwords {"已恢复云端配置和可用邮箱授权码"}else{"已恢复云端配置，未更改本机邮箱授权码"}.into(),
             })
         }
         Decision::Conflict => Err(
@@ -501,7 +545,7 @@ fn transfer(
             Ok(Outcome {
                 snapshot: None,
                 fingerprint: local_hash,
-                note: "配置和邮箱授权码已加密上传".into(),
+                note: if include_passwords {"配置和可用邮箱授权码已加密上传"}else{"配置已加密上传，未上传邮箱授权码"}.into(),
             })
         }
     }
@@ -558,6 +602,7 @@ mod tests {
             folder: "https://dav.example.com/folder".into(),
             username: "user".into(),
             automatic: false,
+            mail_passwords: false,
         };
         assert_eq!(
             cfg.target().unwrap(),
@@ -587,12 +632,25 @@ mod tests {
         );
     }
     #[test]
+    fn cloud_sync_allowlist_excludes_meetings_permissions_and_future_fields() {
+        let fields=settings_map("skin=cream\nignored_mail_events=private-meeting-title\nmail_sync_operations=1\ncalendar_auto_sync=1\nread_notifications=1\nfuture_secret=private\n");
+        assert_eq!(fields,sample().settings);
+        let mut legacy=sample();
+        legacy.settings.insert("mail_sync_operations".into(),"1".into());
+        legacy.settings.insert("ignored_mail_events".into(),"private".into());
+        legacy.accounts=serde_json::json!([{"email":"test@example.invalid","provider":"qq"}]);
+        legacy.passwords.insert("test@example.invalid".into(),"not-for-upload".into());
+        let filtered=legacy.scoped(false);
+        assert_eq!(filtered.settings,sample().settings);
+        assert!(filtered.passwords.is_empty());
+    }
+    #[test]
     fn invalid_mail_bundles_and_settings_are_rejected() {
         let mut s = sample();
         s.accounts = serde_json::json!([{"email":"me@example.com","provider":"custom"}]);
         assert!(s.validate().is_err());
         s.accounts = serde_json::json!([{"email":"me@qq.com","provider":"qq"}]);
-        assert!(s.validate().is_err());
+        assert!(s.validate().is_ok());
         s.passwords.insert("me@qq.com".into(), "secret".into());
         assert!(s.validate().is_ok());
         s.settings
