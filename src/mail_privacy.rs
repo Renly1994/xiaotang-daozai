@@ -57,10 +57,11 @@ impl Privacy {
     }
     pub fn observe(&mut self,item:&Item,new:bool,at:f64,unix:i64){
         let Some(code)=&item.code else{return;};
-        self.seen.entry(key(item)).or_insert_with(||Seen{
+        let seen=self.seen.entry(key(item)).or_insert_with(||Seen{
             at,new,age:item.received_unix.filter(|t|*t>0&&*t<=unix).map(|t|(unix-t) as u64),
             lifetime:explicit_lifetime(&item.subject,&item.summary,code),
         });
+        seen.new|=new;
     }
     pub fn hidden(&self,item:&Item,now:f64,fallback:u32)->bool{
         if item.code.is_none(){return false;}
@@ -73,8 +74,8 @@ impl Privacy {
         s.age.unwrap_or(0) as f64+elapsed>=limit as f64
     }
     pub fn reveal(&mut self,item:&Item,now:f64){self.revealed.insert(key(item),now+15.0);}
-    pub fn retain(&mut self,items:&[Item]){
-        let keys:std::collections::HashSet<_>=items.iter().filter(|i|i.code.is_some()).map(key).collect();
+    pub fn retain<'a>(&mut self,items:impl IntoIterator<Item=&'a Item>){
+        let keys:std::collections::HashSet<_>=items.into_iter().filter(|i|i.code.is_some()).map(key).collect();
         self.seen.retain(|k,_|keys.contains(k));self.revealed.retain(|k,_|keys.contains(k));
         self.bodies.get_mut().retain(|k,_|keys.contains(k));
     }
@@ -84,6 +85,12 @@ impl Privacy {
 mod tests {
     use super::*;
     fn item()->Item{Item{account:"test@example.com".into(),from:"Example".into(),subject:"验证码 123456 有效期为30秒".into(),time:String::new(),received_unix:Some(100),code:Some("123456".into()),summary:"验证码 123456 有效期为30秒".into(),links:vec![],meeting:None,uid:1}}
+    #[test] fn new_event_after_a_snapshot_reveals_the_code_once(){
+        let item=item();let mut p=Privacy::default();
+        p.observe(&item,false,0.0,100);assert!(p.hidden(&item,0.0,60));
+        p.observe(&item,true,2.0,102);assert!(!p.hidden(&item,2.0,60));
+        p.observe(&item,true,35.0,135);assert!(p.hidden(&item,35.0,60));
+    }
     #[test] fn explicit_lifetime_requires_code_context_and_unambiguous_duration(){
         assert_eq!(explicit_lifetime("验证码 123456 有效期为30秒","","123456"),Some(30));
         assert_eq!(explicit_lifetime("","Your verification code 123456 is valid for 5 minutes.","123456"),Some(300));

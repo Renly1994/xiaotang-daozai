@@ -55,23 +55,41 @@ fn create_backdrop_window() -> windows::core::Result<HWND> {
 /// 把底板窗口裁成模糊块的并集。底板和岛仔画布一样大，而 `HTTRANSPARENT`
 /// 只把点击让给同一线程的窗口：不裁剪时，画布范围内（含岛右侧和下方大片空白）
 /// 其他程序的标题栏按钮等都会点不动，直到退出岛仔。
-fn clip_to_pieces(hwnd: HWND, pieces: &[BlurPiece]) {
-    use windows::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, SetWindowRgn, RGN_OR};
+///
+/// 裁剪只负责让出点击，可见轮廓由各模糊块自己的圆角裁剪决定，所以按 `CLIP_GRID` 像素向外取整：
+/// 动画和歌词宽度变化时不必每帧重设窗口区域。每次重设都会让合成器重建这扇窗口，
+/// 在部分核显旧驱动上频繁重设会拖垮合成器（整机闪屏后卡死）。
+const CLIP_GRID: i32 = 8;
+
+fn clip_rects(pieces: &[BlurPiece]) -> Vec<(i32, i32, i32, i32)> {
+    let down = |v: f32| (v.floor() as i32).div_euclid(CLIP_GRID) * CLIP_GRID;
+    let up = |v: f32| -((-(v.ceil() as i32)).div_euclid(CLIP_GRID) * CLIP_GRID);
+    let mut rects: Vec<_> = pieces.iter().filter(|p| p.w > 0.0 && p.h > 0.0)
+        .map(|p| (down(p.x), down(p.y), up(p.x + p.w), up(p.y + p.h))).collect();
+    rects.sort_unstable();
+    rects.dedup();
+    rects
+}
+
+/// 区域没变时不调用系统；返回是否真的重设了区域。
+fn clip_to_pieces(hwnd: HWND, pieces: &[BlurPiece], applied: &mut Option<Vec<(i32, i32, i32, i32)>>) -> bool {
+    use windows::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, SetWindowRgn, RGN_OR};
+    let rects = clip_rects(pieces);
+    if applied.as_ref() == Some(&rects) { return false; }
     unsafe {
         let all = CreateRectRgn(0, 0, 0, 0);
-        if all.0.is_null() { return; }
-        for p in pieces {
-            let (l, t) = (p.x.floor() as i32, p.y.floor() as i32);
-            let (r, b) = ((p.x + p.w).ceil() as i32, (p.y + p.h).ceil() as i32);
-            let d = (p.radius * 2.0).round() as i32;
-            let part = CreateRoundRectRgn(l, t, r + 1, b + 1, d, d);
+        if all.0.is_null() { return false; }
+        for &(l, t, r, b) in &rects {
+            let part = CreateRectRgn(l, t, r, b);
             if part.0.is_null() { continue; }
             let _ = CombineRgn(all, all, part, RGN_OR);
             let _ = DeleteObject(part);
         }
-        // 成功后区域归系统所有，不能再删除。
-        if SetWindowRgn(hwnd, all, true) == 0 { let _ = DeleteObject(all); }
+        // 底板没有重定向位图，内容全由合成视觉提供，不需要系统重画。成功后区域归系统所有，不能再删除。
+        if SetWindowRgn(hwnd, all, false) == 0 { let _ = DeleteObject(all); return false; }
     }
+    *applied = Some(rects);
+    true
 }
 
 pub struct Backdrop {
@@ -86,6 +104,7 @@ pub struct Backdrop {
     brush: CompositionBrush,
     pool: Vec<(SpriteVisual, CompositionRoundedRectangleGeometry)>,
     shown: Vec<BlurPiece>,
+    clip: Option<Vec<(i32, i32, i32, i32)>>,
     visible: bool,
 }
 
@@ -118,7 +137,7 @@ impl Backdrop {
             let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_HOSTBACKDROPBRUSH, (&on as *const BOOL).cast(), std::mem::size_of::<BOOL>() as u32);
         }
         root.SetIsVisible(false)?;
-        Ok(Self { hwnd, placed: (RECT::default(), false), _queue: queue, compositor, _target: target, root, children, brush, pool: Vec::new(), shown: Vec::new(), visible: false })
+        Ok(Self { hwnd, placed: (RECT::default(), false), _queue: queue, compositor, _target: target, root, children, brush, pool: Vec::new(), shown: Vec::new(), clip: None, visible: false })
     }
 
     /// 让底板与岛仔窗口重合，并紧贴在它正下方。
@@ -160,7 +179,7 @@ impl Backdrop {
                     None => visual.SetIsVisible(false)?,
                 }
             }
-            clip_to_pieces(self.hwnd, pieces);
+            clip_to_pieces(self.hwnd, pieces, &mut self.clip);
             self.shown = pieces.to_vec();
         }
         if !self.visible {
@@ -198,17 +217,34 @@ mod tests {
         let hwnd = create_backdrop_window().unwrap();
         unsafe {
             let _ = SetWindowPos(hwnd, None, 0, 0, 960, 270, SWP_NOACTIVATE | SWP_NOZORDER);
-            clip_to_pieces(hwnd, &[BlurPiece { x: 230.0, y: 0.0, w: 180.0, h: 34.0, radius: 12.0 }]);
+            let mut applied = None;
+            assert!(clip_to_pieces(hwnd, &[BlurPiece { x: 230.0, y: 0.0, w: 180.0, h: 34.0, radius: 12.0 }], &mut applied));
             let region = CreateRectRgn(0, 0, 0, 0);
             assert_ne!(GetWindowRgn(hwnd, region).0, 0, "底板必须带窗口区域");
             assert!(PtInRegion(region, 320, 17).as_bool(), "岛体下方仍要显示模糊");
             assert!(!PtInRegion(region, 800, 150).as_bool(), "画布右侧空白处必须让给下层程序");
             assert!(!PtInRegion(region, 320, 200).as_bool(), "岛下方空白处必须让给下层程序");
-            clip_to_pieces(hwnd, &[]);
+            assert!(clip_to_pieces(hwnd, &[], &mut applied));
             GetWindowRgn(hwnd, region);
             assert!(!PtInRegion(region, 320, 17).as_bool(), "没有模糊块时不能占任何区域");
             let _ = DeleteObject(region);
             let _ = DestroyWindow(hwnd);
         }
+    }
+
+    #[test]
+    fn animation_frames_do_not_reset_the_backdrop_region_every_frame() {
+        // 展开 / 歌词宽度变化时轮廓每帧只差零点几到一两个像素：大多数帧不应重设窗口区域。
+        let hwnd = create_backdrop_window().unwrap();
+        let mut applied = None;
+        let mut resets = 0;
+        for i in 0..60 {
+            let w = 180.0 + i as f32 * 0.5;
+            if clip_to_pieces(hwnd, &[BlurPiece { x: 320.0 - w / 2.0, y: 0.0, w, h: 34.0, radius: 12.0 }], &mut applied) { resets += 1; }
+        }
+        assert!(resets <= 10, "60 帧细微变化重设了 {resets} 次窗口区域");
+        let rects = applied.unwrap();
+        assert!(rects.iter().all(|r| r.0 % CLIP_GRID == 0 && r.2 % CLIP_GRID == 0), "区域应按网格取整");
+        unsafe { let _ = DestroyWindow(hwnd); }
     }
 }

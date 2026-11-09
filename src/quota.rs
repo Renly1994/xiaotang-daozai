@@ -70,7 +70,7 @@ impl Config {
         if provider==Provider::DeepSeek{return Err("请使用 API Key 连接 DeepSeek".into());}
         if provider==Provider::Gemini{return Err("请使用浏览器或 Cookie 连接 Gemini 网页账号".into());}
         if provider==Provider::GrokBot{return self.import_grok(&source,&alias).map(|_|());}
-        if provider==Provider::Claude&&claude::is_desktop(&source){return self.import_claude(&source,&alias).map(|_|());}
+        if provider==Provider::Claude{return self.import_claude(&source,&alias).map(|_|());}
         if !source.is_file(){return Err("请选择已有的登录 JSON 文件".into());}
         let auth=credentials(provider,&source)?;
         if self.accounts.iter().filter(|a|a.provider==provider).any(|a|account_credentials(a).is_ok_and(|existing|same_login(&existing,&auth))){return Err("这个账号已经添加".into());}
@@ -115,23 +115,30 @@ impl Config {
         Ok(added)
     }
     fn import_claude(&mut self,path:&Path,alias:&str)->Result<usize,String>{
-        let profiles=claude::profiles(path)?;let path=fs::canonicalize(path).unwrap_or_else(|_|path.to_owned());let mut added=0;
+        let path=claude::local_source(path);let profiles=claude::profiles(&path)?;let path=fs::canonicalize(&path).unwrap_or_else(|_|path.parent().and_then(|p|fs::canonicalize(p).ok()).and_then(|p|path.file_name().map(|name|p.join(name))).unwrap_or_else(||path.clone()));let mut added=0;
         for profile in profiles{
             if let Some(existing)=self.accounts.iter_mut().find(|a|a.provider==Provider::Claude&&a.slot.as_deref()==Some(&profile.slot)){
-                if claude::credentials(existing).is_err(){existing.source=path.clone();}continue;
+                if claude::fetch(existing).is_err(){existing.source=path.clone();}continue;
             }
-            let id=format!("ClaudeDesktop-{}",profile.slot);let pinned=self.accounts.is_empty();if pinned{self.selected=id.clone();}
+            if let Some(existing)=self.accounts.iter_mut().find(|a|a.provider==Provider::Claude&&a.slot.is_none()&&claude::local_source(&a.source)==path){existing.source=path.clone();existing.slot=Some(profile.slot);continue;}
+            let id=format!("ClaudeLocal-{}",profile.slot);let pinned=self.accounts.is_empty();if pinned{self.selected=id.clone();}
             let label=if alias.trim().is_empty(){profile.label}else{alias.trim().to_owned()};
             self.accounts.push(Account{id,provider:Provider::Claude,alias:label,source:path.clone(),slot:Some(profile.slot),enabled:true,pinned});added+=1;
         }
         Ok(added)
     }
+    pub(crate) fn connect_claude_code(&mut self,alias:&str)->Result<usize,String>{
+        let path=claude::code_path();claude::install_code_collector(&path)?;self.import_claude(&path,alias)
+    }
+    pub(crate) fn connect_claude_desktop(&mut self,alias:&str)->Result<usize,String>{
+        let roaming=std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_default();let local=std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_default();let mut added=0;let mut found=false;let mut error="请先打开 Claude 桌面版并查看用量".to_string();
+        for path in claude::paths(&roaming,&local){match self.import_claude(&path,alias){Ok(n)=>{added+=n;found=true;},Err(e)=>error=e}}
+        if found{Ok(added)}else{Err(error)}
+    }
     pub fn discover(&mut self)->Discovery {
         let home=std::env::var_os("USERPROFILE").or_else(||std::env::var_os("HOME")).map(PathBuf::from).unwrap_or_default();
-        let mut candidates=vec![(Provider::Codex,home.join(".codex/auth.json")),(Provider::Claude,home.join(".claude/.credentials.json")),(Provider::Kimi,home.join(".kimi/credentials/kimi-code.json")),(Provider::Kimi,home.join(".kimi-code/credentials/kimi-code.json"))];
-        for (provider,key,file) in [(Provider::Codex,"CODEX_HOME","auth.json"),(Provider::Claude,"CLAUDE_CONFIG_DIR",".credentials.json")]{
-            if let Some(dir)=std::env::var_os(key).filter(|s|!s.is_empty()){candidates.push((provider,PathBuf::from(dir).join(file)));}
-        }
+        let mut candidates=vec![(Provider::Codex,home.join(".codex/auth.json")),(Provider::Claude,claude::code_path()),(Provider::Kimi,home.join(".kimi/credentials/kimi-code.json")),(Provider::Kimi,home.join(".kimi-code/credentials/kimi-code.json"))];
+        if let Some(dir)=std::env::var_os("CODEX_HOME").filter(|s|!s.is_empty()){candidates.push((Provider::Codex,PathBuf::from(dir).join("auth.json")));}
         candidates.extend(self.accounts.iter().filter(|a|matches!(a.provider,Provider::Codex|Provider::Kimi)||(a.provider==Provider::Claude&&a.slot.is_none())).map(|a|(a.provider,a.source.clone())));
         let before=self.accounts.len();
         let mut notes=self.discover_files(&candidates);
@@ -147,6 +154,7 @@ impl Config {
     fn discover_files(&mut self,candidates:&[(Provider,PathBuf)])->Vec<String>{
         let mut notes=Vec::new();
         for (provider,path) in candidates.iter().filter(|(_,p)|p.is_file()){
+            if *provider==Provider::Claude{if let Err(error)=self.import_claude(path,""){notes.push(error);}continue;}
             let auth=match credentials(*provider,path){Ok(auth)=>auth,Err(error)=>{notes.push(format!("{}：{error}",provider.name()));continue;}};
             if let Some(existing)=self.accounts.iter_mut().filter(|a|a.provider==*provider).find(|a|account_credentials(a).is_ok_and(|old|same_login(&old,&auth))){
                 if auth.stamp>fs::metadata(&existing.source).and_then(|m|m.modified()).ok(){existing.source=fs::canonicalize(path).unwrap_or_else(|_|path.clone());}
@@ -181,6 +189,18 @@ pub struct Window {pub label:String,pub seconds:Option<i64>,pub remaining:f32,pu
 #[derive(Clone, Debug, Default)]
 #[derive(serde::Serialize,serde::Deserialize)]
 pub struct Snapshot {pub plan:String,pub windows:Vec<Window>,pub extra:Vec<Window>,pub at:i64,pub wallet:Option<deepseek::Wallet>,pub credits:Option<workbuddy::Credits>}
+impl Account {
+    pub(crate) fn cache_identity_marker(&self)->Value {
+        if claude::is_desktop(&self.source){json!(2)}else{json!(true)}
+    }
+    pub(crate) fn cached_snapshot(&self,cache:&Value)->Option<Snapshot>{
+        let entry=&cache[&self.id];
+        if entry["provider"].as_str()!=Some(self.provider.name()) || entry["slot"].as_str()!=self.slot.as_deref(){return None;}
+        if self.provider==Provider::Claude && (entry["source"].as_str()!=self.source.to_str() || entry["local_identity_checked"]!=self.cache_identity_marker()){return None;}
+        let snapshot:Snapshot=serde_json::from_value(entry["snapshot"].clone()).ok()?;
+        (snapshot.at>0 && !snapshot.wallet.as_ref().is_some_and(|w|w.balances.is_empty())).then_some(snapshot)
+    }
+}
 impl Snapshot {
     pub fn rings(&self)->Vec<&Window>{let mut all:Vec<_>=self.windows.iter().collect();all.sort_by_key(|w|w.seconds.unwrap_or(i64::MAX));all.truncate(2);all}
 }
@@ -235,12 +255,13 @@ fn login_json(path:&Path)->Result<Value,String>{
     serde_json::from_slice(raw.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&raw)).map_err(|_|"登录文件不是有效的 JSON".into())
 }
 fn account_credentials(account:&Account)->Result<Credential,String>{
-    if account.provider==Provider::Claude&&account.slot.is_some(){claude::credentials(account)}else{credentials(account.provider,&account.source)}
+    credentials(account.provider,&account.source)
 }
 fn credentials(provider:Provider,path:&Path)->Result<Credential,String>{
+    if provider==Provider::Claude{return Err("Claude 仅使用本地用量记录，不读取登录令牌".into());}
     let root=login_json(path)?;
     let v=if provider==Provider::Codex{root.get("auth_json").unwrap_or(&root)}else{&root};
-    let token=match provider{Provider::Codex=>v.pointer("/tokens/access_token").or_else(||v.get("access_token")),Provider::Claude=>v.pointer("/claudeAiOauth/accessToken"),Provider::Kimi=>v.get("access_token"),Provider::ZCode|Provider::GrokBot|Provider::Gemini|Provider::WorkBuddy|Provider::DeepSeek=>None}.and_then(Value::as_str).filter(|s|!s.trim().is_empty()).ok_or("未找到订阅账号的登录凭据，请选择对应工具的登录文件")?.to_owned();
+    let token=match provider{Provider::Codex=>v.pointer("/tokens/access_token").or_else(||v.get("access_token")),Provider::Kimi=>v.get("access_token"),Provider::Claude|Provider::ZCode|Provider::GrokBot|Provider::Gemini|Provider::WorkBuddy|Provider::DeepSeek=>None}.and_then(Value::as_str).filter(|s|!s.trim().is_empty()).ok_or("未找到订阅账号的登录凭据，请选择对应工具的登录文件")?.to_owned();
     let claims=token.split('.').nth(1).and_then(|b|base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(b).ok()).and_then(|b|serde_json::from_slice::<Value>(&b).ok()).unwrap_or(Value::Null);
     let account_id=v.pointer("/tokens/account_id").or_else(||v.get("account_id")).and_then(Value::as_str).or_else(||claims.pointer("/https:~1~1api.openai.com~1auth/chatgpt_account_id").and_then(Value::as_str)).filter(|s|!s.is_empty()).map(str::to_owned);
     let identity=match provider{
@@ -323,16 +344,16 @@ fn http_agent()->ureq::Agent{
     if server.is_empty(){None}else if server.contains("://"){Some(server.into())}else{Some(format!("http://{server}"))}
 }
 fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
+    if account.provider==Provider::Claude{return claude::fetch(account).map_err(|e|(e,0));}
     if account.provider==Provider::ZCode{return zcode::fetch(agent,account).map_err(|e|(e,60));}
     if account.provider==Provider::WorkBuddy{return workbuddy::fetch(agent,account);}
     if account.provider==Provider::DeepSeek{return deepseek::fetch(agent,account);}
     if account.provider==Provider::GrokBot{return grok::fetch(agent,account);}
     if account.provider==Provider::Gemini{return gemini::fetch(agent,account);}
     let auth=account_credentials(account).map_err(|e|(e,0))?;
-    let url=match account.provider{Provider::Codex=>"https://chatgpt.com/backend-api/wham/usage",Provider::Claude=>"https://api.anthropic.com/api/oauth/usage",Provider::Kimi=>"https://api.kimi.com/coding/v1/usages",Provider::ZCode|Provider::GrokBot|Provider::Gemini|Provider::WorkBuddy|Provider::DeepSeek=>unreachable!()};
+    let url=match account.provider{Provider::Codex=>"https://chatgpt.com/backend-api/wham/usage",Provider::Kimi=>"https://api.kimi.com/coding/v1/usages",Provider::Claude|Provider::ZCode|Provider::GrokBot|Provider::Gemini|Provider::WorkBuddy|Provider::DeepSeek=>unreachable!()};
     let mut req=agent.get(url).set("Authorization",&format!("Bearer {}",auth.token)).set("Accept","application/json").set("User-Agent","codex-cli/Daozai");
     if account.provider==Provider::Codex{if let Some(id)=&auth.account_id{req=req.set("ChatGPT-Account-Id",id);}}
-    if account.provider==Provider::Claude{req=req.set("anthropic-beta","oauth-2025-04-20");}
     let response=req.call().map_err(|e|match e{ureq::Error::Status(401|403,_)=>("登录已失效或权限不足，请在对应工具中重新登录".into(),0),ureq::Error::Status(429,r)=>("请求过于频繁，稍后自动重试".into(),r.header("Retry-After").and_then(|s|s.parse().ok()).unwrap_or(180).clamp(30,3600)),ureq::Error::Status(n,_)=>(format!("额度服务暂不可用（{n}）"),60),_=>("无法连接额度服务，请检查网络或代理".into(),30)})?;
     let mut body=String::new();response.into_reader().take(1024*1024).read_to_string(&mut body).map_err(|_|("读取额度响应失败".into(),30))?;
     if auth.stamp!=fs::metadata(&account.source).and_then(|m|m.modified()).ok(){return Err(("登录信息已变化，请刷新额度".into(),0));}
@@ -342,6 +363,15 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
 
 #[cfg(test)] mod tests {
     use super::*;
+    #[test]
+    fn claude_local_config_ignores_retired_reset_fields(){
+        let current=json!({"enabled":true,"compact":false,"selected":"desktop","colors":{"desktop":"blue"},"accounts":[{"id":"desktop","provider":"Claude","alias":"离线账号","source":"fixture/config.json","slot":"first","enabled":true,"pinned":true}]});
+        let mut legacy=current.clone();legacy["manual_resets"]=json!({"desktop":{"source":"fixture/config.json","slot":"first","five_hour":1000,"seven_day":2000}});
+        let config=Config::from_json(&legacy);
+        assert_eq!(config,Config::from_json(&current),"旧的手动时间不应影响账号及其他设置");
+        assert!(config.json().get("manual_resets").is_none(),"保存配置不应继续保留已撤回的手动时间");
+        assert_eq!(Config::from_json(&config.json()),config);
+    }
     #[test] #[ignore="连接本机 ZCode 并只读核验套餐"]
     fn zcode_connect_local(){
         let mut config=Config::load();let path=zcode::path().unwrap();
@@ -395,14 +425,14 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
         let _=fs::remove_dir_all(dir);
     }
     #[test]
-    #[ignore="按需只读核验本机识别与 Claude 额度，不保存配置或续期凭据"]
+    #[ignore="按需只读核验本机识别与 Claude 本地额度，不保存配置或续期凭据"]
     fn native_account_read_only_probe(){
         let mut config=Config::load();let before=config.accounts.len();let report=config.discover();
         println!("discovery_added={} notes={:?}",report.added,report.notes);
         for provider in Provider::ALL{println!("provider={} accounts={}",provider.name(),config.accounts.iter().filter(|a|a.provider==provider).count());}
         let agent=http_agent();
         for account in config.accounts.iter().filter(|a|a.provider==Provider::Claude&&a.slot.is_some()){
-            let snapshot=fetch(&agent,account).expect("Claude 桌面版额度应可只读获取");
+            let snapshot=fetch(&agent,account).expect("Claude 桌面版本地额度应可只读获取");
             println!("claude_windows={:?}",snapshot.windows.iter().map(|w|(&w.label,w.remaining)).collect::<Vec<_>>());
         }
         for account in config.accounts.iter().skip(before){

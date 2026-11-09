@@ -59,7 +59,7 @@ impl<'a, T: Read + Write + 'a> Handle<'a, T> {
         let mut h = Handle {
             session,
             keepalive: Duration::from_secs(29 * 60),
-            done: false,
+            done: true, // 收到继续响应后才需要发送 DONE。
         };
         h.init()?;
         Ok(h)

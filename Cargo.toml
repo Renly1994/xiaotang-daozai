@@ -1,6 +1,6 @@
 [package]
 name = "daozai"
-version = "0.6.62"
+version = "0.6.63"
 edition = "2021"
 license = "MIT"
 description = "岛仔：Windows 顶部的桌面伙伴与信息岛"
@@ -28,6 +28,7 @@ record = []
 imap = { path = "vendor/imap" }
 imap-proto = { path = "vendor/imap-proto" }
 eframe = { path = "vendor/eframe" }
+egui = { path = "vendor/egui" }
 
 [dependencies]
 eframe = { version = "0.31", default-features = false, features = ["glow", "wgpu", "default_fonts"] }
@@ -37,6 +38,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 flate2 = "1"
+zstd = { version = "0.13.3", default-features = false }
 ring = "0.17"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 raw-window-handle = "0.6"

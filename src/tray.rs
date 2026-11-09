@@ -646,5 +646,7 @@ pub fn activate_existing(calendar:bool)->bool {unsafe{
     // 托盘有独立线程，能接收消息不代表界面线程仍可响应。
     if SendMessageTimeoutW(window,WM_NULL,WPARAM(0),LPARAM(0),
         SMTO_ABORTIFHUNG|SMTO_ERRORONEXIT,1500,None).0==0{return false;}
+    // 用户再次启动时，把新进程的前台激活权限交给现有实例，无需模拟按键。
+    let _=AllowSetForegroundWindow(tray_pid);
     request_existing_window(tray,calendar)
 }}
