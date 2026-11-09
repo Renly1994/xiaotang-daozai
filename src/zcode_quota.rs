@@ -57,7 +57,7 @@ fn coding(v:&Value)->Result<Snapshot,String>{
         let kind=row["type"].as_str().unwrap_or_default();
         let label=if kind=="TIME_LIMIT"{"工具调用".into()}else{super::cadence(seconds)};
         let reset=row["nextResetTime"].as_i64().filter(|x|*x>0).map(|x|if x>10_000_000_000{x/1000}else{x});
-        let window=Window{label,seconds,remaining:(100.0-used) as f32,reset};
+        let window=Window{label,seconds,remaining:(100.0-used) as f32,reset,amount:None};
         match kind{"TOKENS_LIMIT"|"CREDIT_LIMIT"=>snapshot.windows.push(window),"TIME_LIMIT"=>snapshot.extra.push(window),_=>{}}
     }
     if snapshot.windows.is_empty(){std::mem::swap(&mut snapshot.windows,&mut snapshot.extra);}
@@ -73,7 +73,7 @@ fn start(v:&Value)->Result<Snapshot,String>{
         let Some(left)=super::number(&bucket["remaining_units"]).filter(|n|*n>=0.0) else{continue;};
         let reset=super::number(&bucket["expires_at"]).map(|n|n as i64);
         if reset.is_some_and(|t|t<=snapshot.at){continue;}
-        snapshot.windows.push(Window{label:bucket["show_name"].as_str().filter(|s|!s.is_empty()).unwrap_or("体验额度").into(),seconds:None,remaining:(left/total*100.0).clamp(0.0,100.0) as f32,reset});
+        snapshot.windows.push(Window{label:bucket["show_name"].as_str().filter(|s|!s.is_empty()).unwrap_or("体验额度").into(),seconds:None,remaining:(left/total*100.0).clamp(0.0,100.0) as f32,reset,amount:None});
     }
     if snapshot.windows.is_empty(){return Err("当前 ZCode 账号暂无有效体验额度".into());}
     Ok(snapshot)
