@@ -226,6 +226,7 @@ pub struct Settings {
     pub water_end: u32,
     /// v0.5.5 邮件提醒：总开关、验证码高亮、轮询间隔（秒）、会议提前量（分钟）。
     pub mail_enabled: bool,
+    pub mail_sync_operations:bool,
     pub mail_code: bool,
     pub mail_code_hide_seconds:u32,
     pub mail_interval: u32,
@@ -241,7 +242,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true }
+        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true }
     }
 }
 
@@ -328,6 +329,7 @@ impl Settings {
                 "water_start" => s.water_start = v.parse::<u32>().unwrap_or(9).min(23),
                 "water_end" => s.water_end = v.parse::<u32>().unwrap_or(22).min(24),
                 "mail_enabled" => s.mail_enabled = v != "0",
+                "mail_sync_operations" => s.mail_sync_operations=v=="1",
                 "mail_code" => s.mail_code = v != "0",
                 "mail_code_hide_seconds" => s.mail_code_hide_seconds=v.parse::<u32>().unwrap_or(60).clamp(15,300),
                 "mail_interval" => s.mail_interval = match v.parse::<u32>().unwrap_or(120) { 60 => 60, 300 => 300, _ => 120 },
@@ -386,6 +388,7 @@ impl Settings {
                 ("water_start".into(), self.water_start.to_string()),
                 ("water_end".into(), self.water_end.to_string()),
                 ("mail_enabled".into(), (self.mail_enabled as u8).to_string()),
+                ("mail_sync_operations".into(),(self.mail_sync_operations as u8).to_string()),
                 ("mail_code".into(), (self.mail_code as u8).to_string()),
                 ("mail_code_hide_seconds".into(), self.mail_code_hide_seconds.to_string()),
                 ("mail_interval".into(), self.mail_interval.to_string()),
@@ -586,11 +589,11 @@ impl TodoList {
         (done, total)
     }
 
-    /// 显示顺序：今天要做的在前，其余日子的重复待办排在后面；返回下标。
+    /// 今天未完成在前，其他日期的未完成其次，已完成沉底；原始存储顺序不变。
     pub fn display_order(&self, today: &str) -> Vec<usize> {
-        let (mut now, mut later): (Vec<usize>, Vec<usize>) = (0..self.items.len()).partition(|&i| self.items[i].scheduled_on(today));
-        now.append(&mut later);
-        now
+        let mut order:Vec<_>=(0..self.items.len()).collect();
+        order.sort_by_key(|&i|{let item=&self.items[i];(item.done_for(today),!item.scheduled_on(today))});
+        order
     }
 }
 
@@ -848,7 +851,7 @@ mod tests {
         assert!(o.done_for("2026-11-09") && o.scheduled_on("2026-11-03"));
         assert_eq!(loaded.progress("2026-11-03"), (1, 1));
         assert_eq!(loaded.progress("2026-11-04"), (1, 2));
-        assert_eq!(loaded.display_order("2026-11-03"), vec![1, 0]);
+        assert_eq!(loaded.display_order("2026-11-03"), vec![0, 1],"已完成事项应排在其他日期的未完成事项后面");
         assert_eq!(repeat_label(REPEAT_WORKDAYS), "工作日");
         assert_eq!(repeat_label(0b101_0101), "每周一、三、五、日");
         assert_eq!(repeat_tag(0b001_0101), "周一三五");

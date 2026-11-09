@@ -9,6 +9,37 @@ use egui::ViewportId;
 #[cfg(feature = "accesskit")]
 use egui_winit::accesskit_winit;
 
+#[allow(unsafe_code)]
+pub fn process_viewport_commands(
+    egui_ctx: &egui::Context,
+    info: &mut egui::ViewportInfo,
+    commands: impl IntoIterator<Item = egui::ViewportCommand>,
+    window: &Window,
+    actions_requested: &mut egui::ahash::HashSet<egui_winit::ActionRequested>,
+) {
+    for command in commands {
+        #[cfg(target_os = "windows")]
+        if matches!(command, egui::ViewportCommand::Focus) {
+            use raw_window_handle::HasWindowHandle as _;
+            use winapi::um::winuser::{GetForegroundWindow, IsIconic, IsWindowVisible, SetFocus, SetForegroundWindow};
+            // winit 的强制激活会注入 Alt，可能触发前台程序的语音或其他快捷键。
+            if let Ok(handle) = window.window_handle() {
+                if let raw_window_handle::RawWindowHandle::Win32(handle) = handle.as_raw() {
+                    let hwnd = handle.hwnd.get() as _;
+                    unsafe {
+                        if IsWindowVisible(hwnd) != 0 && IsIconic(hwnd) == 0 {
+                            SetForegroundWindow(hwnd);
+                            if GetForegroundWindow() == hwnd { SetFocus(hwnd); }
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        egui_winit::process_viewport_commands(egui_ctx, info, std::iter::once(command), window, actions_requested);
+    }
+}
+
 /// Create an egui context, restoring it from storage if possible.
 pub fn create_egui_context(storage: Option<&dyn crate::Storage>) -> egui::Context {
     profiling::function_scope!();

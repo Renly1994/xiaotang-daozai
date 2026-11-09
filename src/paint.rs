@@ -224,6 +224,7 @@ impl<'a> Card<'a> {
         let shapes=vec![egui::epaint::ClippedShape{clip_rect:self.painter.clip_rect(),shape:egui::Shape::rect_filled(r,radius*self.s,Color32::WHITE)}];
         for primitive in self.ui.ctx().tessellate(shapes,self.ui.ctx().pixels_per_point()) {
             if let egui::epaint::Primitive::Mesh(mut mesh)=primitive.primitive {
+                mesh.texture_id=egui::TextureId::default();
                 for vertex in &mut mesh.vertices {
                     let t=((vertex.pos.y-r.top())/r.height()).clamp(0.0,1.0);
                     vertex.color=alpha(mix(top,bottom,t),vertex.color.a() as f32/255.0);
@@ -810,7 +811,7 @@ pub fn chase(c: &Card, x0: f32, head: f32, y: f32, thick: f32, tint: Color32, ho
     let lead = 6.0f32; // 头部前方收边（越宽过渡越软）
 
     // 按屏幕像素宽度过滤细光带，移动时亮度不会集中到单行像素。
-    let pixel = 1.0 / (c.s * c.ui.ctx().pixels_per_point() * eframe::root_frame_paint_scale()).max(0.1);
+    let pixel = 1.0 / (c.s * c.ui.ctx().pixels_per_point()).max(0.1);
     let filter_variance = pixel * pixel / 6.0;
     let filtered = |offset: f32, width: f32| {
         let variance = width * width + filter_variance;

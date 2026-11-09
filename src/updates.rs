@@ -5,7 +5,7 @@ use std::{io::{Read, Write}, path::PathBuf, sync::{mpsc::{self, Receiver}, Arc, 
 const REPOSITORY: &str = "https://github.com/Renly1994/xiaotang-daozai";
 const API: &str = "https://api.github.com/repos/Renly1994/xiaotang-daozai/releases/latest";
 const RELEASES: &str = "https://github.com/Renly1994/xiaotang-daozai/releases/latest";
-const BACKUP_DOWNLOAD: &str = "https://hcnounojrizu.feishu.cn/wiki/MpfXwFGf8ijhitkfuxdcELdBnqg";
+const BACKUP_DOWNLOAD: &str = "https://pan.quark.cn/s/0a39b4e1f332";
 
 #[derive(Clone, Debug)]
 struct Release { version: String, notes: String, page: String, package: Option<Package> }
@@ -209,7 +209,7 @@ impl State {
                         }
                         ui.add_space(2.0);
                         ui.horizontal(|ui| {
-                            ui.hyperlink_to(egui::RichText::new("飞书备用下载").size(11.5).color(theme::BLUE),BACKUP_DOWNLOAD);
+                            ui.hyperlink_to(egui::RichText::new("网盘下载").size(11.5).color(theme::BLUE),BACKUP_DOWNLOAD);
                             ui.label(egui::RichText::new("·").color(theme::DIM));
                             ui.hyperlink_to(egui::RichText::new("浏览器下载").size(11.5).color(theme::GRAY),&release.page);
                             ui.label(egui::RichText::new("·").color(theme::DIM));
@@ -225,6 +225,31 @@ impl State {
 }
 
 // Windows 的 GL 透明窗口可能仍显示黑底，按绘制轮廓裁掉窗口外沿。
+/// 只统计岛仔自己的文件（KB）。共享安装文件夹里的其他软件不算在内。
+fn own_files_kb(dir: &std::path::Path) -> u32 {
+    let bytes: u64 = ["daozai.exe", "Uninstall.exe", "LICENSE", "THIRD_PARTY_NOTICES.txt"].iter()
+        .filter_map(|name| std::fs::metadata(dir.join(name)).ok()).filter(|meta| meta.is_file()).map(|meta| meta.len()).sum();
+    bytes.div_ceil(1024).min(u64::from(u32::MAX)) as u32
+}
+
+/// 启动时为安装版登记真实大小：旧版安装器没有写 `EstimatedSize`，
+/// 软件管家会统计整个安装文件夹；装进共享文件夹时会显示几十 GB。只在登记的安装位置就是本程序所在目录时写入。
+#[cfg(windows)]
+pub fn record_install_size() {
+    use windows::{core::w, Win32::System::Registry::{RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_DWORD, RRF_RT_REG_SZ}};
+    let key = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Daozai");
+    let Some(dir) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(PathBuf::from)) else { return };
+    let mut buffer = [0u16; 1024];
+    let mut size = (buffer.len() * 2) as u32;
+    if unsafe { RegGetValueW(HKEY_CURRENT_USER, key, w!("InstallLocation"), RRF_RT_REG_SZ, None, Some(buffer.as_mut_ptr().cast()), Some(&mut size)) }.is_err() { return; }
+    let location = String::from_utf16_lossy(&buffer[..buffer.iter().position(|c| *c == 0).unwrap_or(0)]);
+    let same = |a: &std::path::Path, b: &std::path::Path| a.canonicalize().ok().zip(b.canonicalize().ok()).is_some_and(|(a, b)| a == b);
+    if location.trim().is_empty() || !same(std::path::Path::new(location.trim()), &dir) { return; }
+    let kb = own_files_kb(&dir);
+    if kb == 0 { return; }
+    let _ = unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, key, w!("EstimatedSize"), REG_DWORD.0, Some((&kb as *const u32).cast()), 4) };
+}
+
 #[cfg(windows)]
 fn clip_update_window(rect: egui::Rect, scale: f32) {
     use windows::Win32::{Foundation::{BOOL, HWND, LPARAM}, Graphics::Gdi::*,
@@ -309,7 +334,7 @@ fn download(release: &Release, tx: &mpsc::Sender<Event>, cancel: &AtomicBool) ->
     std::fs::create_dir_all(&work).map_err(|_| "无法创建更新缓存")?;
     let result = (|| {
         let response = http_agent()?
-            .get(&package.url).call().map_err(|_| "连接下载服务器失败，请检查网络或代理，或使用飞书备用下载")?;
+            .get(&package.url).call().map_err(|_| "连接下载服务器失败，请检查网络或代理，或使用网盘下载")?;
         if !response.get_url().starts_with("https://") { return Err("更新下载未使用安全连接".into()); }
         let mut input = response.into_reader();
         let mut output = std::fs::File::create(work.join("update.zip")).map_err(|_| "无法保存更新包")?;
@@ -329,7 +354,7 @@ fn transfer(input: &mut impl Read, output: &mut impl Write, package: &Package, c
     let mut buffer = [0u8; 65536]; let mut total = 0u64;
     loop {
         if cancel.load(Ordering::Relaxed) { return Err("下载已取消".into()); }
-        let length = input.read(&mut buffer).map_err(|_| "下载中断或等待超时，请重试或使用飞书备用下载")?;
+        let length = input.read(&mut buffer).map_err(|_| "下载中断或等待超时，请重试或使用网盘下载")?;
         if length == 0 { break; }
         total += length as u64;
         if total > package.size { return Err("更新包大小不符，请重新下载".into()); }
@@ -383,6 +408,21 @@ fn parse_release(value: &serde_json::Value, current: &str) -> Result<Option<Stri
     let latest = version(tag).ok_or_else(invalid)?;
     let current = version(current).ok_or_else(invalid)?;
     Ok((latest > current).then(|| tag.to_owned()))
+}
+
+#[cfg(test)]
+mod install_size_tests {
+    #[test]
+    fn install_size_counts_only_daozai_files() {
+        let dir = std::env::temp_dir().join(format!("daozai-size-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("Other App")).unwrap();
+        std::fs::write(dir.join("daozai.exe"), vec![0u8; 3000]).unwrap();
+        std::fs::write(dir.join("LICENSE"), vec![0u8; 100]).unwrap();
+        std::fs::write(dir.join("Other App").join("big.bin"), vec![0u8; 5 * 1024 * 1024]).unwrap();
+        std::fs::write(dir.join("other.exe"), vec![0u8; 2 * 1024 * 1024]).unwrap();
+        assert_eq!(super::own_files_kb(&dir), 4, "共享文件夹里其他软件的文件不计入");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
@@ -557,8 +597,8 @@ mod tests {
         std::env::set_var("DAOZAI_DATA_DIR", dest.join("data"));
         let ctx = egui::Context::default();
         let mut app = crate::app::App::new(&ctx, Default::default());
-        app.updates.result = Some(Ok(Some(Release { version: "v0.6.50".into(),
-            notes: "- 更新下载支持 Windows 系统代理\n- 连接失败及时提示，避免长时间停在 0%\n- 新增飞书备用下载入口".into(), page: RELEASES.into(),
+        app.updates.result = Some(Ok(Some(Release { version: "v0.6.63".into(),
+            notes: "- 更新下载支持 Windows 系统代理\n- 连接失败及时提示，避免长时间停在 0%\n- 新增网盘下载入口".into(), page: RELEASES.into(),
             package: Some(Package { url: String::new(), size: 100, hash: String::new() }) })));
         app.updates.dialog_open = true;
         app.settings_tab = 9;
@@ -582,7 +622,7 @@ mod tests {
             ("update-dialog", None, ""),
             ("update-connecting", Some(0.0), ""),
             ("update-downloading", Some(0.42), ""),
-            ("update-failed", None, "连接下载服务器失败，请检查网络或代理，或使用飞书备用下载"),
+            ("update-failed", None, "连接下载服务器失败，请检查网络或代理，或使用网盘下载"),
         ] {
         app.updates.cancel = progress.map(|_| Arc::new(AtomicBool::new(false)));
         app.updates.progress = progress.unwrap_or_default();

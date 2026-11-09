@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 #[cfg(windows)]
 #[path="mail_fetch.rs"]
-mod fetch;
+pub(crate) mod fetch;
 
 pub const SERVICE: &str = "Daozai.Mail";
 
@@ -326,6 +326,7 @@ pub enum Event {
     Status { account: String, status: Status },
     Mail { item: Item, new: bool },
     Test { account: String, ok: bool, note: String },
+    Managed(crate::mail_manage::Completed),
 }
 
 // ---------------------------------------------------------------- 正文解析
@@ -608,7 +609,7 @@ pub mod secrets {
 // ---------------------------------------------------------------- 收信服务
 
 #[cfg(windows)]
-mod net {
+pub(crate) mod net {
     //! TLS 连接 + 163/126 的 pre-login `ID` 握手。
     //!
     //! `imap` 2.4 只在已登录的 `Session` 上暴露 `run_command_and_check_ok`，
@@ -772,7 +773,7 @@ mod service {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::mpsc::{channel, Receiver, Sender};
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration,Instant};
 
     enum Cmd {
         Sync(Vec<Account>, u32),
@@ -782,6 +783,8 @@ mod service {
     pub struct Service {
         cmd: Sender<Cmd>,
         ev: Receiver<Event>,
+        manage: Sender<crate::mail_manage::Request>,
+        done: Receiver<crate::mail_manage::Completed>,
     }
 
     impl Service {
@@ -791,7 +794,8 @@ mod service {
             let _ = std::thread::Builder::new()
                 .name("daozai-mail".into())
                 .spawn(move || supervisor(cmd_rx, ev_tx));
-            Self { cmd: cmd_tx, ev: ev_rx }
+            let (manage,done)=crate::mail_manage::start();
+            Self { cmd: cmd_tx, ev: ev_rx,manage,done }
         }
 
         pub fn sync(&self, accounts: &[Account], interval_secs: u32) {
@@ -802,8 +806,10 @@ mod service {
             let _ = self.cmd.send(Cmd::Test(account, password));
         }
 
+        pub fn manage(&self,request:crate::mail_manage::Request){let _=self.manage.send(request);}
+
         pub fn try_recv(&self) -> Option<Event> {
-            self.ev.try_recv().ok()
+            self.done.try_recv().ok().map(Event::Managed).or_else(||self.ev.try_recv().ok())
         }
     }
 
@@ -868,13 +874,46 @@ mod service {
     }
 
     fn sleep_stop(stop: &AtomicBool, secs: u64) -> bool {
-        for _ in 0..secs * 2 {
-            if stop.load(Ordering::Relaxed) {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(500));
+        sleep_until_stop(stop,Instant::now()+Duration::from_secs(secs))
+    }
+
+    fn sleep_until_stop(stop:&AtomicBool,deadline:Instant)->bool{
+        while !stop.load(Ordering::Relaxed){
+            let left=deadline.saturating_duration_since(Instant::now());
+            if left.is_zero(){return false;}
+            std::thread::sleep(left.min(Duration::from_millis(500)));
         }
-        false
+        true
+    }
+
+    // 只在轮询分支保活。各类邮箱都在同一个检查截止点按 UID 查新邮件。
+    fn wait_for_poll<S:std::io::Read+std::io::Write>(
+        session:&mut imap::Session<S>,start:Instant,secs:u64,allow_noop:&mut bool,mut wait_until:impl FnMut(Instant)->bool,
+    )->imap::Result<()>{
+        const KEEPALIVE:Duration=Duration::from_secs(45);
+        let deadline=start+Duration::from_secs(secs);
+        let mut previous=start;
+        loop{
+            let wake=if *allow_noop{(previous+KEEPALIVE).min(deadline)}else{deadline};
+            if wait_until(wake) || !*allow_noop{return Ok(());}
+            // NOOP 可携带 EXISTS、EXPUNGE、FETCH 等通知；收信以随后的 UID 查询为准。
+            match session.run_command_and_check_ok("NOOP"){
+                Ok(())=>{},
+                // 服务器明确拒绝保活时，保留当前连接，按原间隔用 UID 查询。
+                Err(imap::Error::No(_)|imap::Error::Bad(_))=>*allow_noop=false,
+                Err(error)=>return Err(error),
+            }
+            let now=Instant::now();
+            if wake==deadline || now>=deadline{return Ok(());}
+            previous=wake.max(now);
+        }
+    }
+
+    fn next_retry_delay(base:u64,failures:&mut u32)->u64 {
+        let multiplier=2u64.pow((*failures).min(6));
+        let delay=base.saturating_mul(multiplier).min(60);
+        *failures=failures.saturating_add(1);
+        delay
     }
 
     fn wait_for_change<T: std::io::Read + std::io::Write + imap::extensions::idle::SetReadTimeout>(session: &mut imap::Session<T>) -> imap::Result<()> {
@@ -916,8 +955,9 @@ mod service {
     }
 
     fn worker(account: Account, stop: Arc<AtomicBool>, interval: Arc<AtomicU64>, ev: Sender<Event>) {
-        let mut first = true;
-        let mut last_uid = 0u32;
+        let mut last_uid = None;
+        let mut last_validity=None;
+        let mut failures=0;
         loop {
             if stop.load(Ordering::Relaxed) {
                 return;
@@ -933,7 +973,7 @@ mod service {
                         account: account.email.clone(),
                         status: Status::Auth(e),
                     });
-                    if sleep_stop(&stop, 60) {
+                    if sleep_stop(&stop, next_retry_delay(60,&mut failures)) {
                         return;
                     }
                     continue;
@@ -946,70 +986,329 @@ mod service {
                         account: account.email.clone(),
                         status: Status::Failed(e),
                     });
-                    if sleep_stop(&stop, 30) {
+                    if sleep_stop(&stop, next_retry_delay(30,&mut failures)) {
                         return;
                     }
                     continue;
                 }
             };
             if stop.load(Ordering::Relaxed){let _=session.logout();return;}
-            let _ = ev.send(Event::Status {
-                account: account.email.clone(),
-                status: Status::Ready,
-            });
-            if session.select("INBOX").is_err() {
+            let Ok(mailbox)=session.select("INBOX") else {
                 let _ = ev.send(Event::Status {
                     account: account.email.clone(),
                     status: Status::Failed("无法打开收件箱".into()),
                 });
-                if sleep_stop(&stop, 30) {
+                if sleep_stop(&stop, next_retry_delay(30,&mut failures)) {
                     return;
                 }
                 continue;
-            }
-            if first {
-                last_uid = recent(&mut session, &account, &ev).unwrap_or(0);
-                first = false;
-            }
-
-            let idle_supported=match session.capabilities() {
-                Ok(capabilities)=>capabilities.has_str("IDLE"),
-                Err(_)=>{if sleep_stop(&stop,10){return;}continue;},
             };
-            loop {
-                if stop.load(Ordering::Relaxed) {
-                    let _ = session.logout();
-                    return;
-                }
-                if idle_supported {
-                    // 推送连接出错后重连，不能永久降级为轮询。
-                    if wait_for_change(&mut session).is_err() { break; }
-                } else {
-                    if sleep_stop(&stop, interval.load(Ordering::Relaxed)) {
-                        let _ = session.logout();
-                        return;
-                    }
-                    if session.noop().is_err() {
-                        break;
-                    }
-                }
-                if stop.load(Ordering::Relaxed) {
-                    let _ = session.logout();
-                    return;
-                }
-                if fetch_new(&mut session, &account, &mut last_uid, &ev).is_err() {
-                    break;
-                }
+            if mailbox.uid_validity.is_none() || mailbox.uid_validity!=last_validity{last_uid=None;}
+            last_validity=mailbox.uid_validity;
+            let connected_at=std::time::Instant::now();
+            match monitor(&mut session,&account,&mut last_uid,&stop,&interval,&ev) {
+                Ok(())=>return,
+                Err(note)=>{let _=ev.send(Event::Status{account:account.email.clone(),status:Status::Failed(note)});}
             }
-            if sleep_stop(&stop, 10) {
+            if connected_at.elapsed()>=Duration::from_secs(60){failures=0;}
+            if sleep_stop(&stop, next_retry_delay(10,&mut failures)) {
                 return;
             }
         }
     }
 
+    fn monitor<S:std::io::Read+std::io::Write+imap::extensions::idle::SetReadTimeout>(
+        session:&mut imap::Session<S>,account:&Account,last_uid:&mut Option<u32>,
+        stop:&AtomicBool,interval:&AtomicU64,ev:&Sender<Event>,
+    )->Result<(),String> {
+        match last_uid {
+            Some(last)=>fetch_new(session,account,last,ev).map_err(|_|"读取新邮件失败，正在重连")?,
+            None=>{*last_uid=Some(recent(session,account,ev).map_err(|_|"读取最近邮件失败，正在重连")?);}
+        }
+        let mut allow_noop=true;
+        let mut idle_supported=session.capabilities().map_err(|_|"读取收信能力失败，正在重连")?.has_str("IDLE");
+        let _=ev.send(Event::Status{account:account.email.clone(),status:Status::Ready});
+        loop {
+            if stop.load(Ordering::Relaxed){let _=session.logout();return Ok(());}
+            let previous=*last_uid;
+            let cycle_started=std::time::Instant::now();
+            if idle_supported {
+                match wait_for_change(session) {
+                    Ok(())=>{},
+                    // 服务器明确拒绝推送时，本次连接改为轮询；重连后重新检查推送能力。
+                    Err(imap::Error::No(_)|imap::Error::Bad(_))=>idle_supported=false,
+                    Err(_)=>return Err("邮件推送连接中断，正在重连".into()),
+                }
+            }else{
+                wait_for_poll(session,cycle_started,interval.load(Ordering::Relaxed),&mut allow_noop,|at|sleep_until_stop(stop,at))
+                    .map_err(|_|"邮件连接中断，正在重连")?;
+            }
+            if stop.load(Ordering::Relaxed){let _=session.logout();return Ok(());}
+            fetch_new(session,account,last_uid.as_mut().unwrap(),ev).map_err(|_|"读取新邮件失败，正在重连")?;
+            if idle_supported && *last_uid==previous && cycle_started.elapsed()<Duration::from_secs(5) {
+                if sleep_stop(stop,5){let _=session.logout();return Ok(());}
+                // 冷却后补读新邮件，并消费等待期间到达的通知，再进入下一轮推送等待。
+                fetch_new(session,account,last_uid.as_mut().unwrap(),ev).map_err(|_|"读取新邮件失败，正在重连")?;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod receiving_tests {
+        use super::*;
+        use std::{io::{BufRead,Write},net::{TcpListener,TcpStream}};
+
+        #[derive(Clone,Copy)]
+        enum Scenario {
+            RejectedIdle, SupportedIdle, EmptyIdle, CooldownMail,
+            InitialMailbox, DisconnectedIdle, BrokenHistory, Burst, PollKeepalive, BrokenNoop, RefusedNoop,
+        }
+
+        fn inbox(scenario:Scenario)->(imap::Session<TcpStream>,Arc<AtomicBool>,std::thread::JoinHandle<Vec<String>>) {
+            let listener=TcpListener::bind("127.0.0.1:0").unwrap();
+            let address=listener.local_addr().unwrap();
+            let stop=Arc::new(AtomicBool::new(false));let server_stop=stop.clone();
+            let server=std::thread::spawn(move || {
+                let (mut socket,_)=listener.accept().unwrap();
+                let timeout=if matches!(scenario,Scenario::EmptyIdle|Scenario::CooldownMail){8}else{2};
+                socket.set_read_timeout(Some(Duration::from_secs(timeout))).unwrap();
+                let mut reader=std::io::BufReader::new(socket.try_clone().unwrap());
+                let mut commands=Vec::new();let mut idle_tag=String::new();let mut idle_started=false;let mut fetches=0;let mut searches=0;
+                write!(socket,"* OK ready\r\n").unwrap();
+                loop {
+                    let mut line=String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0)=>break,
+                        Ok(_)=>{},
+                        Err(error) if error.kind()==std::io::ErrorKind::ConnectionReset=>break,
+                        Err(error)=>panic!("模拟收信连接读取失败：{error}"),
+                    }
+                    let line=line.trim_end();commands.push(line.to_string());
+                    if line=="DONE" {
+                        if matches!(scenario,Scenario::SupportedIdle|Scenario::EmptyIdle|Scenario::CooldownMail){write!(socket,"{idle_tag} OK idle ended\r\n").unwrap();}
+                        else{write!(socket,"{idle_tag} BAD not idling\r\n").unwrap();}
+                        continue;
+                    }
+                    let (tag,command)=line.split_once(' ').unwrap();
+                    if command.starts_with("LOGIN ") {
+                        write!(socket,"{tag} OK login\r\n").unwrap();
+                    }else if command.starts_with("UID SEARCH ") {
+                        searches+=1;
+                        let uids=match scenario {
+                            Scenario::EmptyIdle=>"",
+                            Scenario::CooldownMail if searches<3=>"",
+                            Scenario::RejectedIdle|Scenario::SupportedIdle if !idle_started=>"",
+                            Scenario::BrokenHistory|Scenario::InitialMailbox=>"42",
+                            Scenario::Burst=>"1 2 3 4 5 6 7",
+                            _=>"41",
+                        };
+                        if uids.is_empty(){write!(socket,"* SEARCH\r\n{tag} OK search\r\n").unwrap();}
+                        else{write!(socket,"* SEARCH {uids}\r\n{tag} OK search\r\n").unwrap();}
+                    }else if command.starts_with("UID FETCH ") {
+                        if matches!(scenario,Scenario::BrokenHistory){write!(socket,"* BYE connection lost\r\n").unwrap();break;}
+                        let uid=command.split_whitespace().nth(2).unwrap();
+                        let header=format!("From: sender@example.com\r\nSubject: mail-{uid}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n");
+                        let body="ordinary message";
+                        write!(socket,"* 1 FETCH (UID {uid} BODY[HEADER] {{{}}}\r\n{header} BODY[TEXT] {{{}}}\r\n{body})\r\n{tag} OK fetch\r\n",header.len(),body.len()).unwrap();
+                        fetches+=1;
+                        if matches!(scenario,Scenario::SupportedIdle|Scenario::CooldownMail) && fetches==2 {server_stop.store(true,Ordering::Relaxed);}
+                    }else if command=="CAPABILITY" {
+                        let capabilities=if matches!(scenario,Scenario::InitialMailbox){"IMAP4rev1"}else{"IMAP4rev1 IDLE"};
+                        write!(socket,"* CAPABILITY {capabilities}\r\n{tag} OK capabilities\r\n").unwrap();
+                    }else if command=="IDLE" {
+                        if matches!(scenario,Scenario::EmptyIdle) && idle_started {server_stop.store(true,Ordering::Relaxed);}
+                        idle_started=true;idle_tag=tag.to_string();
+                        if matches!(scenario,Scenario::RejectedIdle){
+                            write!(socket,"{tag} NO IDLE unavailable\r\n").unwrap();
+                        }else if matches!(scenario,Scenario::SupportedIdle|Scenario::EmptyIdle|Scenario::CooldownMail){
+                            write!(socket,"+ idling\r\n* 1 EXISTS\r\n").unwrap();
+                        }else{write!(socket,"* BYE connection lost\r\n").unwrap();break;}
+                    }else if command=="NOOP" {
+                        if matches!(scenario,Scenario::RefusedNoop){write!(socket,"{tag} BAD unavailable\r\n").unwrap();continue;}
+                        if matches!(scenario,Scenario::BrokenNoop){write!(socket,"* BYE closing\r\n").unwrap();break;}
+                        if matches!(scenario,Scenario::PollKeepalive){
+                            write!(socket,"* 1 EXISTS\r\n* 1 FETCH (FLAGS (\\Seen))\r\n").unwrap();
+                        }else{server_stop.store(true,Ordering::Relaxed);}
+                        write!(socket,"{tag} OK noop\r\n").unwrap();
+                    }else if command=="LOGOUT" {
+                        write!(socket,"* BYE logout\r\n{tag} OK logout\r\n").unwrap();break;
+                    }else{panic!("意外的收信命令：{command}");}
+                }
+                commands
+            });
+            let socket=TcpStream::connect(address).unwrap();socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut client=imap::Client::new(socket);client.read_greeting().unwrap();
+            (client.login("synthetic","synthetic").unwrap(),stop,server)
+        }
+
+        fn account()->Account {Account{provider:Provider::Mail163,email:"test@163.com".into(),enabled:true,custom:None}}
+
+        #[test]
+        fn polling_keepalives_do_not_fetch_until_the_configured_deadline(){
+            for (secs,steps) in [(60,vec![45,60]),(120,vec![45,90,120]),(300,vec![45,90,135,180,225,270,300])] {
+                let (mut session,_,server)=inbox(Scenario::PollKeepalive);
+                let start=Instant::now();
+                let mut wakes=Vec::new();
+                wait_for_poll(&mut session,start,secs,&mut true,|at|{wakes.push((at-start).as_secs());false}).unwrap();
+                let (tx,_)=channel();let mut last=40;fetch_new(&mut session,&account(),&mut last,&tx).unwrap();
+                session.logout().unwrap();drop(session);
+                let commands=server.join().unwrap();assert_eq!(wakes,steps);
+                let before_search=commands.iter().skip(1).take_while(|s|!s.contains("UID SEARCH")).collect::<Vec<_>>();
+                assert_eq!(before_search.len(),steps.len());assert!(before_search.iter().all(|s|s.ends_with(" NOOP")));
+                assert_eq!(commands.iter().filter(|s|s.contains("UID SEARCH")).count(),1);
+                assert_eq!(last,41);
+            }
+        }
+        #[test]
+        fn rejected_keepalive_keeps_polling_without_repeated_noops(){
+            let (mut session,_,server)=inbox(Scenario::RefusedNoop);
+            let mut allow_noop=true;
+            let (tx,_)=channel();let mut last=40;
+            for steps in [vec![45,120],vec![120]]{
+                let start=Instant::now();let mut wakes=Vec::new();
+                wait_for_poll(&mut session,start,120,&mut allow_noop,|at|{wakes.push((at-start).as_secs());false}).unwrap();
+                assert_eq!(wakes,steps);assert!(!allow_noop);
+                fetch_new(&mut session,&account(),&mut last,&tx).unwrap();
+            }
+            session.logout().unwrap();drop(session);let commands=server.join().unwrap();
+            assert_eq!(commands.iter().filter(|s|s.ends_with(" NOOP")).count(),1);
+            assert_eq!(commands.iter().filter(|s|s.contains("UID SEARCH")).count(),2);assert_eq!(last,41);
+        }
+
+        #[test]
+        fn polling_stops_before_sending_or_after_a_broken_keepalive(){
+            for cancel in [true,false]{
+                let (mut session,_,server)=inbox(Scenario::BrokenNoop);
+                let result=wait_for_poll(&mut session,Instant::now(),120,&mut true,|_|cancel);
+                assert_eq!(result.is_ok(),cancel);
+                drop(session);let commands=server.join().unwrap();
+                assert_eq!(commands.iter().filter(|s|s.ends_with(" NOOP")).count(),usize::from(!cancel));
+                assert!(!commands.iter().any(|s|s.contains("UID SEARCH")));
+            }
+        }
+
+        #[test]
+        fn reconnect_backoff_is_bounded_and_can_reset() {
+            let mut failures=0;
+            let delays:Vec<_>=(0..7).map(|_|next_retry_delay(10,&mut failures)).collect();
+            assert_eq!(delays,vec![10,20,40,60,60,60,60]);
+            failures=0;
+            assert_eq!(next_retry_delay(30,&mut failures),30);
+            assert_eq!(next_retry_delay(30,&mut failures),60);
+            assert_eq!(next_retry_delay(60,&mut failures),60);
+        }
+
+        #[test]
+        fn cooldown_wait_can_be_cancelled() {
+            let stop=Arc::new(AtomicBool::new(false));let worker_stop=stop.clone();
+            let started=std::time::Instant::now();
+            let worker=std::thread::spawn(move || sleep_stop(&worker_stop,30));
+            std::thread::sleep(Duration::from_millis(50));stop.store(true,Ordering::Relaxed);
+            assert!(worker.join().unwrap());
+            assert!(started.elapsed()<Duration::from_secs(2),"停止监听应打断后台等待");
+        }
+
+        #[test]
+        fn repeated_empty_pushes_are_throttled() {
+            let (mut session,stop,server)=inbox(Scenario::EmptyIdle);
+            let (ev,rx)=channel();let mut last=Some(40);
+            let started=std::time::Instant::now();
+            let result=monitor(&mut session,&account(),&mut last,&stop,&AtomicU64::new(120),&ev);
+            let elapsed=started.elapsed();drop(session);let commands=server.join().unwrap();
+            assert!(result.is_ok(),"{result:?}");assert_eq!(last,Some(40));
+            assert!(elapsed>=Duration::from_secs(5),"两次空推送之间应降频，实际耗时 {elapsed:?}");
+            assert_eq!(commands.iter().filter(|command|command.ends_with(" IDLE")).count(),2);
+            assert!(!rx.try_iter().any(|event|matches!(event,Event::Mail{..})));
+        }
+
+        #[test]
+        fn new_mail_arriving_during_cooldown_is_read_before_idling_again() {
+            let (mut session,stop,server)=inbox(Scenario::CooldownMail);
+            let (ev,rx)=channel();let mut last=Some(40);
+            let result=monitor(&mut session,&account(),&mut last,&stop,&AtomicU64::new(120),&ev);
+            drop(session);let commands=server.join().unwrap();
+            assert!(result.is_ok(),"{result:?}");assert_eq!(last,Some(41));
+            assert!(rx.try_iter().any(|event|matches!(event,Event::Mail{item,new:true} if item.uid==41)));
+            assert_eq!(commands.iter().filter(|command|command.ends_with(" IDLE")).count(),1,"冷却结束后应先检查期间到达的新邮件");
+        }
+
+        #[test]
+        fn supported_idle_still_delivers_mail_without_polling() {
+            let (mut session,stop,server)=inbox(Scenario::SupportedIdle);
+            let (ev,rx)=channel();let mut last=Some(40);
+            let result=monitor(&mut session,&account(),&mut last,&stop,&AtomicU64::new(0),&ev);
+            drop(session);let commands=server.join().unwrap();
+            assert!(result.is_ok(),"{result:?}");assert_eq!(last,Some(41));
+            assert!(rx.try_iter().any(|event|matches!(event,Event::Mail{item,new:true} if item.uid==41)));
+            assert_eq!(commands.iter().filter(|command|command.as_str()=="DONE").count(),1);
+            assert!(!commands.iter().any(|command|command.ends_with(" NOOP")));
+        }
+
+        #[test]
+        fn initial_mail_is_silent_and_ready_follows_successful_reading() {
+            for provider in Provider::ALL {
+                let (mut session,stop,server)=inbox(Scenario::InitialMailbox);
+                let (ev,rx)=channel();let mut last=None;let account=Account{provider,..account()};
+                let result=monitor(&mut session,&account,&mut last,&stop,&AtomicU64::new(0),&ev);
+                drop(session);server.join().unwrap();
+                assert!(result.is_ok(),"{result:?}");assert_eq!(last,Some(42));
+                let events:Vec<_>=rx.try_iter().collect();
+                let mail=events.iter().position(|event|matches!(event,Event::Mail{item,new:false} if item.uid==42)).unwrap();
+                let ready=events.iter().position(|event|matches!(event,Event::Status{status:Status::Ready,..})).unwrap();
+                assert!(mail<ready,"成功读取后再显示已连接");
+                assert!(!events.iter().any(|event|matches!(event,Event::Mail{new:true,..})),"首次加载应保持静默");
+            }
+        }
+
+        #[test]
+        fn rejected_idle_still_receives_new_163_mail() {
+            let (mut session,stop,server)=inbox(Scenario::RejectedIdle);
+            let (ev,rx)=channel();let mut last=Some(40);
+            let result=monitor(&mut session,&account(),&mut last,&stop,&AtomicU64::new(0),&ev);
+            drop(session);let commands=server.join().unwrap();
+            assert!(result.is_ok(),"推送被拒绝后应继续轮询收信：{result:?} commands={commands:?}");
+            assert_eq!(last,Some(41));
+            assert!(rx.try_iter().any(|event|matches!(event,Event::Mail{item,new:true} if item.uid==41)));
+            assert!(!commands.iter().any(|command|command=="DONE"),"尚未进入推送状态时不能发送 DONE");
+            assert!(commands.iter().any(|command|command.ends_with(" NOOP")));
+        }
+
+        #[test]
+        fn reconnect_checks_new_mail_before_waiting_for_push() {
+            let (mut session,stop,server)=inbox(Scenario::DisconnectedIdle);
+            let (ev,rx)=channel();let mut last=Some(40);
+            assert!(monitor(&mut session,&account(),&mut last,&stop,&AtomicU64::new(0),&ev).is_err());
+            drop(session);server.join().unwrap();
+            assert_eq!(last,Some(41),"重连后应先补读断线期间到达的邮件");
+            assert!(rx.try_iter().any(|event|matches!(event,Event::Mail{item,new:true} if item.uid==41)));
+        }
+
+        #[test]
+        fn interrupted_initial_fetch_keeps_history_retryable() {
+            let (mut session,stop,server)=inbox(Scenario::BrokenHistory);
+            let (ev,rx)=channel();let mut last=None;
+            assert!(monitor(&mut session,&account(),&mut last,&stop,&AtomicU64::new(0),&ev).is_err());
+            drop(session);server.join().unwrap();
+            assert_eq!(last,None,"最近邮件读取失败后不能提交最大 UID");
+            assert!(!rx.try_iter().any(|event|matches!(event,Event::Status{status:Status::Ready,..})));
+        }
+
+        #[test]
+        fn bursts_do_not_skip_messages_between_batches() {
+            let (mut session,_,server)=inbox(Scenario::Burst);
+            let (ev,rx)=channel();let mut last=0;
+            fetch_new(&mut session,&account(),&mut last,&ev).unwrap();
+            fetch_new(&mut session,&account(),&mut last,&ev).unwrap();
+            drop(session);server.join().unwrap();
+            let uids:Vec<_>=rx.try_iter().filter_map(|event|match event {Event::Mail{item,new:true}=>Some(item.uid),_=>None}).collect();
+            assert_eq!(uids,vec![1,2,3,4,5,6,7],"批量读取不能跳过前面的新邮件");
+            assert_eq!(last,7);
+        }
+    }
+
     /// 首次连接：把最近 20 封读进面板，但不当作新邮件提示。
-    fn recent(
-        session: &mut imap::Session<net::Prefixed<net::Stream>>,
+    fn recent<S:std::io::Read+std::io::Write>(
+        session: &mut imap::Session<S>,
         account: &Account,
         ev: &Sender<Event>,
     ) -> Result<u32, ()> {
@@ -1022,8 +1321,7 @@ mod service {
             match super::fetch::item(session,uid,account){
                 Ok(Some(item))=>{let _=ev.send(Event::Mail{item,new:false});},
                 Ok(None)=>{},
-                // 连接已失步：停止使用这条连接，后面的命令会失败并触发重连。
-                Err(())=>break,
+                Err(())=>return Err(()),
             }
         }
         Ok(max)
@@ -1096,8 +1394,8 @@ mod service {
         session.logout().expect("退出失败");
     }
 
-    fn fetch_new(
-        session: &mut imap::Session<net::Prefixed<net::Stream>>,
+    fn fetch_new<S:std::io::Read+std::io::Write>(
+        session: &mut imap::Session<S>,
         account: &Account,
         last: &mut u32,
         ev: &Sender<Event>,
@@ -1107,9 +1405,7 @@ mod service {
             .map_err(|_| ())?;
         let mut uids: Vec<u32> = set.into_iter().filter(|u| *u > *last).collect();
         uids.sort_unstable();
-        if uids.len() > 5 {
-            uids = uids.split_off(uids.len() - 5);
-        }
+        uids.truncate(5);
         for uid in uids {
             if let Some(item)=super::fetch::item(session,uid,account)? {
                 let _=ev.send(Event::Mail{item,new:true});
@@ -1132,6 +1428,7 @@ mod service {
         }
         pub fn sync(&self, _accounts: &[Account], _interval_secs: u32) {}
         pub fn test(&self, _account: Account, _password: String) {}
+        pub fn manage(&self,_request:crate::mail_manage::Request){}
         pub fn try_recv(&self) -> Option<Event> {
             None
         }

@@ -4,6 +4,8 @@ use eframe::egui::{self,Color32};
 use std::collections::{HashMap,HashSet};
 use chrono::Datelike;
 
+const CLAUDE_LOCAL_NOTICE:&str="由于 Claude 对网络使用环境要求较高，岛仔不会使用登录凭证向 Claude 服务发送任何请求，只读取本机用量记录与缓存，自动显示其中的重置时间；缺少有效记录时，显示“重置时间未知”。";
+
 #[derive(Default)]
 pub(crate) struct State {
     cache_path:Option<std::path::PathBuf>,
@@ -29,10 +31,7 @@ impl State {
         let cache:serde_json::Value=std::fs::read(path).ok()
             .and_then(|raw|serde_json::from_slice(&raw).ok()).unwrap_or_default();
         for a in &state.config.accounts {
-            let entry=&cache[&a.id];
-            if entry["provider"].as_str()!=Some(a.provider.name()) || entry["slot"].as_str()!=a.slot.as_deref() {continue;}
-            let Ok(snapshot)=serde_json::from_value::<Snapshot>(entry["snapshot"].clone()) else {continue;};
-            if snapshot.at<=0 || snapshot.wallet.as_ref().is_some_and(|w|w.balances.is_empty()) {continue;}
+            let Some(snapshot)=a.cached_snapshot(&cache)else{continue;};
             state.rows.insert(a.id.clone(),Ok(snapshot));
             state.stale.insert(a.id.clone(),"上次记录，等待刷新".into());
         }
@@ -44,7 +43,9 @@ impl State {
         let mut entries=serde_json::Map::new();
         for a in &self.config.accounts {
             if let Some(Ok(snapshot))=self.rows.get(&a.id) {
-                entries.insert(a.id.clone(),serde_json::json!({"provider":a.provider.name(),"slot":a.slot,"snapshot":snapshot}));
+                let mut entry=serde_json::json!({"provider":a.provider.name(),"slot":a.slot,"source":a.source,"snapshot":snapshot});
+                if a.provider==Provider::Claude{entry["local_identity_checked"]=a.cache_identity_marker();}
+                entries.insert(a.id.clone(),entry);
             }
         }
         if let Ok(raw)=serde_json::to_vec(&entries){let _=crate::model::atomic_write(path,&raw);}
@@ -59,7 +60,10 @@ impl State {
             }
         }
         let success=event.result.is_ok();
-        self.stale.remove(&event.id);self.rows.insert(event.id,event.result);
+        let old_local_record=self.config.accounts.iter().any(|a|a.id==event.id&&a.provider==Provider::Claude)&&event.result.as_ref().is_ok_and(|s|chrono::Utc::now().timestamp()-s.at>1800);
+        self.stale.remove(&event.id);
+        if old_local_record{self.stale.insert(event.id.clone(),"本地记录较旧，等待 Claude 更新".into());}
+        self.rows.insert(event.id,event.result);
         if success{self.save_snapshots();}
     }
 }
@@ -172,6 +176,11 @@ fn reset_text(at:Option<i64>,now:&chrono::DateTime<chrono::Local>)->String {
     let format=if at.date_naive()==now.date_naive(){"今天 %H:%M 重置"}else if at.year()==now.year(){"%-m月%-d日 %H:%M 重置"}else{"%Y/%-m/%-d %H:%M 重置"};
     at.format(format).to_string()
 }
+fn claude_disclaimer(ui:&mut egui::Ui){
+    ui.separator();
+    ui.label(egui::RichText::new("免责声明").size(12.0).strong());
+    ui.add(egui::Label::new(egui::RichText::new("岛仔为非官方辅助工具，数据仅供参考，以 Claude 官方显示为准；本地读取不构成账号安全保证。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75)))).wrap());
+}
 impl App {
     pub(crate) fn quota_tick(&mut self){
         if let Some(result)=self.quota.workbuddy_connecting.as_ref().and_then(|c|c.poll()){
@@ -269,54 +278,66 @@ impl App {
         if let Some(i)=picked{self.quota.config.selected=self.quota.config.accounts[i].id.clone();self.quota.config.save();}
         let a=&self.quota.config.accounts[selected];let result=self.quota.rows.get(&a.id);let snapshot=result.and_then(|r|r.as_ref().ok());
         let colors=accent_colors(&self.quota.config,a);
+        if let Some(s)=snapshot.filter(|s|s.at>0){
+            if let Some(at)=chrono::DateTime::from_timestamp(s.at,0){
+                let at=at.with_timezone(&chrono::Local);let time=at.format(if at.date_naive()==chrono::Local::now().date_naive(){"%H:%M"}else{"%m/%d %H:%M"}).to_string();
+                let busy=self.quota.busy.contains(&a.id);let stale=self.quota.stale.get(&a.id);
+                let status=if busy{format!("{} · {time}",if a.provider==Provider::Claude{"读取中…"}else{"正在更新…"})}
+                    else if stale.is_some(){format!("上次记录 · {time}")}
+                    else if a.provider==Provider::Claude{format!("本地记录 · {time}")}
+                    else if let Some(wallet)=&s.wallet{let b=wallet.primary();if wallet.balances.len()>1{let other=wallet.balances.iter().find(|other|other.currency!=b.currency).unwrap();format!("另有 {} {} · {time}",other.currency,other.full(other.total))}else{format!("{} · {time} 更新",b.currency)}}
+                    else{format!("{time} 更新")};
+                let x=if a.provider.balance(){125.0}else{157.0};let width=357.0-x;let y=154.0;
+                c.centered_text(x,y,&c.fit(&status,10.0,W::Regular,width),10.0,W::Regular,if stale.is_some()&&!busy{Color32::from_rgb(255,166,77)}else{theme::DIM},H::Left);
+                c.hit(x,y-6.0,width,8.0,("quota-update-time",&a.id)).on_hover_text(if let Some(reason)=stale{format!("{status}\n{reason}")}else{status});
+            }
+        }
         if a.provider==Provider::WorkBuddy{
-            logo(c,a.provider,85.0,86.0,44.0);
+            logo(c,a.provider,85.0,105.0,44.0);
             if let Some(credits)=snapshot.and_then(|s|s.credits.as_ref()){
-                c.text(125.0,65.0,"可用积分",10.5,W::Regular,theme::GRAY,H::Left);
-                c.text(125.0,91.0,&credits.full(),23.0,W::Semibold,theme::WHITE,H::Left);
-                let detail=if let Some(reason)=self.quota.stale.get(&a.id){reason.clone()}else{credits.packages.iter().map(|(label,n)|format!("{label} {n}")).collect::<Vec<_>>().join(" · ")};c.text(125.0,111.0,&c.fit(&detail,10.0,W::Regular,225.0),10.0,W::Regular,theme::GRAY,H::Left);
-            }else{let text=result.and_then(|r|r.as_ref().err()).map(String::as_str).unwrap_or("正在查询积分…");for(i,line)in c.wrap(text,11.0,W::Regular,226.0,3).iter().enumerate(){c.text(125.0,76.0+i as f32*17.0,line,11.0,W::Regular,theme::GRAY,H::Left);}}
+                c.text(125.0,81.0,"可用积分",10.5,W::Regular,theme::GRAY,H::Left);
+                c.text(125.0,107.0,&credits.full(),23.0,W::Semibold,theme::WHITE,H::Left);
+                let detail=if let Some(reason)=self.quota.stale.get(&a.id){reason.clone()}else{credits.packages.iter().map(|(label,n)|format!("{label} {n}")).collect::<Vec<_>>().join(" · ")};c.text(125.0,131.0,&c.fit(&detail,10.0,W::Regular,225.0),10.0,W::Regular,theme::GRAY,H::Left);
+            }else{let text=result.and_then(|r|r.as_ref().err()).map(String::as_str).unwrap_or("正在查询积分…");for(i,line)in c.wrap(text,11.0,W::Regular,226.0,3).iter().enumerate(){c.text(125.0,92.0+i as f32*17.0,line,11.0,W::Regular,theme::GRAY,H::Left);}}
             return;
         }
         if a.provider==Provider::DeepSeek{
-            deepseek_badge(c,self.settings.skin,85.0,88.0,50.0);
+            deepseek_badge(c,self.settings.skin,85.0,105.0,50.0);
             if let Some(s)=snapshot{
                 if let Some(wallet)=&s.wallet{
-                    let b=wallet.primary();let stale=self.quota.stale.contains_key(&a.id);
-                    c.text(125.0,65.0,if wallet.available{"可用余额"}else{"余额不可用"},10.5,W::Regular,theme::GRAY,H::Left);
+                    let b=wallet.primary();
+                    c.text(125.0,81.0,if wallet.available{"可用余额"}else{"余额不可用"},10.5,W::Regular,theme::GRAY,H::Left);
                     let amount=b.full(b.total);let size=(23.0*145.0/c.text_w(&amount,23.0,W::Semibold).max(145.0)).min(23.0);
-                    c.text(125.0,93.0,&amount,size,W::Semibold,if !wallet.available{Color32::from_rgb(255,166,77)}else{theme::WHITE},H::Left);
-                    for (y,label,value) in [(74.0,"充值",b.topped_up),(96.0,"赠送",b.granted)]{
+                    c.text(125.0,109.0,&amount,size,W::Semibold,if !wallet.available{Color32::from_rgb(255,166,77)}else{theme::WHITE},H::Left);
+                    for (y,label,value) in [(90.0,"充值",b.topped_up),(118.0,"赠送",b.granted)]{
                         c.text(281.0,y,label,10.0,W::Regular,theme::GRAY,H::Left);
                         let text=b.full(value);let size=10.0*54.0/c.text_w(&text,10.0,W::Semibold).max(54.0);c.text(357.0,y,&text,size,W::Semibold,theme::WHITE,H::Right);
                     }
-                    let time=chrono::DateTime::from_timestamp(s.at,0).map(|at|{let at=at.with_timezone(&chrono::Local);at.format(if at.date_naive()==chrono::Local::now().date_naive(){"%H:%M"}else{"%m/%d %H:%M"}).to_string()}).unwrap_or_default();
-                    let status=if stale{format!("上次记录 · {time}")}else if self.quota.busy.contains(&a.id){"正在更新…".into()}else if wallet.balances.len()>1{let other=wallet.balances.iter().find(|other|other.currency!=b.currency).unwrap();format!("另有 {} {} · {time}",other.currency,other.full(other.total))}else{format!("{} · {time} 更新",b.currency)};
-                    c.text(125.0,113.0,&c.fit(&status,10.0,W::Regular,232.0),10.0,W::Regular,if stale{Color32::from_rgb(255,166,77)}else{theme::DIM},H::Left);
                 }
-            }else{let text=if self.quota.busy.contains(&a.id){"正在更新余额…"}else{result.and_then(|r|r.as_ref().err()).map(String::as_str).unwrap_or("等待更新余额")};for (i,line) in c.wrap(text,11.0,W::Regular,226.0,3).iter().enumerate(){c.text(125.0,76.0+i as f32*17.0,line,11.0,W::Regular,theme::GRAY,H::Left);}}
+            }else{let text=if self.quota.busy.contains(&a.id){"正在更新余额…"}else{result.and_then(|r|r.as_ref().err()).map(String::as_str).unwrap_or("等待更新余额")};for (i,line) in c.wrap(text,11.0,W::Regular,226.0,3).iter().enumerate(){c.text(125.0,92.0+i as f32*17.0,line,11.0,W::Regular,theme::GRAY,H::Left);}}
             return;
         }
-        ring(c,a,snapshot,103.0,89.0,70.0,colors);
-        let raw_plan=snapshot.map(|s|s.plan.as_str()).unwrap_or_default();let plan=match raw_plan{"pro"|"prolite"|"pro_lite"=>"Pro","plus"=>"Plus","free"=>"Free","team"|"business"=>"Business","enterprise"=>"Enterprise",other=>other};let label=if plan.is_empty(){a.provider.name().to_owned()}else{format!("{} · {}",a.provider.name(),plan)};
+        ring(c,a,snapshot,103.0,105.0,70.0,colors);
+        let raw_plan=snapshot.map(|s|s.plan.as_str()).unwrap_or_default();let plan=match raw_plan{"pro"|"prolite"|"pro_lite"=>"Pro","plus"=>"Plus","free"=>"Free","team"|"business"=>"Business","enterprise"=>"Enterprise",other=>other};let label=if a.provider==Provider::Claude{"Claude · 本地记录".into()}else if plan.is_empty(){a.provider.name().to_owned()}else{format!("{} · {}",a.provider.name(),plan)};
         c.text(157.0,64.0,&c.fit(&label,12.0,W::Semibold,145.0),12.0,W::Semibold,theme::WHITE,H::Left);
         if let Some(s)=snapshot{
             let windows=s.rings();let now=chrono::Local::now();
             if windows.is_empty() && a.provider==Provider::ZCode{
-                c.text(157.0,88.0,"官网未分配体验额度",11.0,W::Regular,theme::GRAY,H::Left);
+                c.text(157.0,104.0,"官网未分配体验额度",11.0,W::Regular,theme::GRAY,H::Left);
             }else if windows.len()==1{
-                let w=windows[0];c.text(157.0,87.0,&format!("{}剩余",w.label),12.0,W::Semibold,theme::WHITE,H::Left);
-                c.text(157.0,108.0,&reset_text(w.reset,&now),11.0,W::Regular,theme::GRAY,H::Left);
+                let w=windows[0];c.text(157.0,103.0,&format!("{}剩余",w.label),12.0,W::Semibold,theme::WHITE,H::Left);
+                c.text(157.0,124.0,&reset_text(w.reset,&now),11.0,W::Regular,theme::GRAY,H::Left);
             }else{
                 c.text(355.0,64.0,"剩余",10.5,W::Regular,theme::GRAY,H::Right);
                 for (i,w)in windows.iter().enumerate(){
-                    let y=79.0+i as f32*32.0;c.circle(159.0,y-4.0,2.5,colors[i]);
+                    let y=86.0+i as f32*35.0;c.circle(159.0,y-4.0,2.5,colors[i]);
                     c.text(168.0,y,&w.label,11.5,W::Semibold,theme::WHITE,H::Left);
-                    c.text(168.0,y+14.0,&reset_text(w.reset,&now),11.0,W::Regular,theme::GRAY,H::Left);
+                    let reset=reset_text(w.reset,&now);
+                    c.text(168.0,y+17.0,&c.fit(&reset,11.0,W::Regular,185.0),11.0,W::Regular,theme::GRAY,H::Left);
                     c.centered_text(355.0,y+4.0,&format!("{:.0}%",w.remaining),22.0,W::Semibold,theme::WHITE,H::Right);
                 }
             }
-        }else{let message=if self.quota.busy.contains(&a.id){"正在更新额度…"}else{result.and_then(|r|r.as_ref().err()).map(String::as_str).unwrap_or("等待更新额度")};for(i,line)in c.wrap(message,11.0,W::Regular,197.0,2).iter().enumerate(){c.text(157.0,87.0+i as f32*17.0,line,11.0,W::Regular,theme::GRAY,H::Left);}}
+        }else{let message=if self.quota.busy.contains(&a.id){"正在更新额度…"}else{result.and_then(|r|r.as_ref().err()).map(String::as_str).unwrap_or("等待更新额度")};for(i,line)in c.wrap(message,11.0,W::Regular,197.0,2).iter().enumerate(){c.text(157.0,103.0+i as f32*17.0,line,11.0,W::Regular,theme::GRAY,H::Left);}}
     }
     fn quota_open_connection(&mut self,id:Option<String>){
         if self.quota.workbuddy_connecting.is_some()||self.quota.deepseek_connecting.is_some()||self.quota.gemini_connecting.is_some()||self.quota.login.is_some(){self.quota.connect_open=true;return;}
@@ -387,11 +408,16 @@ impl App {
                         ui.checkbox(&mut a.enabled,"监控");ui.checkbox(&mut a.pinned,"常驻岛上");
                         if ui.add_enabled(!self.quota.busy.contains(&a.id),egui::Button::new(if error.is_some(){"重试"}else{"刷新"})).clicked(){self.pending.push(Cmd::QuotaRefresh);}
                         if ui.button("重新连接").clicked(){connect=Some(a.id.clone());}
-                        if let Some(s)=snapshot{let time=chrono::DateTime::from_timestamp(s.at,0).map(|at|at.with_timezone(&chrono::Local).format("%H:%M").to_string()).unwrap_or_default();ui.label(egui::RichText::new(format!("{time} 更新")).size(10.0).color(ui.visuals().weak_text_color()));}
+                        if let Some(s)=snapshot{let time=chrono::DateTime::from_timestamp(s.at,0).map(|at|at.with_timezone(&chrono::Local).format(if a.provider==Provider::Claude{"%m-%d %H:%M 本地记录"}else{"%H:%M 更新"}).to_string()).unwrap_or_default();ui.label(egui::RichText::new(time).size(10.0).color(ui.visuals().weak_text_color()));}
                     });
                     if a.provider.balance(){ui.label(egui::RichText::new(if a.provider==Provider::DeepSeek{"品牌蓝 · 圆底随皮肤"}else{"官方图标"}).size(11.0).color(ui.visuals().weak_text_color()));}else{
                         let mut color=self.quota.config.colors.get(&a.id).copied().unwrap_or_default();color_picker(ui,a.provider,&mut color);
                         if color==Accent::Brand{self.quota.config.colors.remove(&a.id);}else{self.quota.config.colors.insert(a.id.clone(),color);}
+                    }
+                    if a.provider==Provider::Claude{
+                        ui.separator();ui.label(egui::RichText::new("本地读取说明").size(12.0).strong());
+                        ui.add(egui::Label::new(egui::RichText::new(CLAUDE_LOCAL_NOTICE).size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75)))).wrap());
+                        claude_disclaimer(ui);
                     }
                 });
             });
@@ -448,6 +474,15 @@ impl App {
                 ui.label(egui::RichText::new("使用 Grok Bot 对应的 Cursor 账号登录，浏览器授权支持自动续期。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75))));
             }else if self.quota.provider==Provider::ZCode{
                 if ui.button("连接本机 ZCode").clicked(){self.quota.note=match quota::zcode::path().ok_or_else(||"未找到 ZCode 登录目录".to_owned()).and_then(|p|quota::zcode::add(&mut self.quota.config,&p,&self.quota.alias)){Ok(())=>"ZCode 已连接".into(),Err(e)=>e};}
+            }else if self.quota.provider==Provider::Claude{
+                ui.add(egui::Label::new(CLAUDE_LOCAL_NOTICE).wrap());
+                ui.horizontal(|ui|{
+                    if ui.button("读取桌面版本地记录").clicked(){self.quota.note=match self.quota.config.connect_claude_desktop(&self.quota.alias){Ok(_)=>{self.pending.push(Cmd::QuotaConnected);"已连接，数据随 Claude 桌面版使用更新".into()},Err(e)=>e};}
+                    if ui.button("启用 Code 本地采集").clicked(){self.quota.note=match self.quota.config.connect_claude_code(&self.quota.alias){Ok(_)=>{self.pending.push(Cmd::QuotaConnected);"本地采集已启用，使用 Claude Code 后更新".into()},Err(e)=>e};}
+                });
+                for text in ["桌面版自动从本地用量缓存读取重置时间；缓存不可用时显示未知，额度仍以本地记录为准。","Code 本地采集会配置官方状态栏输出，已有状态栏不会被覆盖。仅使用网页版时，暂无可读取的本机记录。"]{ui.add(egui::Label::new(egui::RichText::new(text).size(12.0).color(ui.visuals().weak_text_color())).wrap());}
+                ui.collapsing("选择本地用量 JSON",|ui|{self.quota_file_form(ui);});
+                claude_disclaimer(ui);
             }else{
                 self.quota_file_form(ui);
                 ui.label(egui::RichText::new("各账号使用各自的登录文件；移除只取消监控。登录失效时，请在对应工具中重新登录。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75))));
@@ -468,7 +503,8 @@ impl App {
         if !open{self.quota.deepseek_key.clear();self.quota.gemini_cookie.clear();}
     }
     fn quota_file_form(&mut self,ui:&mut egui::Ui){
-        ui.label("登录 JSON 文件");ui.horizontal(|ui|{ui.add_sized([(ui.available_width()-65.0).max(100.0),27.0],egui::TextEdit::singleline(&mut self.quota.source).vertical_align(egui::Align::Center).hint_text("选择该账号的登录文件"));if ui.button("选择…").clicked(){self.pending.push(Cmd::QuotaChooseFile);}});
+        let local=self.quota.provider==Provider::Claude;
+        ui.label(if local{"本地用量 JSON 文件"}else{"登录 JSON 文件"});ui.horizontal(|ui|{ui.add_sized([(ui.available_width()-65.0).max(100.0),27.0],egui::TextEdit::singleline(&mut self.quota.source).vertical_align(egui::Align::Center).hint_text(if local{"选择 Claude 本地用量记录"}else{"选择该账号的登录文件"}));if ui.button("选择…").clicked(){self.pending.push(Cmd::QuotaChooseFile);}});
         if ui.button("添加账号").clicked(){match self.quota.config.add(self.quota.provider,self.quota.alias.clone(),self.quota.source.trim().into()){Ok(())=>{self.quota.alias.clear();self.quota.source.clear();self.quota.note="账号已添加".into();},Err(e)=>self.quota.note=e}}
     }
     #[cfg(feature="record")]
@@ -483,6 +519,41 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn claude_local_quota_displays_only_recorded_reset_times(){
+        let now=chrono::Local::now();let id="local-fixture".to_string();
+        let account=Account{id:id.clone(),provider:Provider::Claude,alias:"离线账号".into(),source:"fixture/config.json".into(),slot:Some("fixture-slot".into()),enabled:true,pinned:true};
+        let mut state=State::default();state.config.accounts.push(account.clone());
+        let window=quota::Window{label:"5 小时".into(),seconds:Some(18000),remaining:37.5,reset:None};
+        let snapshot=Snapshot{at:now.timestamp(),windows:vec![window.clone()],..Default::default()};
+        state.receive(quota::Event{id:id.clone(),result:Ok(snapshot.clone())});
+        assert_eq!(reset_text(window.reset,&now),"重置时间未知");
+        assert_eq!(state.rows[&id].as_ref().unwrap().windows[0],window);
+        let later=now+chrono::Duration::minutes(11);
+        assert_eq!(reset_text(window.reset,&later),"重置时间未知");
+        assert_eq!(state.rows[&id].as_ref().unwrap().windows[0].remaining,37.5,"缺少重置时间不能影响额度百分比");
+        let actual=quota::Window{reset:Some(now.timestamp()+1200),remaining:20.0,..window.clone()};
+        assert_ne!(reset_text(actual.reset,&now),"重置时间未知");
+        state.receive(quota::Event{id:id.clone(),result:Ok(Snapshot{windows:vec![actual.clone()],..snapshot})});
+        assert_eq!(state.rows[&id].as_ref().unwrap().windows[0],actual,"本地更新仍应正常生效");
+    }
+    #[test]
+    fn claude_local_records_do_not_restore_old_online_snapshots_or_claim_a_new_update(){
+        let path=std::env::temp_dir().join(format!("daozai-claude-cache-{}.json",std::process::id()));
+        let mut config=Config::default();let id="claude-local".to_string();config.accounts.push(Account{id:id.clone(),provider:Provider::Claude,alias:"Claude".into(),source:"desktop/config.json".into(),slot:Some("fixture".into()),enabled:true,pinned:true});
+        let at=chrono::Utc::now().timestamp()-3600;let snapshot=Snapshot{at,windows:vec![quota::Window{label:"5 小时".into(),seconds:Some(18000),remaining:72.0,reset:None}],..Default::default()};
+        std::fs::write(&path,serde_json::json!({&id:{"provider":"Claude","slot":"fixture","snapshot":snapshot}}).to_string()).unwrap();
+        let mut state=State::restore(config.clone(),path.clone());assert!(state.rows.is_empty(),"迁移后不能把旧联网缓存显示为本地数据");
+        state.receive(quota::Event{id:id.clone(),result:Ok(snapshot)});assert!(state.stale[&id].contains("本地记录较旧"));
+        let restored=State::restore(config,path.clone());assert_eq!(restored.rows[&id].as_ref().unwrap().at,at,"读取缓存不能刷新官方记录时间");std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn claude_verified_history_survives_client_exit_and_island_restart(){
+        let path=std::env::temp_dir().join(format!("daozai-claude-exit-{}.json",std::process::id()));let mut config=Config::default();let id="claude-closed".to_string();config.accounts.push(Account{id:id.clone(),provider:Provider::Claude,alias:"Claude".into(),source:"desktop/config.json".into(),slot:Some("verified-owner".into()),enabled:true,pinned:true});
+        let at=chrono::Utc::now().timestamp()-60;let snapshot=Snapshot{at,windows:vec![quota::Window{label:"本周".into(),seconds:Some(604800),remaining:16.0,reset:Some(at+86400)}],..Default::default()};
+        let mut state=State::restore(config.clone(),path.clone());state.receive(quota::Event{id:id.clone(),result:Ok(snapshot.clone())});state.receive(quota::Event{id:id.clone(),result:Err("客户端已关闭，等待新记录".into())});assert_eq!(state.rows[&id].as_ref().unwrap().windows,snapshot.windows);assert!(state.stale.contains_key(&id));
+        let mut restarted=State::restore(config,path.clone());assert_eq!(restarted.rows[&id].as_ref().unwrap().windows,snapshot.windows);restarted.receive(quota::Event{id:id.clone(),result:Err("等待新记录".into())});assert_eq!(restarted.rows[&id].as_ref().unwrap().windows,snapshot.windows);assert_eq!(restarted.rows[&id].as_ref().unwrap().at,at);std::fs::remove_file(path).unwrap();
+    }
     #[test] fn side_amounts_stay_short(){
         for (value,symbol,expected) in [(4.18,"¥","¥4.1"),(999.9,"¥","¥999"),(9999.0,"¥","¥9.99k"),(28560.0,"","2.85万"),(123456.7,"¥","¥12.3万"),
             (1234567.8,"¥","¥123万"),(99999999.0,"¥","¥0.99亿"),(12345678901.0,"","123亿"),(-12.5,"¥","-¥12.5"),(0.0,"","0"),(0.04,"¥","¥0")] {

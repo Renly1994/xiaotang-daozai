@@ -480,25 +480,9 @@ pub fn root_viewport_scale() -> f32 {
     f32::from_bits(ROOT_VIEWPORT_SCALE.load(std::sync::atomic::Ordering::Relaxed))
 }
 
-// 设置窗口打开时让两个窗口共用系统 DPI 的字形图集，岛体倍率放在绘制阶段处理。
-static SHARE_ROOT_FONT_SCALE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static ROOT_FRAME_PAINT_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1.0f32.to_bits());
-
-#[doc(hidden)]
-pub fn share_root_font_scale(share:bool) {
-    SHARE_ROOT_FONT_SCALE.store(share,std::sync::atomic::Ordering::Relaxed);
-}
-
-#[doc(hidden)]
-pub fn root_frame_paint_scale()->f32 {
-    f32::from_bits(ROOT_FRAME_PAINT_SCALE.load(std::sync::atomic::Ordering::Relaxed))
-}
-
 /// 把 egui-winit 产生的主窗口输入换算到放大后的逻辑点。
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn scale_root_input(raw: &mut egui::RawInput, scale: f32) {
-    let shared=SHARE_ROOT_FONT_SCALE.load(std::sync::atomic::Ordering::Relaxed);
-    ROOT_FRAME_PAINT_SCALE.store(if shared {scale}else{1.0}.to_bits(),std::sync::atomic::Ordering::Relaxed);
     if !scale.is_finite() || (scale - 1.0).abs() < 1e-4 {
         return;
     }
@@ -510,7 +494,7 @@ pub(crate) fn scale_root_input(raw: &mut egui::RawInput, scale: f32) {
     }
     if let Some(info) = raw.viewports.get_mut(&egui::ViewportId::ROOT) {
         if let Some(ppp) = info.native_pixels_per_point.as_mut() {
-            if !shared {*ppp *= scale;}
+            *ppp *= scale;
         }
         info.inner_rect = info.inner_rect.map(rect);
         info.outer_rect = info.outer_rect.map(rect);
@@ -543,6 +527,26 @@ pub(crate) fn scale_root_output(output: &mut egui::PlatformOutput, scale: f32) {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod root_scale_tests {
     use super::*;
+
+    #[test]
+    fn enlarged_root_uses_physical_font_pixels_with_settings_open() {
+        let ctx=egui::Context::default();
+        let child=egui::ViewportId::from_hash_of("settings-scale-check");
+        for dpi in [1.0,1.25,1.5] {
+            for scale in [0.8,1.0,1.2,1.4] {
+                let mut root=egui::RawInput::default();
+                root.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().native_pixels_per_point=Some(dpi);
+                scale_root_input(&mut root,scale);
+                let root_output=ctx.run(root,|ctx|{
+                    assert!((ctx.pixels_per_point()-dpi*scale).abs()<0.0001,"岛体的字形与矢量边缘必须按实际像素生成");
+                    ctx.fonts(|fonts|assert!((fonts.pixels_per_point()-dpi*scale).abs()<0.0001));
+                });
+                assert!((root_output.pixels_per_point-dpi*scale).abs()<0.0001);
+                let child_input=egui::RawInput{viewport_id:child,viewports:std::iter::once((child,egui::ViewportInfo{native_pixels_per_point:Some(dpi),..Default::default()})).collect(),..Default::default()};
+                let _=ctx.run(child_input,|ctx|assert_eq!(ctx.pixels_per_point(),dpi));
+            }
+        }
+    }
 
     #[test]
     fn root_input_is_converted_into_scaled_points() {

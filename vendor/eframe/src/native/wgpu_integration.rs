@@ -680,7 +680,7 @@ impl WgpuWinitRunning<'_> {
         });
         let vsync_secs = painter.paint_and_update_textures(
             viewport_id,
-            pixels_per_point * if viewport_id==ViewportId::ROOT {crate::root_frame_paint_scale()} else {1.0},
+            pixels_per_point,
             app.clear_color(&egui_ctx.style().visuals),
             &clipped_primitives,
             &textures_delta,
@@ -1085,7 +1085,7 @@ fn handle_viewport_output(
 
             viewport.deferred_commands.append(&mut commands);
 
-            egui_winit::process_viewport_commands(
+            super::winit_integration::process_viewport_commands(
                 egui_ctx,
                 &mut viewport.info,
                 std::mem::take(&mut viewport.deferred_commands),

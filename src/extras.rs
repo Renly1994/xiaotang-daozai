@@ -685,6 +685,7 @@ mod tests {
 pub(crate) struct TaskDraft {index:usize,original:String,text:String,due:String,error:String,focused:bool,reminder_only:bool,pub(crate) repeat:u8,pub(crate) picker:crate::task_picker::ReminderPicker}
 impl App {
     pub(crate) fn open_task_dialog(&mut self,index:usize){
+        self.todo_choosing=false;
         if let Some(task)=self.todos.items.get(index){
             let draft=TaskDraft{index,original:task.text.clone(),text:task.text.clone(),due:task.due.clone().unwrap_or_default(),error:String::new(),focused:false,reminder_only:false,repeat:task.repeat,picker:crate::task_picker::ReminderPicker::new(task.due.as_deref())};
             self.show_page(4);self.task_dialog=Some(draft);
@@ -804,7 +805,7 @@ fn setting_button(c:&Card,x:f32,y:f32,w:f32,text:&str,on:bool,id:&str)->bool {
 }
 impl App {
     pub(crate) fn page_settings(&mut self,c:&Card) {
-        let help=match self.settings_category{0=>"外观与系统",1=>"调整饮水量与提醒时间",2=>"调整每个阶段的时长",_=>"通知"};
+        let help=match self.settings_category{0=>"外观与系统",1=>"调整饮水量与提醒时间",2=>"点击分钟数可直接输入，也可用加减微调",_=>"通知"};
         c.text(44.0,44.0,help,10.5,W::Regular,theme::GRAY,H::Left);
         let before=format!("{:?}",self.settings);
         match self.settings_category {
@@ -824,10 +825,25 @@ impl App {
                     if setting_button(c,318.0,y,25.0,"+",false,&format!("hour-plus-{i}")){if i==0{self.settings.water_start=(hour+1)%24}else{self.settings.water_end=(hour+1)%24}}}
             }
             2=>{
-                let values=[self.settings.focus_minutes,self.settings.rest_minutes];
-                for (i,name) in ["专注","休息"].iter().enumerate(){let y=53.0+i as f32*23.0;c.text(48.0,y+13.0,name,10.5,W::Regular,theme::GRAY,H::Left);c.text(206.0,y+13.0,&format!("{} 分钟",values[i]),11.0,W::Bold,theme::WHITE,H::Center);
-                    if setting_button(c,131.0,y,27.0,"−",false,&format!("focus-minus-{i}")){if i==0{self.settings.focus_minutes=values[i].saturating_sub(1).max(1)}else{self.settings.rest_minutes=values[i].saturating_sub(1).max(1)}}
-                    if setting_button(c,255.0,y,27.0,"+",false,&format!("focus-plus-{i}")){if i==0{self.settings.focus_minutes=(values[i]+1).min(180)}else{self.settings.rest_minutes=(values[i]+1).min(60)}}}
+                self.focus_editing=false;
+                for (i,name) in ["专注","休息"].iter().enumerate(){
+                    let y=53.0+i as f32*23.0;
+                    c.text(48.0,y+13.0,name,10.5,W::Regular,theme::GRAY,H::Left);
+                    let value=if i==0{&mut self.settings.focus_minutes}else{&mut self.settings.rest_minutes};
+                    let max=if i==0{180}else{60};let rect=c.rect(168.0,y,76.0,19.0);
+                    let mut ui=egui::Ui::new(c.ui.ctx().clone(),egui::Id::new(("focus-duration",i)),egui::UiBuilder::new().layer_id(c.ui.layer_id()).max_rect(rect).style(c.ui.style().clone()));
+                    ui.set_clip_rect(c.painter.clip_rect());ui.set_opacity(c.painter.opacity());if !c.live{ui.disable();}
+                    ui.spacing_mut().interact_size=rect.size();ui.spacing_mut().button_padding=egui::vec2(2.0,1.0);
+                    ui.style_mut().drag_value_text_style=egui::TextStyle::Body;
+                    ui.style_mut().text_styles.insert(egui::TextStyle::Body,c.font(11.0,W::Bold));
+                    ui.style_mut().explanation_tooltips=false;
+                    ui.visuals_mut().widgets.inactive.weak_bg_fill=Color32::TRANSPARENT;
+                    let field=ui.put(rect,egui::DragValue::new(value).range(1..=max).suffix(" 分钟").update_while_editing(false)).on_hover_text("点击输入分钟数");
+                    if field.gained_focus(){self.pending.push(Cmd::Focus);}
+                    self.focus_editing|=field.has_focus();
+                    if setting_button(c,131.0,y,27.0,"−",false,&format!("focus-minus-{i}")){*value=value.saturating_sub(1).max(1);}
+                    if setting_button(c,255.0,y,27.0,"+",false,&format!("focus-plus-{i}")){*value=(*value+1).min(max);}
+                }
                 c.text(315.0,93.0,"下次生效",10.5,W::Regular,theme::GRAY,H::Center);
             }
             _=>{
@@ -1149,7 +1165,7 @@ impl App {
                         settings_card(ui,|ui|{
                             setting_row(ui,"电量","本机电量、充电状态与提醒；无电池设备自动隐藏",&mut self.settings.show_battery);
                             ui.separator();
-                            setting_row(ui,"岛上歌词","收起时显示正在唱的那一句",&mut self.settings.island_lyrics);
+                            setting_row(ui,"岛上歌词","收起时显示歌词，无歌词时显示封面和歌名",&mut self.settings.island_lyrics);
                         });
                         settings_label(ui,"功能页面");
                         settings_card(ui,|ui|{
@@ -1302,7 +1318,7 @@ impl App {
                             setting_row(ui,"展开时显示歌词","在播放器右侧同步滚动显示歌词",&mut self.settings.lyrics_enabled);
                             self.show_lyrics=self.settings.lyrics_enabled;
                             ui.separator();
-                            setting_row(ui,"岛上歌词","收起时显示当前句；无同步歌词时恢复普通岛",&mut self.settings.island_lyrics);
+                            setting_row(ui,"岛上歌词","收起时显示当前句；无同步歌词时显示封面和歌名",&mut self.settings.island_lyrics);
                         });
                         settings_label(ui,"歌词显示时间");
                         settings_card(ui,|ui|{
@@ -1374,19 +1390,29 @@ impl App {
                             ui.separator();
                             setting_row(ui,"蓝牙通知","设备连接与断开提醒；关闭后停止蓝牙监听",&mut self.settings.bluetooth_notifications);
                             ui.separator();
-                            setting_row(ui,"岛仔提醒","在岛上显示饮水、专注和待办提醒",&mut self.settings.notifications);
+                            setting_row(ui,"提醒总开关","关闭后饮水、专注、待办、微信和 QQ 提醒都不显示",&mut self.settings.notifications);
                         });
+                        // 总开关关闭时，微信与 QQ 两栏置灰并说明原因，避免「开了也不提醒」。
+                        let master=self.settings.notifications;
+                        let master_hint=|ui:&mut egui::Ui|if !master {
+                            ui.label(egui::RichText::new("提醒总开关已关闭（上方「系统提示」），打开后这里才会生效").size(12.0).color(Color32::from_rgb(230,150,40)));
+                        };
                         settings_label(ui,"微信提醒");
                         settings_card(ui,|ui|{
+                            master_hint(ui);
+                            ui.add_enabled_ui(master,|ui|{
                             setting_row(ui,"微信新消息提醒","根据任务栏闪动提醒，不读取联系人或聊天正文",&mut self.settings.wechat_notifications);
                             if self.settings.wechat_notifications {
                                 ui.separator();
                                 setting_row(ui,"托盘一键唤起微信","微信缩在托盘时，点提醒由系统按下微信托盘图标；图标收在折叠区时托盘菜单会短暂弹出",&mut self.settings.wechat_tray_open);
                             }
-                            if !self.wechat_status.is_empty(){ui.label(egui::RichText::new(&self.wechat_status).size(12.0));}
+                            if master && !self.wechat_status.is_empty(){ui.label(egui::RichText::new(&self.wechat_status).size(12.0));}
+                            });
                         });
                         settings_label(ui,"QQ 与 Windows 通知");
                         settings_card(ui,|ui|{
+                            master_hint(ui);
+                            ui.add_enabled_ui(master,|ui|{
                             ui.label(egui::RichText::new(&self.listener_status).size(13.0));
                             if self.settings.read_notifications {
                                 if ui.button(if self.settings.qq_only{"断开 QQ 通知"}else{"断开系统通知"}).clicked(){self.pending.push(Cmd::DisconnectNotifications);}
@@ -1403,12 +1429,20 @@ impl App {
                             let before_apps=self.notification_apps.items.clone();
                             for (_,name,enabled) in &mut self.notification_apps.items {setting_row(ui,name,"",enabled);}
                             if before_apps!=self.notification_apps.items{self.notification_apps.save();}
+                            });
                         });
                     }
                     7=>{
                         settings_label(ui,"邮件提醒");
                         settings_card(ui,|ui|{
                             setting_row(ui,"新邮件提醒","新邮件到达时显示提醒；岛上歌词模式显示右侧图标",&mut self.settings.mail_enabled);
+                            ui.separator();
+                            let sync_before=self.settings.mail_sync_operations;
+                            ui.add_enabled_ui(self.mail.manage.pending.is_empty(),|ui|{
+                                setting_row(ui,"同步邮件操作到邮箱","开启后同步已读、删除和恢复；关闭时仅整理岛仔中的记录",&mut self.settings.mail_sync_operations);
+                            });
+                            if sync_before!=self.settings.mail_sync_operations{self.mail_manage_mode_changed();}
+                            ui.label(egui::RichText::new("切换开关不会补交之前的本机操作。").size(11.5).color(settings_color(ctx,Color32::from_gray(195),Color32::from_gray(60))));
                             ui.separator();
                             setting_row(ui,"验证码高亮","识别到验证码时在岛上放大显示，点击即复制",&mut self.settings.mail_code);
                             ui.separator();

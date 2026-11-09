@@ -679,7 +679,7 @@ impl GlowWinitRunning<'_> {
 
         painter.paint_and_update_textures(
             screen_size_in_pixels,
-            pixels_per_point * if viewport_id==ViewportId::ROOT {crate::root_frame_paint_scale()} else {1.0},
+            pixels_per_point,
             &clipped_primitives,
             &textures_delta,
         );
@@ -1346,7 +1346,7 @@ impl GlutinWindowContext {
 
                 viewport.deferred_commands.append(&mut commands);
 
-                egui_winit::process_viewport_commands(
+                super::winit_integration::process_viewport_commands(
                     egui_ctx,
                     &mut viewport.info,
                     std::mem::take(&mut viewport.deferred_commands),
