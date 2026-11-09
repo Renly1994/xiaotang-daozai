@@ -1,7 +1,8 @@
-//! 岛仔的原生矢量表情与连续形变。
+//! 岛仔的原生状态、矢量表情与表情图集播放。
 use crate::anim::{approach, lerp, smoothstep};
 use crate::paint::{Card, H};
 use crate::theme::{self, W};
+use crate::pet_expressions::Expression;
 use eframe::egui::Color32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,6 +23,30 @@ pub(crate) enum PetState {
 mod tests {
     use super::*;
     #[test]
+    fn listening_uses_all_twelve_new_expressions_between_singing_poses(){
+        let mut pet=Pet::default();let mut seen=std::collections::HashSet::new();
+        for frame in 0..15000 {
+            pet.step(PetState::Music,frame as f64/60.0,1.0/60.0,[0.0;2],true);
+            if let Some(expression)=pet.expressions.current(){seen.insert(expression as usize);}
+        }
+        assert_eq!(seen.len(),12,"连续听歌应能轮换到十二组新表情");
+    }
+    #[test]
+    fn listening_resumes_the_same_place_after_a_notice_or_pause(){
+        let mut pet=Pet::default();
+        for frame in 0..1080 {pet.step(PetState::Music,frame as f64/60.0,1.0/60.0,[0.0;2],true);}
+        let expression=pet.expressions.current().expect("演唱一段后应穿插新表情");
+        pet.step(PetState::Music,30.0,20.0,[0.0;2],false);
+        assert_eq!(pet.expressions.current(),Some(expression),"展开面板应暂停轮换");
+        for state in [PetState::Awake,PetState::Focused,PetState::Worried] {
+            pet.step(state,31.0,1.0,[0.0;2],true);assert!(pet.expressions.current().is_none());
+            pet.step(PetState::Music,42.0,0.0,[0.0;2],true);
+            assert_eq!(pet.expressions.current(),Some(expression),"恢复听歌应从暂停处继续");
+        }
+        pet.react(PetState::Satisfied);pet.step(PetState::Satisfied,43.0,0.1,[0.0;2],true);
+        assert_eq!(pet.expressions.current(),Some(crate::pet_expressions::Expression::Heart),"喝水反馈应保留优先级");
+    }
+    #[test]
     fn singing_keeps_each_expression_for_fifteen_seconds_after_the_transition() {
         let mut pet=Pet::default();
         pet.step(PetState::Music,0.0,0.0,[0.0;2],true);
@@ -31,26 +56,30 @@ mod tests {
             assert_eq!(pet.music_pose(),pose,"一秒过渡和十五秒停留期间不能频繁换表情");
         }
         pet.step(PetState::Music,16.1,0.2,[0.0;2],true);
+        assert_eq!(pet.expressions.current(),Some(Expression::Wink),"完整演唱一段后再穿插新表情");
+        pet.step(PetState::Music,19.4,3.3,[0.0;2],true);
         assert_ne!(pet.music_pose(),pose);
     }
     #[test]
     fn singing_rotates_expressions_and_starts_with_the_microphone() {
         let mut pet=Pet::default();let mut poses=Vec::new();let mut eyes=Vec::new();
-        for frame in 0..=5880 {
-            pet.step(PetState::Music,frame as f64/60.0,1.0/60.0,[0.0;2],true);
-            if [60,1020,1980,2940,3900,4860,5820].contains(&frame) {
-                poses.push(pet.music_pose());
-                eyes.push(pet.eyes.map(|eye|(eye.height,eye.curve)));
-            }
+        let mut start=0.0;
+        for expression in MUSIC_EXPRESSIONS.into_iter().take(7) {
+            pet.music_age=start;
+            for frame in 0..60 {pet.step(PetState::Music,frame as f64/60.0,1.0/60.0,[0.0;2],true);}
+            poses.push(pet.music_pose());eyes.push(pet.eyes.map(|eye|(eye.height,eye.curve)));
+            start+=MUSIC_PERIOD+expression.duration();
         }
         assert_eq!(poses,vec![MusicPose::Microphone,MusicPose::Hum,MusicPose::SideSing,MusicPose::Squint,MusicPose::HighNote,MusicPose::Smile,MusicPose::Microphone]);
         assert_ne!(eyes[0],eyes[2]);assert_ne!(eyes[2],eyes[3]);assert_ne!(eyes[3],eyes[4]);
         let age=pet.age;
+        let music_age=pet.music_age;
         pet.step(PetState::Music,100.0,20.0,[0.0;2],false);
         assert_eq!(pet.age,age,"展开面板时不应跳过演唱表情");
+        assert_eq!(pet.music_age,music_age);
         pet.step(PetState::Awake,101.0,0.1,[0.0;2],true);
         pet.step(PetState::Music,102.0,0.1,[0.0;2],true);
-        assert_eq!(pet.music_pose(),MusicPose::Microphone);
+        assert!((pet.music_age-music_age-0.1).abs()<0.001,"恢复听歌后继续轮换");
     }
     #[test]
     fn microphone_moves_gently_while_the_head_keeps_facing_the_mouth() {
@@ -68,14 +97,72 @@ mod tests {
         assert!((0.6..1.1).contains(&range(heights)),"麦头应有细微起伏");
         assert!((0.10..0.18).contains(&range(angles)),"麦柄应有轻微转动");
     }
+    #[test]
+    #[ignore="按需导出听歌状态的实际界面动图"]
+    fn listening_expression_gallery(){
+        use eframe::egui::{self,Pos2,Rect,Vec2};
+        use crate::app::{App,Env,Options,WIN_W,WIN_H};
+        let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_LISTENING_PREVIEW").expect("需指定预览目录"));
+        std::fs::create_dir_all(&dest).unwrap();
+        std::env::set_var("DAOZAI_DATA_DIR",std::env::temp_dir().join(format!("daozai-listening-{}",std::process::id())));
+        let ctx=egui::Context::default();let mut app=App::new(&ctx,Options{fetch_lyrics:false,pet_idle:1e9});
+        app.settings.pet=true;app.settings.minimal=false;app.settings.island_lyrics=false;
+        let mut scenes=Vec::new();let mut start=0.0;
+        for (index,expression) in MUSIC_EXPRESSIONS.into_iter().enumerate() {
+            if [0,2].contains(&index) {scenes.push((format!("演唱动作 {}",index+1),start));}
+            if [0,1,3,4,5,11].contains(&index) {
+                let name=match expression {Expression::Wink=>"调皮眨眼",Expression::Delighted=>"偷偷开心",Expression::Blush=>"害羞脸红",
+                    Expression::Heart=>"悄悄比心",Expression::Scan=>"慢慢巡视",_=>"左右张望"};
+                scenes.push((name.to_owned(),start+MUSIC_PERIOD));
+            }
+            start+=MUSIC_PERIOD+expression.duration();
+        }
+        let mut raster=crate::preview_raster::Raster::new(1280,540);let mut sequence=0;
+        for (index,(_,at)) in scenes.iter().enumerate() {
+            app.pet.music_age=*at;
+            for frame in 0..32 {
+                let t=sequence as f64/10.0;sequence+=1;
+                let env=Env{t,clock:"09:41:00".into(),today:"2026-11-07".into(),date:"11月7日 周六".into(),idle_seconds:Some(0.0),
+                    media:crate::smtc::NowPlaying{title:"晚风与星光".into(),artist:"示例歌手".into(),playing:true,duration:240.0,..Default::default()},..Default::default()};
+                let input=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(WIN_W,WIN_H))),time:Some(t),
+                    viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};
+                let output=ctx.run(input,|ctx|{egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx,|ui|{app.frame(ui,ui.max_rect(),&env);});});
+                raster.update_textures(&output.textures_delta);raster.buf.fill([0.95,0.96,0.98,1.0]);
+                raster.draw(&ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);
+                let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);let image=image::RgbaImage::from_raw(1280,540,rgba).unwrap();
+                image::imageops::crop_imm(&image,420,0,440,100).to_image().save(dest.join(format!("music-{index:02}-{frame:03}.png"))).unwrap();
+                raster.free_textures(&output.textures_delta);
+            }
+        }
+        std::fs::write(dest.join("scenes.json"),serde_json::to_string(&scenes).unwrap()).unwrap();
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MusicPose { Microphone, Hum, SideSing, Squint, HighNote, Smile }
 
 const MUSIC_PERIOD:f32=16.0;
-fn music_pose_at(age:f32)->MusicPose {
-    match (age/MUSIC_PERIOD) as usize%6 {0=>MusicPose::Microphone,1=>MusicPose::Hum,2=>MusicPose::SideSing,3=>MusicPose::Squint,4=>MusicPose::HighNote,_=>MusicPose::Smile}
+const MUSIC_EXPRESSIONS:[Expression;12]=[
+    Expression::Wink,Expression::Delighted,Expression::Smug,Expression::Blush,
+    Expression::Heart,Expression::Scan,Expression::SideGlance,Expression::Giggle,
+    Expression::Praised,Expression::Peek,Expression::ShyPeek,Expression::Search,
+];
+struct MusicSegment {
+    pose:MusicPose,
+    elapsed:f32,
+    expression:Option<(Expression,f32)>,
+}
+fn music_segment_at(age:f32)->MusicSegment {
+    let cycle=MUSIC_EXPRESSIONS.iter().map(|expression|MUSIC_PERIOD+expression.duration()).sum::<f32>();
+    let mut time=age%cycle;
+    for (index,expression) in MUSIC_EXPRESSIONS.into_iter().enumerate() {
+        let pose=match index%6 {0=>MusicPose::Microphone,1=>MusicPose::Hum,2=>MusicPose::SideSing,3=>MusicPose::Squint,4=>MusicPose::HighNote,_=>MusicPose::Smile};
+        if time<MUSIC_PERIOD {return MusicSegment{pose,elapsed:time,expression:None};}
+        time-=MUSIC_PERIOD;
+        if time<expression.duration(){return MusicSegment{pose,elapsed:MUSIC_PERIOD,expression:Some((expression,time))};}
+        time-=expression.duration();
+    }
+    MusicSegment{pose:MusicPose::Microphone,elapsed:0.0,expression:None}
 }
 
 fn microphone_pose(age:f32)->([f32;2],f32) {
@@ -130,7 +217,9 @@ pub(crate) struct Pet {
     pub last_idle: f64,
     pub hovered: bool,
     pub worried: bool,
+    pub expressions: crate::pet_expressions::Expressions,
     age: f32,
+    music_age:f32,
     eyes: [Eye; 2],
     gaze: [f32; 2],
     y: f32,
@@ -139,12 +228,12 @@ pub(crate) struct Pet {
 impl Default for Pet {
     fn default() -> Self {
         Self { state: PetState::Awake, reaction: None, waking_until: 0.0, last_idle: 0.0,
-            hovered: false, worried: false, age: 0.0, eyes: [Eye::open(4.4); 2], gaze: [0.0; 2], y: 0.0 }
+            hovered: false, worried: false, expressions:Default::default(), age: 0.0, music_age:0.0, eyes: [Eye::open(4.4); 2], gaze: [0.0; 2], y: 0.0 }
     }
 }
 
 impl Pet {
-    pub fn react(&mut self, state: PetState) { self.reaction = Some((state, 2.6)); self.age = 0.0; }
+    pub fn react(&mut self, state: PetState) { self.reaction = Some((state, self.expressions.react(state))); self.age = 0.0; }
     /// 反馈只在实际可见时计时，避免用户还在面板里操作时就播完。
     pub fn advance(&mut self, dt: f32, visible: bool) {
         if visible {
@@ -155,12 +244,18 @@ impl Pet {
         }
     }
     pub fn music_pose(&self)->MusicPose {
-        music_pose_at(self.age)
+        music_segment_at(self.music_age).pose
     }
 
     pub fn step(&mut self, state: PetState, t: f64, dt: f32, gaze: [f32; 2], visible: bool) {
+        if self.state==PetState::Music && matches!(state,PetState::Awake|PetState::Curious) {self.expressions.clear();}
+        self.expressions.step(state,dt,visible);
         if state != self.state { self.state = state; self.age = 0.0; }
         if visible { self.age += dt; }
+        if state==PetState::Music && visible {
+            self.music_age+=dt;
+            if let Some((expression,time))=music_segment_at(self.music_age).expression {self.expressions.play_at(expression,time);}
+        }
         let age = self.age;
         let mut eyes = [Eye::open(4.4); 2];
         let mut y = (t as f32 * 1.7).sin() * 0.35;
@@ -185,6 +280,7 @@ impl Pet {
                 y = (age * 8.0).sin() * 1.2 * (-age * 0.8).exp();
             },
             PetState::Music => {
+                let age=self.music_age;
                 let sway=(age*1.4).sin();
                 look=[0.0,0.0];y=-0.5+sway*0.25;
                 match self.music_pose() {
@@ -204,7 +300,8 @@ impl Pet {
             PetState::Dozing => { eyes = [Eye::open(0.6); 2]; y = 1.0; look = [0.0; 2]; },
             PetState::Sleeping => { eyes = [Eye::arc(2.4, 1.0); 2]; y = 0.8 + (t as f32 * 1.2).sin() * 0.4; look = [0.0; 2]; },
         }
-        if matches!(state, PetState::Awake | PetState::Curious | PetState::Focused | PetState::Worried) {
+        if self.expressions.current().is_some() {eyes=[Eye::open(4.4);2];look=[0.0;2];y=0.0;}
+        if self.expressions.current().is_none() && matches!(state, PetState::Awake | PetState::Curious | PetState::Focused | PetState::Worried) {
             let start = 2.0 + crate::anim::hash01((t / 5.6).floor() as u64) * 2.7;
             let blink = ((t % 5.6) as f32 - start) / 0.18;
             if (0.0..1.0).contains(&blink) {
@@ -217,7 +314,8 @@ impl Pet {
         self.y = approach(self.y, y, 14.0, dt);
     }
 
-    pub fn draw(&self, c: &Card, cx: f32, t: f64) {
+    pub fn draw(&mut self, c: &Card, cx: f32, t: f64, palette:Option<crate::skin_paint::Palette>) {
+        if self.expressions.draw(c,cx,palette) {return;}
         for (i, eye) in self.eyes.iter().enumerate() {
             let x = cx + if i == 0 { -5.6 } else { 5.6 } + self.gaze[0];
             let y = 14.5 + self.y + eye.y + self.gaze[1];
@@ -246,11 +344,8 @@ impl Pet {
             },
             PetState::Satisfied => crate::paint::droplet(c,cx+18.0,12.0,5.0,theme::CYAN),
             PetState::Music => {
-                let alpha=smoothstep(0.0,1.0,self.age%MUSIC_PERIOD);
-                if self.age>=MUSIC_PERIOD && alpha<1.0 {
-                    self.draw_music(&c.faded(1.0-alpha),cx,music_pose_at(self.age-MUSIC_PERIOD));
-                }
-                self.draw_music(&c.faded(alpha),cx,self.music_pose());
+                let segment=music_segment_at(self.music_age);
+                self.draw_music(&c.faded(smoothstep(0.0,1.0,segment.elapsed)),cx,segment.pose);
             },
             PetState::Worried => {
                 c.fill(cx+17.0,8.0,1.6,4.2,0.8,theme::YELLOW);
@@ -262,7 +357,7 @@ impl Pet {
 
     fn draw_music(&self,c:&Card,cx:f32,pose:MusicPose){
         let y=self.y+self.gaze[1];
-        let pulse=(self.age*2.0).sin()*0.5+0.5;
+        let pulse=(self.music_age*2.0).sin()*0.5+0.5;
         let mouth=|rx:f32,ry:f32|{
             let points:Vec<_>=(0..=24).map(|n|{let angle=n as f32/24.0*std::f32::consts::TAU;(cx-0.8+angle.cos()*rx,20.7+y+angle.sin()*ry)}).collect();
             c.path(&points,0.9,theme::WHITE);
@@ -276,9 +371,9 @@ impl Pet {
             MusicPose::Smile=>c.path(&[(cx-2.5,20.6+y),(cx-1.6,21.6+y),(cx-0.5,21.9+y),(cx+0.6,21.6+y),(cx+1.5,20.6+y)],1.0,theme::WHITE),
         }
         if matches!(pose,MusicPose::Microphone|MusicPose::SideSing|MusicPose::HighNote) {
-            microphone(c,cx,y,self.age);
+            microphone(c,cx,y,self.music_age);
         } else {
-            let y=8.5+(self.age*1.4).sin()*0.6;
+            let y=8.5+(self.music_age*1.4).sin()*0.6;
             c.seg((cx+16.0,y-3.0),(cx+16.0,y+3.0),1.1,theme::WHITE);
             c.seg((cx+16.0,y-3.0),(cx+19.0,y-2.0),1.1,theme::WHITE);
             c.circle(cx+14.8,y+3.0,1.5,theme::WHITE);

@@ -173,6 +173,7 @@ pub enum Cmd {
     MailSync,
     /// 测试某个邮箱的连接（授权码只在内存里传给工作线程）。
     MailTest(mail::Account, String),
+    MailManage(crate::mail_manage::Request),
     /// v0.5.6：用临时密码试连日历，成功后才允许落盘。
     CalendarTest(calendar::Config, String),
     /// 让外壳立即同步一次日历。
@@ -260,7 +261,11 @@ pub fn blur_pieces(shapes: &[GlassShape], ppp: f32) -> Vec<BlurPiece> {
                 }
             }
             GlassShape::Round(r, radius) => {
-                out.push(BlurPiece { x: (r.left() * ppp).round(), y: (r.top() * ppp).round(), w: (r.width() * ppp).round(), h: (r.height() * ppp).round(), radius: radius * ppp });
+                let (x,y,right,bottom)=((r.left()*ppp).round(),(r.top()*ppp).round(),(r.right()*ppp).round(),(r.bottom()*ppp).round());
+                let (w,h)=(right-x,bottom-y);
+                if w<=0.0 || h<=0.0 {continue;}
+                // 收起动画先按物理边界取整，再限制圆角，避免上下圆弧在中线交叠。
+                out.push(BlurPiece { x,y,w,h,radius:(radius*ppp).max(0.0).min(w.min(h)*0.5) });
             }
             GlassShape::Outline(points) => {
                 // 任意轮廓只能退化为外接矩形；岛体本身走 Notch，不会用到这里。
@@ -353,6 +358,22 @@ mod blur_piece_tests {
                     }
                 }
                 assert!(checked > 1000);
+            }
+        }
+    }
+
+    #[test]
+    fn collapsing_pill_blur_radius_fits_the_physical_bounds() {
+        for ppp in [1.0,1.25,1.5,2.0] {
+            for height in [30.02,30.3,30.49,30.5,30.8,31.0,31.2,32.1,35.3] {
+                let rect=Rect::from_min_size(Pos2::new(230.23,6.0),Vec2::new(179.31,height));
+                let radius=15.0+(height-30.0)*0.1;
+                let pieces=blur_pieces(&[GlassShape::Round(rect,radius)],ppp);
+                assert_eq!(pieces.len(),1);
+                let p=pieces[0];
+                assert!(p.radius*2.0<=p.w.min(p.h),"收起时圆弧不能超过物理边界：ppp={ppp}, height={height}, piece={p:?}");
+                assert_eq!(p.x+p.w,(rect.right()*ppp).round(),"模糊与岛体右边界应使用同一像素位置");
+                assert_eq!(p.y+p.h,(rect.bottom()*ppp).round(),"模糊与岛体下边界应使用同一像素位置");
             }
         }
     }
@@ -455,6 +476,7 @@ pub(crate) struct LyricsState {
 #[derive(Default)]
 pub(crate) struct MailState {
     pub privacy:crate::mail_privacy::Privacy,
+    pub manage:crate::mail_manage_ui::State,
     pub accounts: Vec<mail::Account>,
     /// 每个账号的连接状态，键是邮箱小写。
     pub status: HashMap<String, mail::Status>,
@@ -619,6 +641,7 @@ pub struct App {
 
     // 专注
     pub(crate) pomo: Pomo,
+    pub(crate) focus_editing: bool,
     pub(crate) ring_shown: Spring,
     pub(crate) reset_spin: Spring,
 
@@ -627,6 +650,8 @@ pub struct App {
     pub(crate) editing: Option<usize>,
     pub(crate) buf: String,
     pub(crate) todo_input_focused: bool,
+    todo_ime_active: bool,
+    todo_ime_frame: bool,
     pub(crate) todo_pop: Spring,
 
     // 音乐
@@ -671,6 +696,7 @@ pub struct App {
     pub(crate) history: std::collections::VecDeque<Alert>,
     pub(crate) pending: Vec<Cmd>,
     pub(crate) todo_first: usize,
+    pub(crate) todo_choosing: bool,
     pub(crate) pet: crate::pet::Pet,
     pub(crate) last_drink: Option<(u32, usize)>,
     // 其它
@@ -765,11 +791,13 @@ impl App {
             water_view_t: Spring::new(0.0, 200.0, 0.9),
             remind_t: Spring::new(1.0, 400.0, 0.8),
             last_reminder: 0.0,
-            pomo: Pomo { phase: Phase::Focus, remaining: focus_seconds, running: false },
+            pomo: Pomo { phase: Phase::Focus, remaining: focus_seconds, running: false }, focus_editing:false,
             ring_shown: Spring::new(1.0, 160.0, 0.95),
             reset_spin: Spring::new(0.0, 160.0, 0.82),
             adding: false,
             todo_input_focused: false,
+            todo_ime_active: false,
+            todo_ime_frame: false,
             editing: None,
             buf: String::new(),
             todo_pop: Spring::new(0.0, 500.0, 0.45),
@@ -783,7 +811,7 @@ impl App {
             forced_open_until:0.0, settings_open:false, displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_tab:0, settings_category:0, wechat_status:String::new(), notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
             listener_status: "尚未连接".into(),
             notification_bell_until: 0.0, notification_bell_at: -10.0, notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, pending_messengers:Vec::new(), messenger_scroll:0.0, alerts: Default::default(), history: Default::default(), pending: vec![],
-            todo_first: 0, pet: Default::default(), last_drink: None,
+            todo_first: 0, todo_choosing: false, pet: Default::default(), last_drink: None,
             toast: None, toast_below: false,
             last_input: 0.0, system_idle: None,
             last_cursor: None,
@@ -840,19 +868,31 @@ impl App {
     pub fn mail_event(&mut self, ev: mail::Event) {
         let watching=|email:&str|self.settings.mail_enabled && self.mail.accounts.iter().any(|a|a.enabled && a.email.eq_ignore_ascii_case(email));
         match ev {
+            mail::Event::Managed(done)=>self.mail_managed(done),
             mail::Event::Status { account, status } => {
                 if !watching(&account){return;}
+                if status==mail::Status::Ready{
+                    self.mail.manage.data.remove(&(account.to_ascii_lowercase(),crate::mail_manage::Folder::Inbox));self.mail.manage.next_refresh=0.0;
+                    if (!self.mail.manage.trash_open||!self.settings.mail_sync_operations)&&self.mail.open_uid.as_ref().is_some_and(|(a,_)|a.eq_ignore_ascii_case(&account)){
+                        self.mail.open_uid=None;self.mail.manage.auto_read=None;
+                    }
+                }
                 self.mail.status.insert(account.to_ascii_lowercase(), status);
             }
             mail::Event::Mail { item, new } => {
                 if !watching(&item.account){return;}
+                if !new&&self.mail.manage.data.get(&(item.account.to_ascii_lowercase(),crate::mail_manage::Folder::Inbox)).is_some_and(|s|!s.entries.iter().any(|(uid,_)|*uid==item.uid)){return;}
                 self.mail.privacy.observe(&item,new,self.t,chrono::Utc::now().timestamp());
+                if self.mail_locally_removed(&item){
+                    self.mail.manage.trash.retain(|m|m.uid!=item.uid||!m.account.eq_ignore_ascii_case(&item.account));self.mail.manage.trash.insert(0,item);self.mail.manage.trash.truncate(60);return;
+                }
                 self.mail
                     .recent
                     .retain(|m| !(m.account.eq_ignore_ascii_case(&item.account) && m.uid == item.uid));
                 self.mail.recent.insert(0, item);
                 self.mail.recent.truncate(60);
-                self.mail.privacy.retain(&self.mail.recent);
+                if new{self.mail.manage.next_refresh=0.0;}
+                self.mail.privacy.retain(self.mail.recent.iter().chain(&self.mail.manage.trash).chain(&self.mail.reading));
                 if new && self.settings.mail_enabled {
                     let item=&self.mail.recent[0];
                     let body=format!("{} · {}",item.from,item.subject);
@@ -1033,7 +1073,17 @@ impl App {
 
     /// 账号增删或开关变化后：落盘并让外壳重新对齐收信线程。
     pub(crate) fn mail_accounts_changed(&mut self) {
-        mail::save_accounts(&self.mail.accounts);
+        let accounts=&self.mail.accounts;
+        let known=&self.mail.manage.identities;
+        let active=|email:&str|accounts.iter().any(|a|a.enabled && mail::key(a)==email && known.get(email).is_none_or(|old|old==a));
+        self.mail.manage.data.retain(|(email,_),_|active(email));
+        self.mail.recent.retain(|m|active(&m.account.to_ascii_lowercase()));
+        self.mail.manage.trash.retain(|m|active(&m.account.to_ascii_lowercase()));
+        if self.mail.reading.as_ref().is_some_and(|m|!active(&m.account.to_ascii_lowercase())){self.mail.reading=None;}
+        if self.mail.open_uid.as_ref().is_some_and(|(email,_)|!active(&email.to_ascii_lowercase())){self.mail.open_uid=None;self.mail.manage.auto_read=None;}
+        self.mail.manage.identities.retain(|_,old|accounts.contains(old));
+        self.mail.manage.next_refresh=0.0;
+        mail::save_accounts(accounts);
         self.pending.push(Cmd::MailSync);
     }
 
@@ -1272,10 +1322,26 @@ impl App {
     }
 
     pub fn is_editing(&self) -> bool {
-        self.adding || self.editing.is_some() || self.task_dialog.is_some() || self.calendar.draft.is_some()
+        self.adding || self.editing.is_some() || self.todo_choosing || self.task_dialog.is_some() || self.calendar.draft.is_some() || self.focus_editing
+    }
+
+    pub fn filter_todo_input(&mut self,input:&mut egui::RawInput) {
+        self.todo_ime_frame=false;
+        if !self.adding && self.editing.is_none(){self.todo_ime_active=false;return;}
+        self.todo_ime_frame=self.todo_ime_active || input.events.iter().any(|event|matches!(event,egui::Event::Ime(egui::ImeEvent::Enabled|egui::ImeEvent::Preedit(_)|egui::ImeEvent::Commit(_))));
+        for event in &input.events {
+            match event {
+                egui::Event::Ime(egui::ImeEvent::Enabled|egui::ImeEvent::Preedit(_))=>self.todo_ime_active=true,
+                egui::Event::Ime(egui::ImeEvent::Commit(_)|egui::ImeEvent::Disabled)=>self.todo_ime_active=false,
+                _=>{},
+            }
+        }
+        // 首帧和结束帧的按键、失焦仍属于组合输入，不能透传给待办编辑。
+        if self.todo_ime_frame {input.events.retain(|event|!matches!(event,egui::Event::Key{key:egui::Key::Backspace|egui::Key::Delete|egui::Key::Enter|egui::Key::Escape|egui::Key::ArrowLeft|egui::Key::ArrowRight|egui::Key::ArrowUp|egui::Key::ArrowDown,..}));}
     }
 
     pub fn foreground_changed(&mut self) {
+        if self.todo_ime_frame {return;}
         self.hover_lock=true;
         if self.adding && self.buf.trim().is_empty(){self.cancel_edit();}
     }
@@ -1307,20 +1373,22 @@ impl App {
     }
 
     pub(crate) fn cancel_edit(&mut self) {
+        self.focus_editing=false;
         self.adding = false;
         self.editing = None;
+        self.todo_choosing = false;
         self.task_dialog=None;
         self.calendar.draft=None;
         self.buf.clear();
         self.todo_input_focused=false;
+        self.todo_ime_active=false;
+        self.todo_ime_frame=false;
     }
 
     fn island_lyrics_active(&self)->bool {
         if self.side() {return false;}
         self.settings.island_lyrics && self.settings.visible_pages[0] && self.media.is_music()
             && !self.browser_minimal_active
-            && lyric_key_matches(&self.ly.key,&self.media)
-            && self.ly.lyrics.as_ref().is_some_and(|lyrics|lyrics.synced && lyrics.lines.iter().any(|line|!line.text.trim().is_empty()))
     }
     pub(crate) fn compact_notices(&self)->bool {self.island_lyrics_active()&&!self.open&&!self.notice.as_ref().is_some_and(|a|a.meeting.is_some()||self.settings.notification_preview&&matches!(a.source,crate::extras::AlertSource::External(_)))}
 
@@ -1339,18 +1407,20 @@ impl App {
     fn update_island_lyric_layout(&mut self,ctx:&egui::Context) {
         if !self.island_lyrics_active(){self.island_lyric_layout=None;return;}
         let current=self.island_lyric();
+        let lyrics=self.ly.lyrics.as_ref().filter(|lyrics|lyric_key_matches(&self.ly.key,&self.media)
+            && lyrics.synced && lyrics.lines.iter().any(|line|!line.text.trim().is_empty()));
+        let title=lyrics.is_none();
         let text=if let Some((_,line))=current {line}
-            else if self.ly.loading || !lyric_key_matches(&self.ly.key,&self.media) {"正在查找歌词…"}
-            else if let Some(lyrics)=&self.ly.lyrics {
-                if !lyrics.synced {"暂无同步歌词"}
-                else if lyrics.index_at(self.lyric_position()).is_none() {"前奏"}
+            else if let Some(lyrics)=lyrics {
+                if lyrics.index_at(self.lyric_position()).is_none() {"前奏"}
                 else {"间奏"}
-            } else {""};
-        let ink=if current.is_some(){theme::WHITE}else{theme::GRAY};
+            } else {self.media.title.trim()};
+        let ink=if current.is_some()||title{theme::WHITE}else{theme::GRAY};
         let layout=|text:String| {
             let mut job=egui::text::LayoutJob::simple(text,theme::font(11.0,W::Semibold),ink,LYRIC_BAR_W-80.0);
             job.halign=egui::Align::Center;
             job.wrap.break_anywhere=true;
+            if title {job.wrap.max_rows=1;}
             ctx.fonts(|fonts|fonts.layout_job(job))
         };
         let mut galley=layout(text.to_owned());
@@ -1413,7 +1483,7 @@ impl App {
     }
 
     pub(crate) fn expanded_height(&self)->f32 {
-        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
+        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==6{176.0}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
     }
 
     // ---------------------------------------------------------------
@@ -1534,18 +1604,17 @@ impl App {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.is_editing() {
             self.cancel_edit();
         }
-        if !self.is_editing() && inside && self.open && self.reveal > 0.95 {
+        if (!self.is_editing() || self.todo_choosing) && inside && self.open && self.reveal > 0.95 {
             let (scroll, left, right, esc) = ctx.input(|i| (i.raw_scroll_delta.y, i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight), i.key_pressed(egui::Key::Escape)));
             if esc { self.hover_lock = true; }
-            if left || right {
+            if (left || right) && !self.todo_choosing {
                 self.wheel_delta=0.0;
                 self.navigate_page(right);
             } else if scroll!=0.0 {
                 let cursor=env.cursor.unwrap()-self.content_origin(win).to_vec2();
-                let mail_body=self.page==5 && self.mail.open_uid.is_some()
-                    && Rect::from_min_max(Pos2::new(46.0,104.0),Pos2::new(374.0,194.0)).contains(cursor);
+                let mail_reading=self.page==5 && self.mail.open_uid.is_some();
                 let mail_list=self.page==5 && !self.mail.accounts.is_empty() && self.mail.open_uid.is_none() && self.mail_list_bounds().contains(cursor);
-                if mail_body || mail_list {self.wheel_delta=0.0;}
+                if mail_reading || mail_list {self.wheel_delta=0.0;}
                 else {
                     // 累积高精度滚轮的小幅输入；停顿或反向时丢弃上一段余量。
                     if self.t-self.wheel_at>0.18 || self.wheel_delta*scroll<0.0 {self.wheel_delta=0.0;}
@@ -1557,23 +1626,24 @@ impl App {
                         let calendar_max=if self.page==CALENDAR_PAGE {self.calendar_scroll_max(env)}else{0};
                         let calendar_body=self.page==CALENDAR_PAGE && Rect::from_min_max(Pos2::new(163.0,52.0),Pos2::new(378.0,208.0)).contains(cursor);
                         let clipboard_tab=self.page==3 && self.shelf_tab==1;
+                        let clipboard_body=clipboard_tab && Rect::from_min_max(Pos2::new(42.0,31.0),Pos2::new(377.0,124.0)).contains(cursor);
                         let list=match self.page {
                             CALENDAR_PAGE if calendar_body=>Some((&mut self.calendar.view.first,calendar_max)),
                             4 if Rect::from_min_max(Pos2::new(196.0,31.0),Pos2::new(377.0,124.0)).contains(cursor)
                                 =>Some((&mut self.todo_first,self.todos.items.len().saturating_sub(3))),
-                            3 if clipboard_tab
+                            3 if clipboard_body
                                 =>Some((&mut self.clip_first,self.clipboard.lock().items.len().saturating_sub(crate::pages::CLIP_ROWS))),
-                            3 if Rect::from_min_max(Pos2::new(36.0,28.0),Pos2::new(383.0,128.0)).contains(cursor)
+                            3 if !clipboard_tab && Rect::from_min_max(Pos2::new(36.0,28.0),Pos2::new(383.0,128.0)).contains(cursor)
                                 =>Some((&mut self.shelf_first,self.shelf.items.len().saturating_sub(5))),
                             _=>None,
                         };
-                        let content_scrolls=(clipboard_tab || calendar_body) && list.as_ref().is_some_and(|(_,max)|*max>0);
+                        let content_scrolls=(self.page==4 || clipboard_body || calendar_body) && list.as_ref().is_some_and(|(_,max)|*max>0);
                         let scrolled=list.is_some_and(|(first,max)|{
                             let target=if next {(*first+1).min(max)}else{first.saturating_sub(1)};
                             let changed=target!=*first;*first=target;changed
                         });
                         // 内容溢出时滚动列表并停在边界；未溢出时滚轮翻页。
-                        if !scrolled && !content_scrolls && self.t-self.wheel_page_at>=0.20 {
+                        if !scrolled && !content_scrolls && !self.todo_choosing && self.t-self.wheel_page_at>=0.20 {
                             self.navigate_page(next);
                             self.wheel_page_at=self.t;
                         }
@@ -1596,7 +1666,10 @@ impl App {
         let pc = anim::clamp01(p);
         let painter = ui.painter_at(ui.max_rect().expand(40.0));
         let feather = 1.0 / ctx.pixels_per_point();
+        let notice_rect=self.notice_rect(cx,top);
+        let notice_shape=notice_rect.map(|r|Rect::from_min_max(Pos2::new(r.left()-36.0,r.top()),r.max));
         let body=messenger_rect.filter(|_|outside_badge.is_none()).map_or(panel,|badge|panel.union(badge));
+        let body=notice_shape.map_or(body,|notice|body.union(notice));
         let minimal_pill = self.effective_minimal() && !self.island_lyrics_active() && self.notice.is_none() && self.t>=self.notification_bell_until && pc < 0.02;
         let flare = if minimal_pill || pill { 0.0 } else { lerp(5.0, FLARE, pc) };
         let k = (w / PW).clamp(0.3, 1.1);
@@ -1614,9 +1687,6 @@ impl App {
         let shadow_k = glass::shadow_alpha(0.0, thick) / 0.12 * skin_shadow;
         let island_shadow=|r:Rect,flare:f32,flare_h:f32,radius:f32,strength:f32| if pill {pill_shadow(&painter,r,radius,strength)} else if side {shape::shadow_docked(&painter,r,dock,flare,flare_h,radius,strength)} else {shape::shadow(&painter,r,flare,flare_h,radius,strength)};
         island_shadow(body, flare, flare_h, radius, smoothstep(0.1, 0.9, pc) * shadow_k);
-        let notice_rect=self.notice_rect(cx,top);
-        let notice_shape=notice_rect.map(|r|Rect::from_min_max(Pos2::new(r.left()-36.0,r.top()),r.max));
-        if let Some(r)=notice_shape {island_shadow(r,5.0,8.0,12.5,0.5*shadow_k);}
         if let Some(r)=outside_badge{
             let appear=self.messenger_appear();
             painter.rect_filled(r,r.width()/2.0,paint::alpha(self.glass_fill(),appear));
@@ -1638,7 +1708,6 @@ impl App {
             self.fluid.advance(env.t,dt);
         }
         self.paint_body(&painter, body, flare, flare_h, radius, feather);
-        if let Some(r)=notice_shape {self.paint_body(&painter,r,5.0,8.0,12.5,feather);}
         let content_from=crate::skin_paint::shape_count(&ctx,layer);
 
         // 内容只随形体「揭开」：不缩放，按面板裁剪，到 55% 才开始淡入
@@ -1716,7 +1785,7 @@ impl App {
             let y=(h.min(self.base_size().1)-BAR_H).max(0.0)/2.0;
             // 吉祥物跟随皮肤换色：浅色底上变成深色版本，保持清晰。
             let fit=if self.island_lyrics_active()||self.notice.is_some(){1.0}else{((WIN_W-32.0)/self.resident.target.width).min(1.0)};
-            self.pet.draw(&base.scaled(cx-origin.x,15.0,fit).shifted(0.0,y).faded(pet_alpha),cx-origin.x+self.resident.position(bar::PET),self.t);
+            self.pet.draw(&base.scaled(cx-origin.x,15.0,fit).shifted(0.0,y).faded(pet_alpha),cx-origin.x+self.resident.position(bar::PET),self.t,self.skin_palette());
         }
         if reveal > 0.004 && !banner && !restoring_lyrics {
             let c = base.shifted(0.0, (1.0 - reveal) * -5.0).faded(reveal);
@@ -1788,7 +1857,6 @@ impl App {
                 else if side {GlassShape::Docked{rect:rel(r),dock,flare,flare_h,radius}} else {GlassShape::Notch{rect:rel(r),flare,flare_h,radius}};
             let mut shapes=vec![outline(body,flare,flare_h,radius)];
             if let Some(r)=outside_badge{shapes.push(GlassShape::Round(rel(r),r.width()/2.0));}
-            if let Some(r)=notice_shape {shapes.push(outline(r,5.0,8.0,12.5));}
             if let Some(r)=notice_details {
                 let radius=if self.hud_notice.as_ref().is_some_and(|a|a.meeting.is_some()){14.0}else{10.0};
                 shapes.push(GlassShape::Round(rel(r),radius));
@@ -2223,6 +2291,8 @@ impl App {
         let battery_space=if show_battery {24.0}else{0.0};
         let group = battery_space + date_w + 8.0 + clock_w;
         let gx = local_cx - group / 2.0 + if show_battery {6.0}else{0.0};
+        // 日程页左侧还有新增按钮，顶栏从操作区右侧开始，避免较长的日期和时段文字挤到按钮上。
+        let gx = if self.page==CALENDAR_PAGE {gx.max(155.0)}else{gx};
         let hb = (gx + 8.5, 18.6);
         let hd = gx + battery_space;
         let hc = hd + date_w + 8.0;
@@ -2297,7 +2367,7 @@ impl App {
         self.pet.hovered = env.cursor.is_some_and(|p| (p.x-cx).abs() <= BAR_W/2.0+24.0 && (0.0..70.0).contains(&p.y));
         self.pet.worried = self.settings.show_battery && env.battery.is_some_and(|v|v<=20) && !env.charging || env.network == Some(false);
         let allowed = self.pet_enabled();
-        if !allowed { self.pet.reaction = None; self.pet.waking_until = 0.0; }
+        if !allowed { self.pet.reaction = None; self.pet.waking_until = 0.0; self.pet.expressions.clear(); }
         let available = allowed && !self.open && !self.drag_hot;
         let shown = available;
         self.pet_a = anim::approach(self.pet_a, if shown {1.0}else{0.0}, 9.0, self.dt);
@@ -2321,7 +2391,7 @@ impl App {
         if self.subpage==Some(self.page) {
             c.text(15.0,25.0,"‹",19.0,W::Bold,theme::WHITE,H::Left);
             c.text(37.0,25.0,if self.page==2{"饮水设置"}else{"专注设置"},size::TITLE,W::Bold,theme::WHITE,H::Left);
-            if c.hit(9.0,7.0,28.0,23.0,"subpage-back").clicked(){self.subpage=None;}
+            if c.hit(9.0,7.0,28.0,23.0,"subpage-back").clicked(){self.subpage=None;self.focus_editing=false;}
             self.page_settings(c);self.nav(c);return;
         }
         let e = self.page_e();
@@ -2370,12 +2440,13 @@ impl App {
     fn nav(&mut self, c: &Card) {
         let pages: Vec<_>=self.settings.page_order.iter().copied().filter(|page|self.settings.visible_pages[*page]).collect();
         if pages.len()<2 { return; }
-        let l = c.hit(8.0, 55.0, 26.0, 26.0, "nav-l");
-        let r = c.hit(385.0, 55.0, 26.0, 26.0, "nav-r");
+        let arrow_y=if self.page==6{88.0}else{68.0};
+        let l = c.hit(8.0, arrow_y-13.0, 26.0, 26.0, "nav-l");
+        let r = c.hit(385.0, arrow_y-13.0, 26.0, 26.0, "nav-r");
         let (lh, lp) = c.hover_t(&l);
         let (rh, rp) = c.hover_t(&r);
-        paint::chevron(c, 21.0, 68.0, -1.0, lh, lp);
-        paint::chevron(c, 398.0, 68.0, 1.0, rh, rp);
+        paint::chevron(c, 21.0, arrow_y, -1.0, lh, lp);
+        paint::chevron(c, 398.0, arrow_y, 1.0, rh, rp);
         if l.clicked() { self.navigate_page(false); }
         if r.clicked() { self.navigate_page(true); }
         // 页码豆：宽度由弹簧驱动，整行实时居中；当前页是白色长条
@@ -2711,7 +2782,7 @@ impl App {
         let first_focus=!self.todo_input_focused;
         self.buf=buf;
         let lost_window=ui.input(|i|i.events.iter().any(|event|matches!(event,egui::Event::WindowFocused(false))));
-        if !first_focus && self.adding && self.buf.trim().is_empty() && (resp.clicked_elsewhere() || lost_window) {
+        if !first_focus && !self.todo_ime_frame && self.adding && self.buf.trim().is_empty() && (resp.clicked_elsewhere() || lost_window) {
             resp.surrender_focus();
             self.cancel_edit();
             return;

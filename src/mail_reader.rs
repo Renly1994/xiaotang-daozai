@@ -11,6 +11,10 @@ impl App {
         let focus=std::mem::take(&mut self.mail.reader_focus);
         let (mut close,mut link)=(false,None);
         let mut toggle=None;
+        let mut action=None;
+        let folder=if self.mail.manage.reader_trash{crate::mail_manage::Folder::Trash}else{crate::mail_manage::Folder::Inbox};
+        let ready=self.mail_reader_ready(&raw,folder);
+        let seen=self.mail_seen(&raw,folder)==Some(true);
         ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("daozai-mail-reader"),
             egui::ViewportBuilder::default().with_title("邮件全文 · 岛仔").with_inner_size([700.0,620.0]).with_min_inner_size([500.0,380.0]),|ctx,_|{
             if focus{ctx.send_viewport_cmd(egui::ViewportCommand::Focus);}
@@ -24,6 +28,15 @@ impl App {
                         ui.label(egui::RichText::new(label).color(Color32::from_gray(160)));
                         ui.label(egui::RichText::new(text).color(Color32::from_gray(220)));ui.end_row();
                     }
+                });
+                ui.horizontal(|ui|{
+                    if folder==crate::mail_manage::Folder::Trash{
+                        if ui.add_enabled(ready,egui::Button::new("恢复到收件箱")).clicked(){action=Some(crate::mail_manage::Action::Move{uid:raw.uid});}
+                    }else{
+                        if ui.add_enabled(ready,egui::Button::new(if seen{"标为未读"}else{"标为已读"})).clicked(){action=Some(crate::mail_manage::Action::Read{uid:raw.uid,seen:!seen});}
+                        if ui.add_enabled(ready,egui::Button::new("移到回收站")).clicked(){action=Some(crate::mail_manage::Action::Move{uid:raw.uid});}
+                    }
+                    if !self.mail.manage.message.is_empty(){ui.label(egui::RichText::new(&self.mail.manage.message).size(11.0).color(Color32::from_gray(160)));}
                 });
                 if let Some(event)=&item.meeting {
                     ui.horizontal_wrapped(|ui|{
@@ -49,6 +62,7 @@ impl App {
                 });
             });
         });
+        if let Some(action)=action.filter(|_|self.mail_reader_ready(&raw,folder)){self.mail_manage_request(Some(&raw.account),folder,action);ctx.request_repaint();}
         if reveal{self.reveal_mail_code(&raw);ctx.request_repaint();}
         if let Some(event)=toggle{self.toggle_mail_event(&event);}
         if close{self.mail.reading=None;}

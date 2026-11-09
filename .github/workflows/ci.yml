@@ -15,12 +15,6 @@ jobs:
         run: rustup toolchain install stable --profile minimal
       - name: 测试
         run: cargo +stable test --locked --all-targets --features record --target x86_64-pc-windows-msvc -- --test-threads=1
-      - name: 构建并检查发布运行库
-        shell: pwsh
-        run: |
-          cargo +stable build --locked --release --bin daozai --target x86_64-pc-windows-msvc
-          if ($LASTEXITCODE -ne 0) { throw '发布构建失败' }
-          ./scripts/check-runtime.ps1 -Executable ./target/x86_64-pc-windows-msvc/release/daozai.exe
       - name: 检查安装脚本语法
         shell: pwsh
         run: |
@@ -29,11 +23,11 @@ jobs:
             [System.Management.Automation.Language.Parser]::ParseFile($_.FullName,[ref]$null,[ref]$parseErrors) | Out-Null
             if ($parseErrors) { throw ($parseErrors | Out-String) }
           }
-      - name: 验证发布打包
+      - name: 验证发布构建与打包
         shell: pwsh
         run: |
           $compiler = ./scripts/get-nsis.ps1 -Directory $env:RUNNER_TEMP
-          ./scripts/package.ps1 -SkipBuild -NsisCompiler $compiler
+          ./scripts/package.ps1 -NsisCompiler $compiler
   installer:
     runs-on: windows-latest
     steps:

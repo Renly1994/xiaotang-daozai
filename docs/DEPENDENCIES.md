@@ -4,8 +4,9 @@
 
 ## 本地补丁
 
-- `vendor/eframe`：基于 0.31.1，记录当前视口，避免 Windows WGL 在同一窗口重复切换上下文。
-- `vendor/imap`：基于 2.4.1，仅关闭 `nom` 默认功能并保留 `std`，移除邮件协议解析不需要的 `lexical-core` 浮点解析依赖。
+- `vendor/eframe`：基于 0.31.1，处理 Windows WGL 上下文复用、岛体缩放和窗口焦点。
+- `vendor/egui`：基于 0.31.1，为不同缩放倍率维护独立的字体纹理。
+- `vendor/imap`：基于 2.4.1，关闭 `nom` 默认功能并保留 `std`，移除邮件协议解析不需要的 `lexical-core` 浮点解析依赖。服务器拒绝进入 IDLE 时直接回到轮询。
 
 ## 安全检查
 

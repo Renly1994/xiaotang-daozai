@@ -212,7 +212,7 @@ impl Shell {
             if self.app.settings.show_battery && b.is_some_and(|v|v<=20) && !c && self.sys.0.is_some_and(|v|v>20) {self.app.alert("电量偏低",format!("剩余 {}% · 请连接电源",b.unwrap()),5,true);}
             self.sys = (b, c, PollClock::now());
         }
-        let ppp = (ctx.pixels_per_point()*eframe::root_frame_paint_scale());
+        let ppp = ctx.pixels_per_point();
         let origin = ctx.input(|i| i.viewport().outer_rect).map(|r| r.min).unwrap_or(Pos2::new(self.win_x, 0.0));
         #[cfg(windows)]
         let origin=self.native.as_ref().and_then(|w|w.logical_origin(ppp)).unwrap_or(origin);
@@ -262,6 +262,10 @@ impl Shell {
 }
 
 impl eframe::App for Shell {
+    fn raw_input_hook(&mut self,_ctx:&egui::Context,input:&mut egui::RawInput) {
+        if input.viewport_id==egui::ViewportId::ROOT {self.app.filter_todo_input(input);}
+    }
+
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0; 4]
     }
@@ -282,7 +286,6 @@ impl eframe::App for Shell {
         }
         self.media_enabled.store(self.app.settings.visible_pages[0] && !guarded,std::sync::atomic::Ordering::Relaxed);
         // 设置里改了岛体大小：下一帧起主窗口按新倍率栅格化，定位逻辑随像素比变化同步调整画布。
-        #[cfg(windows)] eframe::share_root_font_scale(self.app.settings_open);
         #[cfg(windows)] eframe::set_root_viewport_scale(self.app.settings.island_scale());
         #[cfg(windows)]
         {
@@ -303,9 +306,9 @@ impl eframe::App for Shell {
         #[cfg(windows)]
         let placement_key=(self.app.settings.display_id.clone(),self.app.settings.island_offset,self.app.settings.dock);
         #[cfg(windows)]
-        if !self.placed || self.placement_scale!=(ctx.pixels_per_point()*eframe::root_frame_paint_scale()) || self.placement_key!=placement_key || self.placement_at.ready(Duration::from_secs(1)) {
+        if !self.placed || self.placement_scale!=ctx.pixels_per_point() || self.placement_key!=placement_key || self.placement_at.ready(Duration::from_secs(1)) {
             self.placement_at=PollClock::now();
-            self.placement_scale=(ctx.pixels_per_point()*eframe::root_frame_paint_scale());
+            self.placement_scale=ctx.pixels_per_point();
             self.placement_key=placement_key;
             self.app.displays=daozai::display_layout::connected();
             let display=daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id);
@@ -354,7 +357,7 @@ impl eframe::App for Shell {
             // 毛玻璃：在岛体左右两侧和画布底边（都在窗口区域之外）取样，估计岛背后的明暗。
             if self.app.settings.skin.is_glass() && !self.hidden {
                 let sampler=self.backdrop.get_or_insert_with(daozai::backdrop::Sampler::start);
-                let ppp=(ctx.pixels_per_point()*eframe::root_frame_paint_scale());
+                let ppp=ctx.pixels_per_point();
                 if let Some(origin)=self.native.as_ref().and_then(|w|w.logical_origin(ppp)) {
                     let points=self.app.backdrop_points();
                     sampler.set_points(points.iter().map(|&(x,y)|(((origin.x+x)*ppp).round() as i32,((origin.y+y)*ppp).round() as i32)).collect());
@@ -377,7 +380,10 @@ impl eframe::App for Shell {
             if !wechat_enabled {
                 self.wechat=None;
                 self.wechat_retry=None;
-                self.app.wechat_status.clear();
+                // 微信开关开着却被总开关挡住时说清原因，否则用户只会看到「开了也不提醒」。
+                if self.app.settings.wechat_notifications {
+                    self.app.wechat_status="未在监听 · 提醒总开关已关闭".into();
+                }else{self.app.wechat_status.clear();}
             }else if self.wechat.is_none() && self.wechat_retry.is_none_or(|at|at.elapsed()>=Duration::from_secs(10)){
                 match daozai::wechat::Listener::new(ctx.clone()){
                     Ok(listener)=>{
@@ -421,8 +427,8 @@ impl eframe::App for Shell {
                 else if started.elapsed()>=Duration::from_secs(4){
                     self.opening_messenger=None;
                     match daozai::wechat::foreground_client(&[unread.source]){
-                        Some((source,pid))=>self.app.viewed_client(source,pid),
-                        None=>self.app.say(format!("{}尚未切到前台，可点图标重试",unread.source.name())),
+                        Some((source,pid)) if unread.pid==0||unread.pid==pid=>self.app.viewed_client(source,pid),
+                        _=>self.app.say(format!("{}尚未切到前台，可点图标重试",unread.source.name())),
                     }
                 }
             }
@@ -482,7 +488,7 @@ impl eframe::App for Shell {
             // 保留主窗口的事件循环，避免全屏隐藏后设置窗口无法关闭或重新打开。
             let region=if self.hidden {(0.0,0.0,0.0,0.0)} else {r(out.region)};
             let hit=if self.hidden {(0.0,0.0,0.0,0.0)} else {r(out.hit)};
-            native.update(region, hit, if self.hidden{None}else{out.notice_hit.map(r)},if self.hidden{None}else{out.file_drop_zone.map(r)},if self.hidden{None}else{out.glass.as_deref()},(ctx.pixels_per_point()*eframe::root_frame_paint_scale()), out.editing, !self.hidden && out.expanded);
+            native.update(region, hit, if self.hidden{None}else{out.notice_hit.map(r)},if self.hidden{None}else{out.file_drop_zone.map(r)},if self.hidden{None}else{out.glass.as_deref()},ctx.pixels_per_point(), out.editing, !self.hidden && out.expanded);
         }
         for cmd in out.cmds {
             match cmd {
@@ -497,8 +503,8 @@ impl eframe::App for Shell {
                     #[cfg(windows)] match daozai::wechat::open_unread(unread){
                         Ok(())=>{
                             match daozai::wechat::foreground_client(&[unread.source]){
-                                Some((source,pid))=>self.app.viewed_client(source,pid),
-                                None=>{self.opening_messenger=Some((unread,Instant::now()));ctx.request_repaint_after(Duration::from_secs(4));}
+                                Some((source,pid)) if unread.pid==0||unread.pid==pid=>self.app.viewed_client(source,pid),
+                                _=>{self.opening_messenger=Some((unread,Instant::now()));ctx.request_repaint_after(Duration::from_secs(4));}
                             }
                         },
                         Err(_) if self.app.settings.wechat_tray_open && unread.source==app::Messenger::Wechat && self.tray_opening.is_none()=>{
@@ -578,6 +584,7 @@ impl eframe::App for Shell {
                     self.mail_sig=(enabled,self.app.settings.mail_interval,self.app.mail_accounts().to_vec());
                 },
                 Cmd::MailTest(account,password)=>self.mail.test(account,password),
+                Cmd::MailManage(request)=>self.mail.manage(request),
                 Cmd::CalendarTest(cfg,password)=>self.cal.test(cfg,password),
                 Cmd::CalendarSync=>self.cal.sync_now(),
                 Cmd::CalendarMonth(month)=>self.cal.view_month(month),
@@ -697,20 +704,75 @@ fn cursor_logical(_ppp: f32) -> Option<(f32, f32)> {
 fn open_path(p: &std::path::Path)->Result<(),String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
-    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::Shell::{ShellExecuteExW,SHOpenWithDialog,SHELLEXECUTEINFOW,OPENASINFO,SEE_MASK_FLAG_NO_UI,OAIF_EXEC};
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
     let mut wide: Vec<u16> = p.as_os_str().encode_wide().collect();
     wide.push(0);
-    let op: Vec<u16> = "open\0".encode_utf16().collect();
-    unsafe {
-        let result=ShellExecuteW(None, PCWSTR(op.as_ptr()), PCWSTR(wide.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
-        if result.0 as usize<=32 {return Err("无法打开，请检查文件位置和默认应用".into())}
+    let mut info=SHELLEXECUTEINFOW{cbSize:std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,fMask:SEE_MASK_FLAG_NO_UI,lpVerb:windows::core::w!("open"),lpFile:PCWSTR(wide.as_ptr()),nShow:SW_SHOWNORMAL.0,..Default::default()};
+    open_path_result(p,unsafe{ShellExecuteExW(&mut info)},||unsafe{
+        SHOpenWithDialog(None,&OPENASINFO{pcszFile:PCWSTR(wide.as_ptr()),oaifInFlags:OAIF_EXEC,..Default::default()})
+    })
+}
+
+#[cfg(windows)]
+fn open_path_result(p:&std::path::Path,result:windows::core::Result<()>,choose:impl FnOnce()->windows::core::Result<()>)->Result<(),String>{
+    use windows::Win32::Foundation::{ERROR_CANCELLED,ERROR_NO_ASSOCIATION};
+    let result=match result{
+        Err(error) if error.code()==windows::core::HRESULT::from_win32(ERROR_NO_ASSOCIATION.0)&&p.is_file()=>choose(),
+        other=>other,
+    };
+    match result{
+        Err(error) if error.code()==windows::core::HRESULT::from_win32(ERROR_CANCELLED.0)=>Ok(()),
+        other=>other.map_err(|_|"无法打开，请检查文件位置和默认应用".into()),
     }
-    Ok(())
 }
 
 #[cfg(not(windows))]
 fn open_path(_p: &std::path::Path)->Result<(),String> {Ok(())}
+
+#[cfg(all(test,windows))]
+mod open_path_tests {
+    use super::*;
+    use windows::Win32::Foundation::{ERROR_ACCESS_DENIED,ERROR_CANCELLED,ERROR_FILE_NOT_FOUND,ERROR_NO_ASSOCIATION};
+    fn error(code:windows::Win32::Foundation::WIN32_ERROR)->windows::core::Error{windows::core::Error::from_hresult(windows::core::HRESULT::from_win32(code.0))}
+
+    #[test]
+    fn unassociated_files_offer_open_with_and_cancellation_is_normal(){
+        let path=std::env::temp_dir().join(format!("岛仔 无关联-{}.daozai-open-test",std::process::id()));
+        std::fs::write(&path,b"fixture").unwrap();
+        for cancel in [false,true]{
+            let mut chosen=false;
+            let result=open_path_result(&path,Err(error(ERROR_NO_ASSOCIATION)),||{chosen=true;if cancel{Err(error(ERROR_CANCELLED))}else{Ok(())}});
+            std::fs::remove_file(&path).unwrap();
+            assert!(chosen,"文件没有默认关联时应提供系统打开方式");
+            assert_eq!(result,Ok(()),"用户取消选择不应显示打开失败");
+            if !cancel{std::fs::write(&path,b"fixture").unwrap();}
+        }
+    }
+
+    #[test]
+    fn default_apps_urls_and_other_errors_never_open_the_file_picker(){
+        let file=std::env::temp_dir().join(format!("daozai-open-errors-{}",std::process::id()));
+        std::fs::write(&file,b"fixture").unwrap();
+        for result in [Ok(()),Err(error(ERROR_ACCESS_DENIED)),Err(error(ERROR_FILE_NOT_FOUND))]{
+            let success=result.is_ok();
+            let actual=open_path_result(&file,result,||panic!("已有默认程序或其他打开错误不应弹出选择器"));
+            assert_eq!(actual.is_ok(),success);
+        }
+        assert!(open_path_result(&file,Err(error(ERROR_NO_ASSOCIATION)),||Err(error(ERROR_ACCESS_DENIED))).is_err(),"选择器失败应保留错误提示");
+        std::fs::remove_file(file).unwrap();
+        for (path,result,success) in [
+            ("https://example.com",Ok(()),true),
+            ("https://example.com",Err(error(ERROR_NO_ASSOCIATION)),false),
+            ("missing.daozai-open-test",Err(error(ERROR_NO_ASSOCIATION)),false),
+            ("missing.daozai-open-test",Err(error(ERROR_FILE_NOT_FOUND)),false),
+            ("blocked.daozai-open-test",Err(error(ERROR_ACCESS_DENIED)),false),
+        ]{
+            let actual=open_path_result(std::path::Path::new(path),result,||panic!("非文件关联问题不能弹出打开方式"));
+            assert_eq!(actual.is_ok(),success);
+        }
+    }
+}
 
 fn main() -> std::process::ExitCode {
     diagnostics::install();
@@ -732,6 +794,8 @@ fn run() -> eframe::Result<()> {
         }
         return Ok(());
     }
+    #[cfg(windows)]
+    std::thread::spawn(daozai::record_install_size);
     diagnostics::startup("初始化图形窗口");
     let viewport = egui::ViewportBuilder::default()
         .with_title("岛仔").with_icon(daozai::theme::app_icon())

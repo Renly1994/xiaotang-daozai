@@ -44,7 +44,7 @@ fn legacy<S:Read+Write>(session:&mut imap::Session<S>,uid:u32,account:&Account)-
     Ok(Some(make_item(parse_message(&raw),fetch,account)))
 }
 
-pub(super) fn item<S:Read+Write>(session:&mut imap::Session<S>,uid:u32,account:&Account)->Result<Option<Item>,()>{
+pub(crate) fn item<S:Read+Write>(session:&mut imap::Session<S>,uid:u32,account:&Account)->Result<Option<Item>,()>{
     let fetched=match session.uid_fetch(uid.to_string(),"(UID INTERNALDATE BODYSTRUCTURE BODY.PEEK[HEADER])"){
         Ok(fetched)=>fetched,Err(error) if rejected(&error)=>return legacy(session,uid,account),Err(_)=>return Err(()),
     };

@@ -112,16 +112,39 @@ fn enable_alpha_composition(hwnd:HWND)->windows::core::Result<()> {
 //
 // 兼容后端（无逐像素透明）按轮廓裁剪窗口区域；毛玻璃的实时模糊见 `composition.rs`。
 
+/// Windows「透明效果」开关；读不到时返回 None。
+fn system_transparency() -> Option<bool> {
+    use windows::{core::w, Win32::System::Registry::*};
+    let mut value = 1u32; let mut size = 4u32;
+    let ok = unsafe { RegGetValueW(HKEY_CURRENT_USER, w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"), w!("EnableTransparency"), RRF_RT_REG_DWORD, None, Some((&mut value as *mut u32).cast()), Some(&mut size)) }.is_ok();
+    ok.then_some(value != 0)
+}
+
+/// 是否使用合成引擎的实时模糊。系统「透明效果」关闭时宿主背景画刷只会画出一块纯色，
+/// 却仍要合成器为这扇窗口持续工作；部分核显旧驱动在这种状态下会整机闪屏卡死，因此直接不用，
+/// 由岛体自己画半透明底色。注册表每 2 秒最多读一次；状态变化时写一条诊断。
+fn compositor_blur_allowed() -> bool {
+    use std::cell::Cell;
+    thread_local! { static CACHE: Cell<(Option<std::time::Instant>, Option<bool>)> = const { Cell::new((None, None)) }; }
+    CACHE.with(|cache| {
+        let (at, last) = cache.get();
+        if let (Some(at), Some(last)) = (at, last) { if at.elapsed() < Duration::from_secs(2) { return last; } }
+        let allowed = system_transparency() != Some(false);
+        if last.is_some_and(|last| last != allowed) || last.is_none() && !allowed {
+            glass_diagnostic(if allowed { "系统透明效果已开启，恢复合成引擎模糊" } else { "系统透明效果关闭，不使用合成引擎模糊" });
+        }
+        cache.set((Some(std::time::Instant::now()), Some(allowed)));
+        allowed
+    })
+}
+
 /// 毛玻璃诊断：写到数据目录的 glass-diagnostics.txt（只记录状态变化，不会持续增长）。
 fn glass_diagnostic(message: &str) {
     use std::io::Write;
     let path = crate::model::config_dir().join("glass-diagnostics.txt");
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > 64 * 1024) { let _ = std::fs::write(&path, b""); }
     let transparency = {
-        use windows::{core::w, Win32::System::Registry::*};
-        let mut value = 1u32; let mut size = 4u32;
-        let ok = unsafe { RegGetValueW(HKEY_CURRENT_USER, w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"), w!("EnableTransparency"), RRF_RT_REG_DWORD, None, Some((&mut value as *mut u32).cast()), Some(&mut size)) }.is_ok();
-        if ok { if value != 0 { "开" } else { "关" } } else { "未知" }
+        match system_transparency() { Some(true) => "开", Some(false) => "关", None => "未知" }
     };
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(file, "{} · {} · 系统透明效果：{}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), message, transparency);
@@ -295,6 +318,16 @@ unsafe fn apply_style(hwnd: HWND, editing: bool, raise: bool) {
     }
 }
 
+fn surface_needs_outline_clip(backend:Option<eframe::wgpu::Backend>,vendor:&str,renderer:&str)->bool {
+    use eframe::wgpu::Backend;
+    if matches!(backend,Some(Backend::Dx12|Backend::Vulkan)){return true;}
+    if renderer.to_ascii_lowercase().contains("radeon"){return true;}
+    [vendor,renderer].into_iter().any(|name|{
+        let name=name.to_ascii_lowercase();
+        name.contains("advanced micro devices") || name.split(|c:char|!c.is_ascii_alphanumeric()).any(|word|matches!(word,"amd"|"ati"))
+    })
+}
+
 pub struct Window {
     hwnd: HWND,
     region: (i32, i32, i32, i32),
@@ -332,7 +365,13 @@ impl Window {
         };
         // 区域用哨兵值：首帧（包括启动即隐藏的空区域）也必须真正调用 SetWindowRgn，
         // 否则整块透明画布会挡住下层程序的点击。
-        let opaque_surface=cc.wgpu_render_state.as_ref().is_some_and(|state|state.adapter.get_info().backend==eframe::wgpu::Backend::Dx12);
+        let backend=cc.wgpu_render_state.as_ref().map(|state|state.adapter.get_info().backend);
+        let (vendor,renderer)=cc.gl.as_ref().map(|gl|{
+            use eframe::glow::HasContext;
+            unsafe{(gl.get_parameter_string(eframe::glow::VENDOR),gl.get_parameter_string(eframe::glow::RENDERER))}
+        }).unwrap_or_default();
+        let opaque_surface=surface_needs_outline_clip(backend,&vendor,&renderer);
+        if opaque_surface{glass_diagnostic("渲染兼容：已启用岛体轮廓裁剪，避免透明画布出现黑块");}
         watch_drag(hwnd,cc.egui_ctx.clone());
         Some(Self { hwnd, region: (i32::MIN, 0, 0, 0), expanded: false, hook, browser_state:(None,PollClock::default()), drag_capture:DragCapture::default(), glass:None, backdrop:None, blur:false, blur_unavailable:false, opaque_surface })
     }
@@ -410,7 +449,7 @@ impl Window {
         *hit().lock().unwrap_or_else(|e| e.into_inner()) = hits;
         // 毛玻璃：合成引擎的模糊块贴合岛体轮廓，窗口区域仍用矩形（含阴影与拖放感应区）。
         let _ = capture;
-        match glass.filter(|g|!g.is_empty() && !self.blur_unavailable && !self.opaque_surface) {
+        match glass.filter(|g|!g.is_empty() && !self.blur_unavailable && !self.opaque_surface && compositor_blur_allowed()) {
             Some(shapes) => {
                 if self.backdrop.is_none() {
                     match crate::composition::Backdrop::new() {
@@ -441,7 +480,7 @@ impl Window {
                 self.blur = false;
             }
         }
-        // DX12 的普通窗口表面没有 alpha 合成，只有它需要按轮廓裁剪窗口区域。
+        // 不可靠的透明合成路径按真实轮廓裁剪，避免圆角外侧和透明画布留下黑底。
         match glass.filter(|_|self.opaque_surface) {
             Some(shapes) => {
                 let key=glass_key(shapes,ppp);
@@ -491,30 +530,49 @@ impl Drop for Window {
 #[cfg(test)]
 mod tests {
     use super::*;
+    static NATIVE_STATE_LOCK:Mutex<()>=Mutex::new(());
 
     #[test]
     fn opaque_surface_clips_black_background_even_without_system_blur(){
+        let _guard=NATIVE_STATE_LOCK.lock().unwrap_or_else(|e|e.into_inner());
         use windows::Win32::Graphics::Gdi::{GetWindowRgn,PtInRegion};
-        unsafe {
-            let hwnd=CreateWindowExW(WS_EX_TOOLWINDOW,windows::core::w!("STATIC"),windows::core::w!(""),WS_POPUP,-10000,-10000,400,200,None,None,None,None).unwrap();
+        for (backend,vendor,renderer) in [
+            (Some(eframe::wgpu::Backend::Dx12),"",""),
+            (Some(eframe::wgpu::Backend::Vulkan),"",""),
+            (None,"ATI Technologies Inc.","AMD Radeon RX 6750 GRE 12GB"),
+            (None,"Advanced Micro Devices, Inc.","Radeon RX 7900 XT"),
+        ] {for blur_unavailable in [true,false] {for ppp in [1.0,1.25,1.5,2.0] {unsafe {
+            let px=|v:f32|(v*ppp).round() as i32;
+            let hwnd=CreateWindowExW(WS_EX_TOOLWINDOW,windows::core::w!("STATIC"),windows::core::w!(""),WS_POPUP,-10000,-10000,px(400.0),px(200.0),None,None,None,None).unwrap();
             let saved=hit().lock().unwrap_or_else(|e|e.into_inner()).clone();
             {
-                let mut native=Window{hwnd,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default(),glass:None,backdrop:None,blur:false,blur_unavailable:true,opaque_surface:true};
+                let mut native=Window{hwnd,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default(),glass:None,backdrop:None,blur:false,blur_unavailable,opaque_surface:surface_needs_outline_clip(backend,vendor,renderer)};
                 let shapes=[crate::app::GlassShape::Round(eframe::egui::Rect::from_min_max(eframe::egui::pos2(80.0,60.0),eframe::egui::pos2(320.0,160.0)),25.0)];
-                native.update((0.0,0.0,400.0,200.0),(80.0,60.0,240.0,100.0),None,None,Some(&shapes),1.0,false,false);
+                native.update((0.0,0.0,400.0,200.0),(80.0,60.0,240.0,100.0),None,None,Some(&shapes),ppp,false,false);
                 let region=CreateRectRgn(0,0,0,0);
                 GetWindowRgn(hwnd,region);
-                assert!(PtInRegion(region,200,100).as_bool());
-                assert!(!PtInRegion(region,10,10).as_bool(),"兼容后端不能保留画布上的黑色背景");
-                assert!(!PtInRegion(region,81,61).as_bool(),"圆角外侧必须透出桌面");
+                assert!(PtInRegion(region,px(200.0),px(100.0)).as_bool());
+                assert!(!PtInRegion(region,px(10.0),px(10.0)).as_bool(),"兼容后端不能保留画布上的黑色背景：{backend:?} / {vendor} / {renderer}");
+                assert!(!PtInRegion(region,px(81.0),px(61.0)).as_bool(),"圆角外侧必须透出桌面");
                 assert!(!native.blur);
-                native.update((0.0,0.0,0.0,0.0),(0.0,0.0,0.0,0.0),None,None,None,1.0,false,false);
+                assert!(native.backdrop.is_none(),"轮廓兼容模式不能再启用独立模糊底板");
+                native.update((0.0,0.0,0.0,0.0),(0.0,0.0,0.0,0.0),None,None,None,ppp,false,false);
                 GetWindowRgn(hwnd,region);
-                assert!(!PtInRegion(region,200,100).as_bool(),"隐藏时不能留下上一帧轮廓");
+                assert!(!PtInRegion(region,px(200.0),px(100.0)).as_bool(),"隐藏时不能留下上一帧轮廓");
                 let _=DeleteObject(region);
             }
             *hit().lock().unwrap_or_else(|e|e.into_inner())=saved;
             let _=DestroyWindow(hwnd);
+        }}}}
+    }
+
+    #[test]
+    fn outline_clip_preserves_other_opengl_drivers_and_recognizes_amd_variants(){
+        for (vendor,renderer) in [("NVIDIA Corporation","NVIDIA GeForce RTX 4060"),("Intel","Intel(R) UHD Graphics"),("Mesa","llvmpipe (LLVM 20.1.1, 256 bits)"),("Microsoft Corporation","GDI Generic")]{
+            assert!(!surface_needs_outline_clip(None,vendor,renderer),"正常驱动不能被错误识别为 AMD：{vendor}");
+        }
+        for (vendor,renderer) in [("AMD","Radeon RX 6750 GRE"),("ati technologies inc.","Radeon"),("Mesa","AMD Radeon RX 6800 (radeonsi)"),("Mesa","Radeon RX 6750 GRE (radeonsi)")]{
+            assert!(surface_needs_outline_clip(None,vendor,renderer),"需要识别 AMD 厂商与渲染器：{vendor} / {renderer}");
         }
     }
 
@@ -571,6 +629,7 @@ mod tests {
 
     #[test]
     fn expanding_raises_the_island_without_activating_it(){
+        let _guard=NATIVE_STATE_LOCK.lock().unwrap_or_else(|e|e.into_inner());
         struct TestWindow(HWND);
         impl Drop for TestWindow {fn drop(&mut self){unsafe{let _=DestroyWindow(self.0);}}}
         unsafe fn above(first:HWND,second:HWND)->bool {
@@ -625,6 +684,7 @@ mod tests {
 
     #[test]
     fn file_capture_below_the_island_still_returns_click_through(){
+        let _guard=NATIVE_STATE_LOCK.lock().unwrap_or_else(|e|e.into_inner());
         unsafe {
             let saved=std::mem::replace(&mut *hit().lock().unwrap_or_else(|e|e.into_inner()),vec![(230,0,410,42)]);
             let hwnd=CreateWindowExW(WS_EX_NOACTIVATE,windows::core::w!("STATIC"),windows::core::w!(""),WS_POPUP,0,0,640,270,None,None,None,None).unwrap();
@@ -641,6 +701,7 @@ mod tests {
 
     #[test]
     fn right_notice_keeps_empty_space_below_the_main_bar_click_through(){
+        let _guard=NATIVE_STATE_LOCK.lock().unwrap_or_else(|e|e.into_inner());
         let saved=std::mem::replace(&mut *hit().lock().unwrap_or_else(|e|e.into_inner()),vec![(100,0,400,30),(372,0,760,96)]);
         assert!(inside_hit(600,70));assert!(inside_hit(200,15));assert!(!inside_hit(200,70));
         *hit().lock().unwrap_or_else(|e|e.into_inner())=saved;

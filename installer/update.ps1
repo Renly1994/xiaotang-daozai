@@ -52,6 +52,10 @@ try {
     $registered = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
     if ($registered -and [string]::Equals($registered.InstallLocation.TrimEnd('\'), $targetDir, [StringComparison]::OrdinalIgnoreCase)) {
         Set-ItemProperty -LiteralPath $key -Name DisplayVersion -Value $version -ErrorAction SilentlyContinue
+        # 只统计岛仔自己的文件，软件管家不会把共享安装文件夹的大小算到岛仔头上。
+        $own = @('daozai.exe','Uninstall.exe','LICENSE','THIRD_PARTY_NOTICES.txt') | ForEach-Object { Join-Path $targetDir $_ } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+        $sizeKb = [int][Math]::Ceiling((($own | ForEach-Object { (Get-Item -LiteralPath $_).Length }) | Measure-Object -Sum).Sum / 1KB)
+        if ($sizeKb -gt 0) { Set-ItemProperty -LiteralPath $key -Name EstimatedSize -Value $sizeKb -Type DWord -ErrorAction SilentlyContinue }
     }
     # 只清理已经确认位于专用缓存内的本次更新目录。
     if ($workRoot.StartsWith($cacheRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
