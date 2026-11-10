@@ -586,6 +586,10 @@ impl eframe::App for Shell {
                 Cmd::MailTest(account,password)=>self.mail.test(account,password),
                 Cmd::MailManage(request)=>self.mail.manage(request),
                 Cmd::CalendarTest(cfg,password)=>self.cal.test(cfg,password),
+                Cmd::CalendarDiscover(cfg,password)=>self.cal.discover(cfg,password),
+                Cmd::CalendarInitialize(cfg,events,todos,password,generation)=>self.cal.initialize(cfg,events,todos,password,generation),
+                Cmd::CalendarTwoWay(account_id,enabled)=>{if let Err(error)=self.cal.set_two_way(account_id,enabled){self.app.say(error);}},
+                Cmd::CalendarConflict(id,local)=>self.cal.resolve_conflict(id,local),
                 Cmd::CalendarSync=>self.cal.sync_now(),
                 Cmd::CalendarMonth(month)=>self.cal.view_month(month),
                 Cmd::CalendarForget=>{

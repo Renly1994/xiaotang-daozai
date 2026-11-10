@@ -682,12 +682,14 @@ mod tests {
     }
 }
 
-pub(crate) struct TaskDraft {index:usize,original:String,text:String,due:String,error:String,focused:bool,reminder_only:bool,pub(crate) repeat:u8,pub(crate) picker:crate::task_picker::ReminderPicker}
+pub(crate) struct TaskDraft {id:String,original:String,text:String,due:String,error:String,focused:bool,reminder_only:bool,pub(crate) repeat:u8,pub(crate) picker:crate::task_picker::ReminderPicker}
 impl App {
     pub(crate) fn open_task_dialog(&mut self,index:usize){
         self.todo_choosing=false;
+        if self.calendar.caldav.initializing {self.say("正在初始化 CalDAV，请稍后编辑");return;}
+        if let Some(id)=self.todos.items.get(index).and_then(|task|task.resource_id.clone()) {self.open_caldav_editor(Some(&id),true);return;}
         if let Some(task)=self.todos.items.get(index){
-            let draft=TaskDraft{index,original:task.text.clone(),text:task.text.clone(),due:task.due.clone().unwrap_or_default(),error:String::new(),focused:false,reminder_only:false,repeat:task.repeat,picker:crate::task_picker::ReminderPicker::new(task.due.as_deref())};
+            let draft=TaskDraft{id:task.id.clone(),original:task.text.clone(),text:task.text.clone(),due:task.due.clone().unwrap_or_default(),error:String::new(),focused:false,reminder_only:false,repeat:task.repeat,picker:crate::task_picker::ReminderPicker::new(task.due.as_deref())};
             self.show_page(4);self.task_dialog=Some(draft);
         }
     }
@@ -722,7 +724,7 @@ impl App {
             c.text(43.0,117.0,&c.fit(hint,10.5,W::Regular,if reminder_only{140.0}else{154.0}),10.5,if d.error.is_empty(){W::Regular}else{W::Semibold},if d.error.is_empty(){theme::GRAY}else{theme::RED},H::Left);
         }
         if reminder_only {
-            let has_reminder=self.task_dialog.as_ref().and_then(|d|self.todos.items.get(d.index)).is_some_and(|task|task.due.is_some());
+            let has_reminder=self.task_dialog.as_ref().and_then(|d|self.todos.items.iter().find(|task|task.id==d.id)).is_some_and(|task|task.due.is_some());
             let skip=if has_reminder{"取消提醒"}else if repeat!=0{"只设重复"}else{"暂不提醒"};
             if setting_button(c,188.0,104.0,88.0,skip,false,"task-reminder-skip"){
                 if let Some(d)=self.task_dialog.as_mut(){d.due.clear();}
@@ -758,7 +760,7 @@ impl App {
     fn draw_task_reminder(&mut self,c:&Card){
         use crate::task_picker::PickerAction;
         let Some(d)=self.task_dialog.as_mut().filter(|d|d.picker.open) else{return};
-        let has_reminder=self.todos.items.get(d.index).is_some_and(|task|task.due.is_some());
+        let has_reminder=self.todos.items.iter().find(|task|task.id==d.id).is_some_and(|task|task.due.is_some());
         c.text(15.0,25.0,"待办",size::TITLE,W::Bold,theme::WHITE,H::Left);
         c.text(44.0,25.0,"清单",size::TITLE,W::Bold,theme::GREEN,H::Left);
         let (done,total)=self.todos.progress(&self.today);
@@ -782,12 +784,13 @@ impl App {
         let due=if d.due.trim().is_empty(){Some(None)}else{parse_due(&d.due,&self.today).map(Some)};
         if d.text.trim().is_empty(){d.error="请填写任务内容".into();}
         else if due.is_none(){d.error="时间格式应为 18:30 或完整日期时间".into();}
-        else if self.todos.items.get(d.index).is_none_or(|t|t.text!=d.original){d.error="任务已变化，请取消后重新打开".into();}
+        else if self.todos.items.iter().find(|task|task.id==d.id).is_none_or(|t|t.text!=d.original){d.error="任务已变化，请取消后重新打开".into();}
         else{
-            let item=&mut self.todos.items[d.index];
+            let item=self.todos.items.iter_mut().find(|task|task.id==d.id).expect("已检查稳定 ID");
             if item.repeat!=d.repeat{item.done_on=None;}
             item.text=d.text.trim().into();item.due=due.unwrap();item.reminded=false;item.reminded_on=None;item.repeat=d.repeat;
-            self.todos.save();self.say("待办已保存");return;
+            if self.save_todos_ui(){self.say("待办已保存");return;}
+            d.error="保存失败，请检查提示后重试".into();
         }
         self.task_dialog=Some(d);
     }
@@ -1078,6 +1081,7 @@ impl App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
             if ctx.input(|i|i.viewport().close_requested()){self.settings_open=false;}
+            self.draw_caldav_editor(ctx);
             let before=format!("{:?}",self.settings);
             egui::SidePanel::left("settings-sidebar").resizable(false).exact_width(180.0).frame(egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(29,29,32),Color32::from_rgb(237,239,243))).stroke(egui::Stroke::new(1.0,settings_color(ctx,Color32::from_rgb(42,42,45),Color32::from_rgb(216,219,225)))).inner_margin(egui::Margin::symmetric(10,12))).show(ctx,|ui|{
                 ui.add_space(5.0);
@@ -1674,7 +1678,7 @@ impl App {
                                 else if user.is_empty(){self.calendar.note="请先填用户名".into();self.calendar.note_error=true;}
                                 else if self.calendar.form.password.is_empty(){self.calendar.note="请先填密码".into();self.calendar.note_error=true;}
                                 else{
-                                    let cfg=crate::calendar::Config{provider:self.calendar.form.provider,username:user,href:None,server:if custom{server}else{None}};
+                                    let cfg=crate::calendar::Config{provider:self.calendar.form.provider,username:user,href:None,server:if custom{server}else{None},..Default::default()};
                                     self.calendar.testing=true;
                                     self.calendar.test_password=self.calendar.form.password.clone();
                                     self.calendar.note="正在连接日历…".into();
@@ -1690,6 +1694,7 @@ impl App {
                                 ui.add(egui::Label::new(egui::RichText::new(&self.calendar.note).size(12.0).color(color)).wrap());
                             }
                         });
+                        self.draw_caldav_settings(ui);
                         settings_label(ui,"导入日历文件");
                         settings_card(ui,|ui|{
                             ui.add(egui::Label::new(egui::RichText::new("把 .ics 文件里的日程导入到本机日程，例如苹果「日历」App 里「文件 → 导出」得到的文件。重复日程会按未来一年展开；再次导入同一文件不会重复添加。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75)))).wrap());

@@ -4,6 +4,15 @@ use eframe::egui::{self,Color32};
 
 impl App {
     pub(crate) fn open_calendar_editor(&mut self,uid:Option<&str>){
+        if self.calendar.caldav.initializing {self.say("正在初始化 CalDAV，请稍后编辑");return;}
+        if self.calendar.caldav.bound {
+            let resource_id=if let Some(uid)=uid {
+                let ids=self.calendar.local.iter().filter(|entry|entry.event.uid==uid).filter_map(|entry|entry.resource_id.clone()).collect::<std::collections::BTreeSet<_>>();
+                if ids.len()!=1 {self.say("日程资源已变化或 UID 对应多个资源，请从日历列表重新打开");return;}
+                ids.into_iter().next()
+            }else{None};
+            self.open_caldav_editor(resource_id.as_deref(),false);return;
+        }
         let draft=uid.and_then(|uid|self.calendar.local.iter().find(|entry|entry.event.uid==uid)).map(Draft::edit)
             .unwrap_or_else(||Draft::new(self.calendar.view.day));
         self.show_page(CALENDAR_PAGE);self.calendar.draft=Some(draft);
@@ -27,6 +36,16 @@ impl App {
     }
     /// 导入 .ics 文件到本机日程：过去 30 天到未来一年，重复日程展开；同一日程再次导入会跳过。
     pub fn import_ics(&mut self,files:&[(String,String)])->String{
+        if self.calendar.caldav.initializing {return "正在初始化 CalDAV，请稍后导入".into();}
+        if self.calendar.caldav.bound {
+            let result=crate::organizer::transaction(|state|crate::calendar::caldav::projection::import_resources(state,files));
+            let note=match result {Ok((added,skipped))=>{
+                if let Err(error)=self.reload_organizer(){return error;}
+                self.pending.push(Cmd::CalendarSync);
+                format!("已导入 {added} 个完整 CalDAV 资源，{skipped} 个 UID 已存在已跳过")
+            },Err(error)=>error};
+            self.calendar.import_note=note.clone();return note;
+        }
         if !self.calendar.local_error.is_empty(){return self.calendar.local_error.clone();}
         let now=chrono::Utc::now();
         let (lo,hi)=(now-chrono::Duration::days(30),now+chrono::Duration::days(366));
@@ -42,7 +61,7 @@ impl App {
                     let end=event.end.filter(|end|*end>event.start).unwrap_or(event.start+if event.all_day{86400}else{3600});
                     event.end=Some(end);
                     let reminder=(!event.all_day).then_some(15);
-                    entries.push(local_calendar::Entry{event,reminder});added+=1;
+                    entries.push(local_calendar::Entry{event,reminder,resource_id:None,sync_reminders:vec![]});added+=1;
                 },
                 Err(error)=>errors.push(format!("{name}：{error}")),
             }

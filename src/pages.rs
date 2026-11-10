@@ -768,7 +768,11 @@ impl App {
                     }
                 }
                 // 每周重复：文字右侧小标签（周一三五 / 工作日 / 每天）。
-                let tag = crate::model::repeat_tag(item.repeat);
+                let tag = match item.sync_status.as_deref() {
+                    Some("IN-PROCESS")=>"进行中".into(),Some("CANCELLED")=>"已取消".into(),
+                    Some("NEEDS-ACTION"|"COMPLETED")=>"CalDAV".into(),Some(status)=>format!("状态:{status}"),
+                    None=>crate::model::repeat_tag(item.repeat),
+                };
                 let tag_w = if tag.is_empty() { 0.0 } else { c.text_w(&tag, size::TINY, W::Regular) + 6.0 };
                 let text = c.fit(&item.text, size::BODY, W::Regular, 104.0 - tag_w);
                 let repeat_hint = if item.is_repeating() { format!("\n{}{}", crate::model::repeat_label(item.repeat), if today_item { "" } else { " · 今天不用做" }) } else { String::new() };
@@ -783,7 +787,7 @@ impl App {
                 }
                 if self.todo_choosing{
                     c.text(366.0,y+3.8,"修改",size::TINY,W::Regular,theme::BLUE,H::Right);
-                    if r.clicked(){self.todo_choosing=false;self.editing=Some(i);self.adding=false;self.buf=item.text.clone();self.todo_input_focused=false;break;}
+                    if r.clicked(){self.todo_choosing=false;self.editing=Some(i);self.editing_id=Some(item.id.clone());self.adding=false;self.buf=item.text.clone();self.todo_input_focused=false;break;}
                     row+=1;shown+=1;continue;
                 }
                 let delete=c.hit(353.0,y-9.0,17.0,18.0,("todo-delete",i)).on_hover_text("删除待办").clicked();
@@ -797,20 +801,20 @@ impl App {
                 let mut edit_this=false;
                 r.context_menu(|ui|{
                     if ui.button("编辑与提醒…").clicked(){edit_this=true;ui.close_menu();}
-                    if ui.button("取消提醒").clicked(){self.todos.items[i].due=None;self.todos.save();ui.close_menu();}
+                    if ui.button("取消提醒").clicked(){self.todos.items[i].due=None;self.save_todos_ui();ui.close_menu();}
                 });
                 if edit_this {self.open_task_dialog(i);}
                 if delete {
                     self.todos.items.remove(i);
                     if let Some(index)=self.editing.as_mut(){if i<*index{*index-=1;}}
-                    self.todos.save();self.todo_first=self.todo_first.min(self.todos.items.len().saturating_sub(3));break;
+                    self.save_todos_ui();self.todo_first=self.todo_first.min(self.todos.items.len().saturating_sub(3));break;
                 }
                 if r.clicked() && !edit_this && !reminder_clicked && !today_item {
                     self.say(format!("{}的待办，今天不用做", crate::model::repeat_label(item.repeat)));
                 } else if r.clicked() && !r.double_clicked() && !edit_this && !reminder_clicked {
                     let now = self.todos.items[i].done_for(&env.today);
                     self.todos.items[i].toggle(&env.today);
-                    self.todos.save();
+                    self.save_todos_ui();
                     if !now {
                         self.todo_pop.vel += 5.0;
                         self.pet.react(crate::extras::PetState::Happy);
@@ -839,6 +843,7 @@ impl App {
             if count==1 {
                 let i=order[0];
                 self.editing = Some(i);
+                self.editing_id = Some(self.todos.items[i].id.clone());
                 self.adding = false;
                 self.buf = self.todos.items[i].text.clone();
                 self.todo_input_focused=false;

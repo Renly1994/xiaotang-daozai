@@ -69,7 +69,12 @@ pub(crate) fn marker_colors(sources:&[Source<'_>])->Vec<Color32> {
     colors
 }
 
-pub(crate) struct Entry<'a> {pub event:&'a mail::Meeting,pub sources:Vec<Source<'a>>}
+pub(crate) struct Entry<'a> {pub event:&'a mail::Meeting,pub sources:Vec<Source<'a>>,pub resource_id:Option<&'a str>}
+impl Entry<'_> {
+    fn identity(&self)->String {
+        self.resource_id.map(|id|format!("resource:{id}:{}",entry_key(self.event))).unwrap_or_else(||entry_key(self.event))
+    }
+}
 fn entry_key(event:&mail::Meeting)->String {
     if event.uid.is_empty(){format!("{}|{}",event.start,event.title.trim())}else{calendar::dedupe_key(event)}
 }
@@ -85,7 +90,7 @@ fn calendar_now(env:&Env)->i64{
 
 fn featured_index(events:&[Entry<'_>],focus:Option<&str>,now:i64)->Option<usize> {
     let eligible=|event:&mail::Meeting|!event.all_day && !has_ended(event,now);
-    events.iter().position(|entry|eligible(entry.event) && focus==Some(entry_key(entry.event).as_str()))
+    events.iter().position(|entry|eligible(entry.event) && focus==Some(entry.identity().as_str()))
         .or_else(||events.iter().enumerate().filter(|(_,entry)|eligible(entry.event)).min_by_key(|(_,entry)|(entry.event.start>now,entry.event.start)).map(|(i,_)|i))
 }
 
@@ -147,7 +152,7 @@ mod tests {
     fn featured_calendar_excludes_ended_and_all_day_events() {
         let make=|uid:&str,start,end,all_day|mail::Meeting{uid:uid.into(),title:uid.into(),start,end:Some(end),all_day,at:String::new()};
         let events=[make("全天",0,86400,true),make("已结束",10,20,false),make("下一场",200,300,false),make("进行中",80,150,false)];
-        let entries:Vec<_>=events.iter().map(|event|Entry{event,sources:vec![Source::Local]}).collect();
+        let entries:Vec<_>=events.iter().map(|event|Entry{event,sources:vec![Source::Local],resource_id:None}).collect();
         assert_eq!(featured_index(&entries,None,100),Some(3));
         assert_eq!(featured_index(&entries,None,160),Some(2));
         assert_eq!(featured_index(&entries,Some(entry_key(&events[0]).as_str()),160),Some(2));
@@ -249,17 +254,18 @@ impl App {
     }
 
     pub(crate) fn calendar_entries(&self, day:NaiveDate)->Vec<Entry<'_>> {
-        let work=self.calendar_work_events(Some(calendar::month_start(day))).into_iter().map(|(event,provider)|(event,Source::Calendar(provider)));
-        let mail=self.mail.recent.iter().filter_map(|item|item.meeting.as_ref().filter(|event|!self.mail_event_ignored(event)).map(|event|(event,Source::Mail(item.account.as_str()))));
+        let work=self.calendar_work_events(Some(calendar::month_start(day))).into_iter().map(|(event,provider)|(event,Source::Calendar(provider),None));
+        let mail=self.mail.recent.iter().filter_map(|item|item.meeting.as_ref().filter(|event|!self.mail_event_ignored(event)).map(|event|(event,Source::Mail(item.account.as_str()),None)));
         let mut events:Vec<Entry<'_>>=vec![];
         let mut seen=std::collections::HashMap::<String,usize>::new();
-        let local=self.calendar.local.iter().map(|entry|(&entry.event,Source::Local));
-        for (event,source) in work.chain(mail).chain(local).filter(|(event,_)|occurs_on(event,day)) {
-            let key=entry_key(event);
+        let local=self.calendar.local.iter().map(|entry|(&entry.event,if entry.resource_id.is_some(){Source::Calendar(Some(calendar::Provider::Custom))}else{Source::Local},entry.resource_id.as_deref()));
+        for (event,source,resource_id) in work.chain(mail).chain(local).filter(|(event,_,_)|occurs_on(event,day)) {
+            let candidate=Entry{event,sources:vec![source],resource_id};
+            let key=candidate.identity();
             if let Some(&index)=seen.get(&key) {
                 let entry=&mut events[index];
                 if !entry.sources.contains(&source){entry.sources.push(source);}
-            }else{seen.insert(key,events.len());events.push(Entry{event,sources:vec![source]});}
+            }else{seen.insert(key,events.len());events.push(candidate);}
         }
         events.sort_by(|a,b|(!a.event.all_day,a.event.start,&a.event.title,&a.event.uid).cmp(&(!b.event.all_day,b.event.start,&b.event.title,&b.event.uid)));
         events
@@ -297,7 +303,7 @@ impl App {
         let mail=self.mail.recent.iter().filter_map(|item|item.meeting.as_ref().filter(|event|!self.mail_event_ignored(event)).map(|event|(event,Source::Mail(item.account.as_str()))));
         let grid=calendar::month_grid(self.calendar.view.month);
         let mut dots:std::collections::HashMap<NaiveDate,Vec<Source<'_>>>=std::collections::HashMap::new();
-        let local=self.calendar.local.iter().map(|entry|(&entry.event,Source::Local));
+        let local=self.calendar.local.iter().map(|entry|(&entry.event,if entry.resource_id.is_some(){Source::Calendar(Some(calendar::Provider::Custom))}else{Source::Local}));
         for (event,source) in work.chain(mail).chain(local) {
             let Some((start,last))=event_days(event) else{continue;};
             if last<grid[0] || start>grid[41]{continue;}
@@ -361,8 +367,8 @@ impl App {
         for (i,(entry,featured)) in featured.chain(remaining).enumerate() {
             let event=entry.event;
             let (y,height,cy,size,mut x,icon_size)=if featured{(52.0,68.0,93.0,14.0,168.0,16.0)}else{let y=130.0+(i-usize::from(featured_index.is_some())) as f32*18.8;(y,18.8,y+8.0,10.2,204.0,13.0)};
-            let selected=focus.as_deref()==Some(entry_key(event).as_str());
-            let hit=c.hit(164.0,y,214.0,height,("calendar-event",entry_key(event)));
+            let selected=focus.as_deref()==Some(entry.identity().as_str());
+            let hit=c.hit(164.0,y,214.0,height,("calendar-event",entry.identity()));
             if selected || hit.hovered(){c.fill(164.0,y,214.0,height,5.0,Color32::from_gray(if selected{29}else{20}));}
             let time=if event.all_day{"全天".to_string()}else if event_day(event)!=Some(day){"跨天".to_string()}else{chrono::DateTime::from_timestamp(event.start,0).unwrap().with_timezone(&chrono::Local).format("%H:%M").to_string()};
             if featured {
@@ -388,25 +394,27 @@ impl App {
                 x+=icon_size+if featured{5.0}else{2.0};
             }
             let can_ignore=entry.sources.iter().any(|source|matches!(source,Source::Mail(_)));
-            let is_local=entry.sources.contains(&Source::Local);
+            let is_local=entry.sources.contains(&Source::Local) || entry.resource_id.is_some();
             let title_right=if can_ignore || is_local{352.0}else{371.0};
             c.centered_text(x+2.0,cy,&c.fit(&event.title,size,W::Semibold,title_right-x-2.0),size,W::Semibold,if has_ended(event,now){muted}else{theme::WHITE},H::Left);
             if is_local {
                 c.centered_text(365.0,cy,"编辑",7.5,W::Regular,accent,H::Center);
-                if c.hit(354.0,cy-8.0,23.0,16.0,("calendar-edit-local",event.uid.as_str())).clicked(){edit_local=Some(event.uid.clone());}
+                if c.hit(354.0,cy-8.0,23.0,16.0,("calendar-edit-local",entry.identity())).clicked(){edit_local=Some((event.uid.clone(),entry.resource_id.map(str::to_owned)));}
             }
             if can_ignore {
                 let button=c.hit(357.0,cy-8.0,18.0,16.0,("calendar-ignore-mail",entry_key(event))).on_hover_text("忽略此邮件日程；可在邮件详情恢复");
                 paint::close(c,366.0,cy,3.0,if button.hovered(){theme::WHITE}else{muted});
                 if button.clicked(){ignored=Some(event.clone());}
             }
-            if hit.on_hover_text(format!("{}\n{}\n{}",event.title,event.at,sources)).clicked(){clicked=Some(entry_key(event));}
+            if hit.on_hover_text(format!("{}\n{}\n{}",event.title,event.at,sources)).clicked(){clicked=Some(entry.identity());}
         }
         if remaining_count>4 {c.text(376.0,208.0,&format!("列表 {}–{} / {}",first+1,(first+4).min(remaining_count),remaining_count),7.0,W::Regular,muted,H::Right);}
         self.calendar.view.first=first;
         if toggle_ended{self.calendar.view.show_ended=!show_ended;self.calendar.view.first=0;}
         if let Some(key)=clicked{self.calendar.view.focus=Some(key);}
-        if let Some(uid)=edit_local{self.open_calendar_editor(Some(&uid));}
+        if let Some((uid,resource_id))=edit_local{
+            if let Some(id)=resource_id{self.open_caldav_editor(Some(&id),false);}else{self.open_calendar_editor(Some(&uid));}
+        }
         if add_local{self.open_calendar_editor(None);}
         if let Some(event)=ignored{self.toggle_mail_event(&event);}
         if connect {self.settings_tab=8;self.open_settings();}

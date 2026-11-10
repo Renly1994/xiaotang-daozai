@@ -253,7 +253,7 @@ fn calendar_hides_ended_events_and_keeps_all_day_out_of_featured_card() {
 #[test]
 fn local_calendar_failed_save_keeps_draft_and_does_not_change_events() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    std::fs::create_dir_all(crate::model::config_dir().join("local-calendar.json")).unwrap();
+    std::fs::write(crate::model::config_dir().join("organizer/CURRENT"), b"injected-invalid-pointer").unwrap();
     h.app.open_calendar_editor(None);h.app.calendar.draft.as_mut().unwrap().title="不能丢失的草稿".into();
     h.app.save_calendar_editor();
     assert!(h.app.calendar.local.is_empty());let draft=h.app.calendar.draft.as_ref().unwrap();
@@ -303,8 +303,10 @@ fn ics_import_preserves_recurring_overnight_and_all_day_events_on_reimport() {
 #[test]
 fn local_calendar_editor_makes_storage_scope_visible_with_connected_accounts() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    let cfg=crate::calendar::Config{provider:crate::calendar::Provider::Feishu,username:"test".into(),href:None,server:None};
-    crate::calendar::save_config(&cfg).unwrap();h.app.calendar=crate::app::CalendarState::load();
+    let cfg=crate::calendar::Config{provider:crate::calendar::Provider::Feishu,username:"test".into(),href:None,server:None,..Default::default()};
+    crate::calendar::save_config(&cfg).unwrap();
+    let cfg=crate::calendar::load_config_strict().unwrap().unwrap();
+    h.app.calendar=crate::app::CalendarState::load();
     let remote=crate::mail::Meeting{all_day:false,title:"飞书会议".into(),start:chrono::Local::now().timestamp()+3600,end:None,at:String::new(),uid:"remote-event".into()};
     h.app.calendar.events.push(remote.clone());
     h.app.open_calendar(None);h.hover(H::local(300.0,40.0),1.0);
@@ -354,8 +356,10 @@ fn local_calendar_can_create_edit_reload_and_remind_without_accounts() {
 #[test]
 fn calendar_month_errors_remain_visible_until_retry_or_month_change(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    let cfg=crate::calendar::Config{provider:crate::calendar::Provider::WeCom,username:"test".into(),href:None,server:None};
-    crate::calendar::save_config(&cfg).unwrap();h.app.calendar=crate::app::CalendarState::load();
+    let cfg=crate::calendar::Config{provider:crate::calendar::Provider::WeCom,username:"test".into(),href:None,server:None,..Default::default()};
+    crate::calendar::save_config(&cfg).unwrap();
+    let cfg=crate::calendar::load_config_strict().unwrap().unwrap();
+    h.app.calendar=crate::app::CalendarState::load();
     h.app.request_calendar_month(true);h.app.pending.clear();
     let month=h.app.calendar.view.month;
     h.app.calendar_event(crate::calendar::Event::MonthLoaded{config:cfg,month,result:Err("日程时间无法解析".into())});
@@ -370,9 +374,12 @@ fn calendar_month_errors_remain_visible_until_retry_or_month_change(){
 fn calendar_combines_platforms_and_settings_tabs_do_not_filter_events() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    let feishu=crate::calendar::Config{provider:crate::calendar::Provider::Feishu,username:"飞书账号".into(),href:None,server:None};
+    let feishu=crate::calendar::Config{provider:crate::calendar::Provider::Feishu,username:"飞书账号".into(),href:None,server:None,..Default::default()};
     let ding=crate::calendar::Config{provider:crate::calendar::Provider::DingTalk,username:"钉钉账号".into(),..feishu.clone()};
     crate::calendar::save_config(&feishu).unwrap();crate::calendar::save_config(&ding).unwrap();
+    let saved=crate::calendar::load_configs_strict().unwrap();
+    let feishu=saved.iter().find(|cfg|cfg.provider==feishu.provider).unwrap().clone();
+    let ding=saved.iter().find(|cfg|cfg.provider==ding.provider).unwrap().clone();
     h.app.calendar=crate::app::CalendarState::load();
     let day=chrono::Local::now().date_naive();
     let event=|uid:&str|crate::mail::Meeting{all_day:false,end:None,title:uid.into(),start:chrono::Local::now().timestamp()+60,at:"18:00".into(),uid:uid.into()};
@@ -408,6 +415,21 @@ fn calendar_combines_platforms_and_settings_tabs_do_not_filter_events() {
     assert_eq!(h.app.calendar_entries(day).len(),1);
     h.app.calendar_event(crate::calendar::Event::Synced{config:feishu,events:vec![event("旧连接结果")],at:"17:01".into()});
     assert_eq!(h.app.calendar_entries(day).len(),1);
+}
+
+#[test]
+fn synced_calendar_rows_keep_resource_identity_when_uids_match() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    let start=chrono::Local::now()+chrono::Duration::hours(1);
+    let event=crate::mail::Meeting{all_day:false,title:"相同 UID 的独立资源".into(),start:start.timestamp(),end:None,at:String::new(),uid:"shared-uid".into()};
+    h.app.calendar.local=["resource-one","resource-two"].into_iter().map(|id|crate::local_calendar::Entry{event:event.clone(),reminder:None,resource_id:Some(id.into()),sync_reminders:vec![]}).collect();
+    let entries=h.app.calendar_entries(start.date_naive());
+    assert_eq!(entries.len(),2,"不同资源不能因 UID/时间相同而合并成一行");
+    assert_eq!(entries.iter().filter_map(|entry|entry.resource_id).collect::<std::collections::BTreeSet<_>>(),std::collections::BTreeSet::from(["resource-one","resource-two"]));
+    h.app.calendar.caldav.bound=true;
+    h.app.open_calendar_editor(Some("shared-uid"));
+    assert!(!h.app.settings_open,"旧 UID 入口遇到歧义不能随意打开第一个资源");
 }
 
 #[test]
@@ -473,7 +495,7 @@ fn expanded_settings_routes_preserve_inline_controls(){
 #[test]
 fn quality_late_calendar_response_does_not_restore_disconnected_account() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    let config=crate::calendar::Config{provider:crate::calendar::Provider::Feishu,username:"old".into(),href:None,server:None};
+    let config=crate::calendar::Config{provider:crate::calendar::Provider::Feishu,username:"old".into(),href:None,server:None,..Default::default()};
     h.app.forget_calendar();
     h.app.calendar_event(crate::calendar::Event::Synced{config:config.clone(),events:vec![],at:"12:00".into()});
     assert!(!h.app.calendar.connected && h.app.calendar.last_sync.is_empty());
@@ -2069,7 +2091,7 @@ fn mail_row_opens_summary_and_back_returns() {
 fn empty_todo_draft_can_be_cancelled_by_clicking_elsewhere(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     for text in ["","   "]{
-        let mut h=H::new();let mut r=feature_raster();h.app.todos.items=vec![crate::model::TodoItem{text:"保留任务".into(),due:None,done_on:None,reminded:false,..Default::default()}];h.app.todos.save();
+        let mut h=H::new();let mut r=feature_raster();h.app.todos.items=vec![crate::model::TodoItem{text:"保留任务".into(),due:None,done_on:None,reminded:false,..Default::default()}];h.app.todos.save().unwrap();
         h.app.show_page(4);h.hover(H::local(300.0,60.0),1.0);h.click(H::local(70.0,109.0));
         assert!(h.app.adding,"点击添加后应保留空白输入框");
         if !text.is_empty(){h.frame(vec![egui::Event::Text(text.into())]);}
@@ -2633,7 +2655,7 @@ fn preview_wechat_call_ringing(){
 #[test]
 fn todo_due_roundtrip_and_fires_only_once(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.app.todos.items.push(crate::model::TodoItem{text:"会议 | 准备".into(),done_on:None,due:Some("2026-10-28 09:40".into()),reminded:false,..Default::default()});h.app.todos.save();
+    h.app.todos.items.push(crate::model::TodoItem{text:"会议 | 准备".into(),done_on:None,due:Some("2026-10-28 09:40".into()),reminded:false,..Default::default()});h.app.todos.save().unwrap();
     let loaded=crate::model::TodoList::load();assert_eq!(loaded.items[0].text,"会议 | 准备");assert_eq!(loaded.items[0].due.as_deref(),Some("2026-10-28 09:40"));
     h.frame(vec![]);assert!(h.app.todos.items[0].reminded);let n=h.cmds.len();h.frame(vec![]);assert_eq!(n,h.cmds.len());assert!(crate::model::TodoList::load().items[0].reminded);
 }
@@ -2703,6 +2725,35 @@ fn todo_edit_choice_can_edit_other_rows_and_completed_items(){
     assert_eq!(h.app.todos.items[0].text,"第一项");assert_eq!(h.app.todos.items[1].text,"第二项已修改");assert!(h.app.todos.items[2].done_on.is_some());
     h.frame(vec![]);h.click_text("改一下");h.frame(vec![]);h.click_text("已完成任务");assert_eq!(h.app.editing,Some(2));
     h.frame(vec![egui::Event::Key{key:egui::Key::Escape,physical_key:None,pressed:true,repeat:false,modifiers:Default::default()}]);assert!(!h.app.is_editing());assert!(h.app.todos.items[2].done_on.is_some());
+}
+
+#[test]
+fn caldav_reload_keeps_inline_todo_edits_on_the_same_resource_after_reordering(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.todos.items=["第一项","第二项"].into_iter().map(crate::model::TodoItem::new).collect();
+    h.app.todos.save().unwrap();let selected=h.app.todos.items[1].id.clone();
+    h.app.show_page(4);h.hover(H::local(300.0,60.0),1.0);h.click_text("改一下");h.frame(vec![]);h.click_text("第二项");
+    crate::organizer::transaction(|state|{state.todos.swap(0,1);Ok(())}).unwrap();h.app.reload_organizer().unwrap();
+    assert_eq!(h.app.editing,Some(0));assert_eq!(h.app.editing_id.as_deref(),Some(selected.as_str()));
+    h.app.buf="第二项已修改".into();h.frame(vec![egui::Event::Key{key:egui::Key::Enter,physical_key:None,pressed:true,repeat:false,modifiers:Default::default()}]);
+    let saved=crate::organizer::read_state().unwrap();
+    assert_eq!(saved.todos.iter().find(|item|item.id==selected).unwrap().text,"第二项已修改");
+    assert_eq!(saved.todos.iter().find(|item|item.id!=selected).unwrap().text,"第一项");
+}
+
+#[test]
+fn caldav_reload_cancels_inline_todo_edits_when_the_target_changes_or_disappears(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for removed in [false,true]{
+        let mut h=H::new();h.app.todos.items=["第一项","第二项"].into_iter().map(crate::model::TodoItem::new).collect();
+        h.app.todos.save().unwrap();let selected=h.app.todos.items[1].id.clone();
+        h.app.show_page(4);h.hover(H::local(300.0,60.0),1.0);h.click_text("改一下");h.frame(vec![]);h.click_text("第二项");h.app.buf="过期的本机输入".into();
+        crate::organizer::transaction(|state|{if removed{state.todos.retain(|item|item.id!=selected);}else{state.todos.iter_mut().find(|item|item.id==selected).unwrap().text="后台更新内容".into();}Ok(())}).unwrap();
+        h.app.reload_organizer().unwrap();assert!(!h.app.is_editing());assert!(h.app.editing_id.is_none());
+        h.frame(vec![egui::Event::Key{key:egui::Key::Enter,physical_key:None,pressed:true,repeat:false,modifiers:Default::default()}]);
+        let saved=crate::organizer::read_state().unwrap();assert!(saved.todos.iter().all(|item|item.text!="过期的本机输入"));
+        if removed{assert!(saved.todos.iter().all(|item|item.id!=selected));}else{assert_eq!(saved.todos.iter().find(|item|item.id==selected).unwrap().text,"后台更新内容");}
+    }
 }
 
 #[test]
@@ -3398,7 +3449,7 @@ fn calendar_notice_opens_the_calendar_instead_of_mail() {
     h.app.settings.save();
     assert!(!crate::model::Settings::load().calendar_auto_sync,"自动同步选择应持久保存");
     let start=chrono::Local::now().timestamp()+600;
-    h.app.calendar.config=Some(crate::calendar::Config{provider:crate::calendar::Provider::Feishu,username:"demo".into(),href:None,server:None});
+    h.app.calendar.config=Some(crate::calendar::Config{provider:crate::calendar::Provider::Feishu,username:"demo".into(),href:None,server:None,..Default::default()});
     h.app.calendar_event(crate::calendar::Event::Synced{config:h.app.calendar.config.clone().unwrap(),events:vec![crate::mail::Meeting{ all_day:false, end:None,title:"产品评审".into(),start,at:"10-31 15:00".into(),uid:"calendar-review".into()}],at:"10-31 14:50".into()});
     for _ in 0..60 {h.frame(vec![]);}
     h.click_notice_badge();
@@ -3442,7 +3493,7 @@ fn calendar_merges_matching_invites_and_preserves_each_source() {
     }
     let day=chrono::DateTime::from_timestamp(start,0).unwrap().with_timezone(&chrono::Local).date_naive();
     for provider in crate::calendar::Provider::ALL {
-        h.app.calendar.config=Some(crate::calendar::Config{provider,username:"demo".into(),href:None,server:None});
+        h.app.calendar.config=Some(crate::calendar::Config{provider,username:"demo".into(),href:None,server:None,..Default::default()});
         let entries=h.app.calendar_entries(day);
         assert_eq!(entries.len(),1,"同一场会议只占一行");
         assert_eq!(entries[0].sources.len(),3,"工作日历及两个邮箱应保留各自来源");
@@ -3458,7 +3509,7 @@ fn calendar_dates_are_readable_and_source_labels_do_not_take_a_second_line() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     let day=chrono::NaiveDate::from_ymd_opt(2026,11,15).unwrap();
     let event=crate::mail::Meeting{ all_day:false, end:None,title:"产品评审".into(),start:day.and_hms_opt(14,0,0).unwrap().and_local_timezone(chrono::Local).earliest().unwrap().timestamp(),at:"11-15 14:00".into(),uid:"readable-calendar".into()};
-    h.app.calendar.config=Some(crate::calendar::Config{provider:crate::calendar::Provider::Feishu,username:"demo".into(),href:None,server:None});
+    h.app.calendar.config=Some(crate::calendar::Config{provider:crate::calendar::Provider::Feishu,username:"demo".into(),href:None,server:None,..Default::default()});
     h.app.calendar.view.events=vec![event.clone()];
     h.app.mail.recent.push(crate::mail::Item {received_unix: None, account:"work@example.com".into(),from:"项目组".into(),subject:"会议邀请".into(),summary:String::new().into(),links:vec![],code:None,time:String::new(),uid:1,meeting:Some(event.clone())});
     h.app.open_calendar(Some(event));h.hover(H::local(300.0,40.0),1.0);
@@ -3514,7 +3565,7 @@ fn calendar_month_navigation_and_today_select_the_right_day() {
 #[test]
 fn calendar_month_results_preserve_reminders_and_ignore_old_requests() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.app.calendar.config=Some(crate::calendar::Config{provider:crate::calendar::Provider::Feishu,username:"demo".into(),href:None,server:None});
+    h.app.calendar.config=Some(crate::calendar::Config{provider:crate::calendar::Provider::Feishu,username:"demo".into(),href:None,server:None,..Default::default()});
     let upcoming=crate::mail::Meeting{ all_day:false, end:None,title:"明天会议".into(),start:chrono::Local::now().timestamp()+3600,at:String::new(),uid:"upcoming".into()};
     h.app.calendar.events=vec![upcoming.clone()];
     let month=chrono::NaiveDate::from_ymd_opt(2024,2,1).unwrap();
@@ -3556,7 +3607,7 @@ fn calendar_layout_gallery() {
         h.app.calendar.view.day=day;h.app.calendar.view.month=crate::calendar::month_start(day);
         h.app.open_calendar(None);
         let provider=match mode{"dingtalk"=>crate::calendar::Provider::DingTalk,"wecom"=>crate::calendar::Provider::WeCom,_=>crate::calendar::Provider::Feishu};
-        if !["disconnected","local-editor","local","local-all-day"].contains(&mode){h.app.calendar.config=Some(crate::calendar::Config{provider,username:"demo".into(),href:None,server:None});h.app.calendar.connected=true;}
+        if !["disconnected","local-editor","local","local-all-day"].contains(&mode){h.app.calendar.config=Some(crate::calendar::Config{provider,username:"demo".into(),href:None,server:None,..Default::default()});h.app.calendar.connected=true;}
         h.app.calendar.view.loaded=Some(crate::calendar::month_start(day));
         if ["agenda","dingtalk","wecom","mixed"].contains(&mode) {
             for (i,(hour,minute,title)) in [(14,30,"产品方案评审"),(16,0,"下一阶段的设计方案与开发排期对齐"),(17,0,"项目进度同步")].into_iter().enumerate(){
@@ -3607,7 +3658,7 @@ fn calendar_reminder_fires_once_and_dedupes_with_mail() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut h = H::new();
     h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"a@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
-    h.app.calendar.config=Some(crate::calendar::Config{provider:crate::calendar::Provider::Feishu,username:"demo".into(),href:None,server:None});
+    h.app.calendar.config=Some(crate::calendar::Config{provider:crate::calendar::Provider::Feishu,username:"demo".into(),href:None,server:None,..Default::default()});
     h.app.settings.calendar_prompt = false;
     let start = chrono::Local::now().timestamp() + 600;
     let at = "10-30 10:00".to_string();
@@ -4294,8 +4345,9 @@ fn calendar_month_refresh_removes_cancelled_cached_event() {
 #[test]
 fn ignored_mail_event_hides_stops_reminders_persists_and_restores() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    let now=chrono::Local::now();let day=now.date_naive();
-    let meeting=crate::mail::Meeting{all_day:false,title:"测试邀请".into(),start:now.timestamp()+600,end:None,at:String::new(),uid:"ignore-me".into()};
+    // 提前十分钟的日程可能跨午夜，查询日期必须取日程实际开始日期。
+    let start=chrono::Local::now()+chrono::Duration::minutes(10);let day=start.date_naive();
+    let meeting=crate::mail::Meeting{all_day:false,title:"测试邀请".into(),start:start.timestamp(),end:None,at:String::new(),uid:"ignore-me".into()};
     h.app.mail.recent.push(crate::mail::Item {received_unix: None, account:"test@qq.com".into(),from:"测试".into(),subject:"邀请".into(),time:String::new(),code:None,summary:String::new().into(),links:vec![],meeting:Some(meeting.clone()),uid:99});
     h.app.toggle_mail_event(&meeting);
     assert!(h.app.calendar_entries(day).is_empty());
@@ -4312,7 +4364,7 @@ fn ignored_mail_event_hides_stops_reminders_persists_and_restores() {
 #[test]
 fn calendar_sync_result_does_not_enqueue_another_sync() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    let config=crate::calendar::Config{provider:crate::calendar::Provider::Feishu,username:"test".into(),href:None,server:None};
+    let config=crate::calendar::Config{provider:crate::calendar::Provider::Feishu,username:"test".into(),href:None,server:None,..Default::default()};
     h.app.calendar.config=Some(config.clone());h.app.open_calendar(None);h.app.pending.clear();
     h.app.calendar.view.loading=false;
     h.app.calendar_event(crate::calendar::Event::Synced{config,events:vec![],at:"12:00".into()});

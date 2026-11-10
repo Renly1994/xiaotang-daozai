@@ -11,6 +11,10 @@
 
 - `vendor/imap-proto`：兼容腾讯企业邮箱 CAPABILITY 响应末尾的空格，保留 IMAP4rev1 校验和下一条响应边界。
 
+## CalDAV XML
+
+CalDAV 的 DAV XML 使用 `roxmltree 0.20.0` 按 namespace URI 解析，许可为 MIT OR Apache-2.0，MSRV 为 Rust 1.60。该依赖不提供网络服务，也不引入数据库；HTTP 沿用 `ureq`，凭据沿用 Windows 凭据管理器。
+
 ## 安全检查
 
 2026 年 11 月 3 日发布前，对 Cargo.lock 的 registry 依赖查询了 OSV 公告库，并运行完整测试。已移除受 [RUSTSEC-2023-0086](https://rustsec.org/advisories/RUSTSEC-2023-0086.html) 影响的 `lexical-core 0.7.6`。

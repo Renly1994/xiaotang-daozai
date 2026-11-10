@@ -458,7 +458,7 @@ mod tests {
                 write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap(); stream.write_all(&body).unwrap();
             }
         });
-        let cfg = Config { provider: Provider::WeCom, username: "demo".into(), href: Some("https://caldav.wecom.work/obsolete".into()), server: Some(base) };
+        let cfg = Config { provider: Provider::WeCom, username: "demo".into(), href: Some("https://caldav.wecom.work/obsolete".into()), server: Some(base), ..Default::default() };
         let result = super::super::fetch_month(&cfg, "test", chrono::NaiveDate::from_ymd_opt(2026,11,1).unwrap()).unwrap();
         assert_eq!(result.events.len(), 1);
         server.join().unwrap();
@@ -505,7 +505,7 @@ mod tests {
         if item { children.push(node(AIR, 0x16, "", vec![node(AIR, 7, "", vec![node(AIR, 0x0d, "event", vec![]), sample()])])); }
         node(AIR, 5, "", vec![node(AIR, 0x1c, "", vec![node(AIR, 0x0f, "", children)])])
     }
-    fn custom(base: &str) -> Config { Config { provider: Provider::Exchange, username: "me@example.com".into(), href: None, server: Some(base.into()) } }
+    fn custom(base: &str) -> Config { Config { provider: Provider::Exchange, username: "me@example.com".into(), href: None, server: Some(base.into()), ..Default::default() } }
 
     #[test]
     fn custom_exchange_completes_policy_handshake_and_reports_partial_compliance() {
@@ -582,7 +582,7 @@ mod tests {
         replies.push(Box::new(move |r| { assert_eq!(id(r), "deny"); (200, Some(node(AIR, 5, "", vec![node(AIR, 0x1c, "", vec![node(AIR, 0x0f, "", vec![node(AIR, 0x0e, "8", vec![]), node(AIR, 0x0b, "0", vec![])])])]))) }));
         for _ in 0..2 { replies.push(Box::new(move |r| { assert_eq!(id(r), "mine"); (200, Some(page(r, vec![event("d", "uid-mine", false)]))) })); }
         let (base, worker) = mock(replies);
-        let cfg = Config { provider: Provider::WeCom, username: "demo".into(), href: None, server: Some(base) };
+        let cfg = Config { provider: Provider::WeCom, username: "demo".into(), href: None, server: Some(base), ..Default::default() };
         let result = super::super::fetch_month(&cfg, "pw", chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap()).unwrap();
         let synced: Vec<String> = worker.join().unwrap().iter().filter(|(c, _, _)| c == "Sync").map(|(_, _, r)| id(r)).collect();
         assert!(!synced.iter().any(|f| f == "inbox" || f == "loose"), "邮件和不在日历下的文件夹不能同步：{synced:?}");
@@ -604,7 +604,7 @@ mod tests {
     fn exchange_status_errors_and_unsafe_endpoints_are_rejected() {
         assert!(check_status(&node(FOLDER, 0x16, "", vec![node(FOLDER, 0x0c, "9", vec![])]), FOLDER, 0x0c, "Exchange").is_err());
         assert!(check_status(&Node::default(), AIR, 0x0e, "Exchange").is_err());
-        let cfg = Config { provider: Provider::WeCom, username: "demo".into(), href: None, server: Some("http://wecom.work".into()) };
+        let cfg = Config { provider: Provider::WeCom, username: "demo".into(), href: None, server: Some("http://wecom.work".into()), ..Default::default() };
         assert!(endpoint(&cfg).is_err());
     }
     #[test]
@@ -624,7 +624,7 @@ mod tests {
     #[test]
     #[ignore = "显式验证企业微信账号；仅输出数量，成功后可按环境变量保存连接"]
     fn live_wecom_connection() {
-        let mut cfg = Config { provider: Provider::WeCom, username: std::env::var("DAOZAI_WECOM_USER").unwrap(), href: None, server: None };
+        let mut cfg = Config { provider: Provider::WeCom, username: std::env::var("DAOZAI_WECOM_USER").unwrap(), href: None, server: None, ..Default::default() };
         let password = std::env::var("DAOZAI_WECOM_PASSWORD").unwrap();
         let month = super::super::fetch_month(&cfg, &password, chrono::Local::now().date_naive()).unwrap();
         let upcoming = super::super::fetch(&cfg, &password).unwrap();

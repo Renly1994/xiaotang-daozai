@@ -402,8 +402,15 @@ impl Settings {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TodoItem {
+    #[serde(default = "crate::organizer::new_id")]
+    pub id: String,
+    /// 同步对象来源；其余字段继续作为本机兼容投影。
+    #[serde(default)]
+    pub resource_id: Option<String>,
+    #[serde(default)]
+    pub sync_status: Option<String>,
     pub text: String,
     /// 一次性待办：完成日期；每周重复：最近一次完成的日期（只算当天）。YYYY-MM-DD
     pub done_on: Option<String>,
@@ -414,6 +421,13 @@ pub struct TodoItem {
     pub repeat: u8,
     /// 每周重复：当天已提醒的日期，第二天自动重新提醒。
     pub reminded_on: Option<String>,
+}
+
+impl Default for TodoItem {
+    fn default() -> Self {
+        Self { id: crate::organizer::new_id(), resource_id: None, sync_status: None,
+            text: String::new(), done_on: None, due: None, reminded: false, repeat: 0, reminded_on: None }
+    }
 }
 
 pub const WEEKDAY_NAMES: [&str; 7] = ["一", "二", "三", "四", "五", "六", "日"];
@@ -466,6 +480,7 @@ impl TodoItem {
 
     /// 今天是否已完成：重复待办第二天自动变回未完成。
     pub fn done_for(&self, today: &str) -> bool {
+        if let Some(status)=&self.sync_status {return status=="COMPLETED";}
         if self.is_repeating() { self.done_on.as_deref() == Some(today) } else { self.done_on.is_some() }
     }
 
@@ -479,7 +494,7 @@ impl TodoItem {
     pub fn reminder_due(&self, now: &str) -> bool {
         let Some(due) = self.due.as_deref() else { return false; };
         let today = now.get(..10).unwrap_or("");
-        if self.done_for(today) { return false; }
+        if self.done_for(today) || self.sync_status.as_deref().is_some_and(|status|!matches!(status,"NEEDS-ACTION"|"IN-PROCESS")) { return false; }
         if !self.is_repeating() { return !self.reminded && due <= now; }
         let (Some(at), Some(clock)) = (due.get(11..16), now.get(11..16)) else { return false; };
         self.scheduled_on(today) && self.reminded_on.as_deref() != Some(today) && at <= clock
@@ -499,11 +514,46 @@ impl TodoItem {
 #[derive(Clone, Debug, Default)]
 pub struct TodoList {
     pub items: Vec<TodoItem>,
+    /// 编辑前的稳定 ID 快照，用来检测后台刷新期间的并发修改。
+    pub baseline: Option<Vec<TodoItem>>,
 }
 
 impl TodoList {
     pub fn load() -> Self {
-        fs::read_to_string(config_dir().join("todo.txt")).map(|text| Self::parse(&text)).unwrap_or_default()
+        Self::load_strict().unwrap_or_default()
+    }
+
+    pub fn load_strict() -> Result<Self, String> {
+        crate::organizer::read_state().map(|state| Self { baseline: Some(state.todos.clone()), items: state.todos })
+    }
+
+    /// 迁移专用：已识别的结构化旧记录缺字段时整体失败，避免提交丢行快照。
+    pub fn parse_strict(text: &str) -> Result<Self, String> {
+        let mut list=Self::default();
+        for (index,line) in text.trim_start_matches('\u{feff}').lines().enumerate() {
+            if line.trim().is_empty(){continue;}
+            let invalid=||format!("旧待办第 {} 行格式损坏，请修复 todo.txt 后重试；尚未迁移",index+1);
+            if line.contains('|') {
+                let fields=line.splitn(3,'|').collect::<Vec<_>>();
+                if fields.len()!=3{return Err(invalid());}
+                let flag=fields[0];let date=fields[1];let body=fields[2].trim();
+                let repeat=if let Some(bits)=flag.strip_prefix('r') {
+                    bits.parse::<u8>().ok().filter(|bits|*bits>0 && *bits<=REPEAT_ALL).ok_or_else(invalid)?
+                } else if matches!(flag,"o"|"x"){0}else{return Err(invalid());};
+                if date!="-" && chrono::NaiveDate::parse_from_str(date,"%Y-%m-%d").is_err(){return Err(invalid());}
+                if flag=="o" && date!="-" || flag=="x" && date=="-" || body.is_empty(){return Err(invalid());}
+                if let Some(reminder)=body.strip_prefix("@due:") {
+                    let parts=reminder.splitn(3,'|').collect::<Vec<_>>();
+                    if parts.len()!=3 || parts[2].trim().is_empty() || chrono::NaiveDateTime::parse_from_str(parts[0],"%Y-%m-%d %H:%M").is_err(){return Err(invalid());}
+                    let valid=if repeat==0 {matches!(parts[1],"0"|"1")}else{parts[1]=="0" || chrono::NaiveDate::parse_from_str(parts[1],"%Y-%m-%d").is_ok()};
+                    if !valid{return Err(invalid());}
+                }
+            }
+            let mut parsed=Self::parse(line);
+            if parsed.items.len()!=1{return Err(invalid());}
+            list.items.append(&mut parsed.items);
+        }
+        Ok(list)
     }
 
     pub fn parse(text: &str) -> Self {
@@ -539,19 +589,19 @@ impl TodoList {
                     reminded: repeat == 0 && reminded_field == "1",
                     reminded_on: (repeat != 0 && reminded_field.len() == 10).then_some(reminded_field),
                     done_on: done.then(|| when.to_string()),
+                    ..Default::default()
                 });
             }
         }
         list
     }
 
-    pub fn save(&self) {
-        let body = self.serialize();
-        let path = config_dir().join("todo.txt");
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
+    pub fn save(&mut self) -> Result<(), String> {
+        let result = crate::organizer::save_todos(self.baseline.as_deref(), &self.items);
+        match result {
+            Ok(items) => { self.baseline = Some(items.clone()); self.items = items; Ok(()) }
+            Err(error) => { if let Some(before) = &self.baseline { self.items = before.clone(); } Err(error) }
         }
-        let _ = atomic_write(&path, body.as_bytes());
     }
 
     pub fn serialize(&self) -> String {
@@ -836,7 +886,7 @@ mod tests {
         weekly.toggle("2026-11-02");
         weekly.reminded_on = Some("2026-11-02".into());
         let once = TodoItem { done_on: Some("2026-11-01".into()), reminded: true, due: Some("2026-11-01 08:00".into()), ..TodoItem::new("一次性") };
-        let list = TodoList { items: vec![weekly.clone(), once.clone()] };
+        let list = TodoList { items: vec![weekly.clone(), once.clone()], ..Default::default() };
         let loaded = TodoList::parse(&list.serialize());
         assert_eq!(loaded.items.len(), 2);
         let w = &loaded.items[0];
