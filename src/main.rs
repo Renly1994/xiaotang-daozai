@@ -76,6 +76,8 @@ struct Shell {
     quota: daozai::quota::Service,
     quota_sig: Option<(bool,Vec<daozai::quota::Account>)>,
     quota_at: PollClock,
+    /// 进程无声消失时用来界定「死前最后一刻」的节流时钟。
+    heartbeat_at: PollClock,
 }
 
 impl Shell {
@@ -167,6 +169,7 @@ impl Shell {
             cal: daozai::calendar::Service::start(),
             cal_sig: (Vec::new(), true),
             quota: daozai::quota::Service::start(), quota_sig: None, quota_at: PollClock::default(),
+            heartbeat_at: PollClock::default(),
         }
     }
 
@@ -270,6 +273,11 @@ impl eframe::App for Shell {
         [0.0; 4]
     }
 
+    /// 事件循环正常结束（窗口被销毁或收到退出命令）时调用；被外力终止不会走到这里。
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        diagnostics::note("last-exit.log",&format!("事件循环正常结束，共运行 {:.0} 秒",self.t0.elapsed().as_secs_f64()));
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.resource_at.ready(Duration::from_secs(30)){
             let (count,bytes)={let textures=ctx.tex_manager();let textures=textures.read();(textures.num_allocated(),textures.allocated().map(|(_,info)|info.bytes_used()).sum())};
@@ -277,6 +285,12 @@ impl eframe::App for Shell {
             daozai::resources::TEXTURE_BYTES.store(bytes,std::sync::atomic::Ordering::Relaxed);
             daozai::resources::GALLEYS.store(ctx.fonts(|fonts|fonts.num_galleys_in_cache()),std::sync::atomic::Ordering::Relaxed);
             self.resource_at=PollClock::now();
+        }
+        // 每 30 秒留一个时间戳：进程无声消失时，对比心跳与退出记录即可区分
+        // 「事件循环正常结束」和「被外力终止」。
+        if self.heartbeat_at.ready(Duration::from_secs(30)) {
+            self.heartbeat_at=PollClock::now();
+            diagnostics::note("heartbeat.log",&format!("运行中，已启动 {:.0} 秒",self.t0.elapsed().as_secs_f64()));
         }
         let guarded=daozai::resources::GUARD.tripped();
         if guarded && !self.guard_notified {
@@ -332,6 +346,7 @@ impl eframe::App for Shell {
         }
         #[cfg(windows)]
         {
+            if let Some(message)=smtc::take_mode_error(){self.app.say(message);}
             while let Ok(observation)=self.system_rx.try_recv(){
                 let next=observation.input;
                 let manual=next.is_some_and(|state|self.input_keys.as_ref().is_some_and(|keys|keys.allows(state.context)));
@@ -493,6 +508,8 @@ impl eframe::App for Shell {
         for cmd in out.cmds {
             match cmd {
                 Cmd::Media(t) => {
+                    // 定位进度条会顺带触发一次前台事件，别让它把面板收走，否则没法连续拖动。
+                    if matches!(t,smtc::Transport::Seek(_)) {self.app.keep_open(1.2);}
                     let source=self.media.lock().map(|media|media.source.clone()).unwrap_or_default();
                     if self.media_control.is_none(){self.media_control=smtc::ControlWorker::start(ctx.clone());}
                     match self.media_control.as_ref().ok_or(()).and_then(|worker|worker.submit(t,source)){
@@ -520,6 +537,32 @@ impl eframe::App for Shell {
                         }
                         Err(error)=>self.app.say(error),
                     }
+                }
+                Cmd::ActivatePlayer(source)=>{
+                    // 切窗口/收起都会带来一次前台事件，别让面板顺手收走，否则没法连着点第二下。
+                    self.app.keep_open(1.2);
+                    let message=smtc::activate(&source);
+                    self.app.say(message);
+                }
+                Cmd::LaunchPlayer(name,path)=>{
+                    self.app.keep_open(1.2);
+                    match daozai::players::launch(&path) {
+                        Ok(())=>self.app.say(format!("正在启动{name}")),
+                        Err(error)=>self.app.say(format!("启动{name}失败：{error}")),
+                    }
+                }
+                Cmd::CyclePlayMode=>{
+                    // 点网易云底栏的模式按钮会顺带触发一次前台事件，别让它把面板收走。
+                    self.app.keep_open(1.2);
+                    let ctx=ctx.clone();
+                    std::thread::spawn(move||{
+                        if smtc::cycle_play_mode() {
+                            // 图标已在后台就地前移，主动重绘一次，不用等下一轮轮询。
+                            ctx.request_repaint();
+                        }else{
+                            smtc::set_mode_error("没能切换播放模式，请确认网易云正在播放");
+                        }
+                    });
                 }
                 Cmd::Open(p) => {if let Err(e)=open_path(&p){self.app.say(e);}},
                 Cmd::OpenUrl(url)=>{
@@ -570,6 +613,23 @@ impl eframe::App for Shell {
                     #[cfg(windows)] daozai::system::toggle_mute();
                     self.volume_quiet=PollClock::now();
                 },
+                Cmd::SetPlayerVolume(percent)=>{
+                    let source=self.media.lock().map(|media|media.source.clone()).unwrap_or_default();
+                    let exe=daozai::smtc::player_exe(&source);
+                    // 优先改客户端自己的音频会话；客户端没有会话时退回系统音量，按钮不至于失效。
+                    match daozai::appaudio::set_for(&exe,percent) {
+                        Some(volume)=>self.app.set_player_volume(&source,volume),
+                        None=>self.app.say("这台机器的音频设备暂时读不到，调不了音量"),
+                    }
+                }
+                Cmd::TogglePlayerMute=>{
+                    let source=self.media.lock().map(|media|media.source.clone()).unwrap_or_default();
+                    let exe=daozai::smtc::player_exe(&source);
+                    match daozai::appaudio::toggle_mute_for(&exe) {
+                        Some(volume)=>self.app.set_player_volume(&source,volume),
+                        None=>self.app.say("这台机器的音频设备暂时读不到，调不了静音"),
+                    }
+                }
                 Cmd::Copy(text)=>{ctx.copy_text(text);self.app.say("已复制");},
                 Cmd::Notify(title,body)=>{
                     #[cfg(windows)] if let Some(tray)=&self.tray{tray.notify(&title,&body,self.app.settings.sound);}
@@ -808,5 +868,9 @@ fn run() -> eframe::Result<()> {
         .with_always_on_top()
         .with_visible(false);
     let opts = eframe::NativeOptions { viewport, vsync: !cfg!(windows), ..Default::default() };
-    graphics::run(opts,|opts|eframe::run_native("岛仔", opts, Box::new(|cc| Ok(Box::new(Shell::new(cc))))))
+    graphics::run(opts,|opts|{
+        let result=eframe::run_native("岛仔", opts, Box::new(|cc| Ok(Box::new(Shell::new(cc)))));
+        if result.is_ok() {diagnostics::note("last-exit.log","run_native 正常返回（所有窗口已关闭）");}
+        result
+    })
 }

@@ -10,6 +10,8 @@ mod mail_privacy;
 pub mod poll_clock;
 pub mod resources;
 pub mod anim;
+pub mod appaudio;
+pub mod players;
 pub mod app;
 pub mod bt;
 pub mod calendar;

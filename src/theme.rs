@@ -155,7 +155,6 @@ fn build_fonts()->FontDefinitions {
         find(&[("msyhbd.ttc", 1), ("NotoSansSC-Medium.otf", 0), ("NotoSansCJK-Medium.ttc", 2)], &dirs),
         find(&[("msyhbd.ttc", 1), ("NotoSansSC-Bold.otf", 0), ("NotoSansCJK-Bold.ttc", 2)], &dirs),
     ];
-
     let korean = [
         find(&[("malgun.ttf", 0), ("NotoSansKR-Regular.otf", 0), ("NotoSansCJK-Regular.ttc", 1)], &dirs),
         find(&[("malgunbd.ttf", 0), ("malgun.ttf", 0), ("NotoSansKR-Bold.otf", 0), ("NotoSansCJK-Bold.ttc", 1)], &dirs),
@@ -209,6 +208,49 @@ pub fn app_icon()->std::sync::Arc<eframe::egui::IconData>{
 
 #[cfg(test)]
 mod tests {
+    /// 歌词会混用多种语言；任一字重缺字就会渲染成豆腐块。
+    /// 这里直接问排版器：各字重的回退链是否真的覆盖常见语言。
+    #[test]
+    fn lyrics_fallback_covers_common_languages(){
+        use eframe::egui::{Context, FontFamily, FontId, RawInput, Rect, vec2};
+        let ctx = Context::default();
+        super::load_fonts(&ctx);
+        // 排版器在第一次 run 之后才会建好字体图集。
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Default::default(), vec2(200.0, 100.0))), ..Default::default() };
+        let _ = ctx.run(input, |_| {});
+        let families = [
+            FontFamily::Proportional,
+            FontFamily::Name("semibold".into()),
+            FontFamily::Name("bold".into()),
+        ];
+        let samples = [
+            ("中文", "你好，世界"),
+            ("英文", "Hello, world"),
+            ("韩文", "사랑해 안녕하세요"),
+            ("日文", "恋の歌 さようなら"),
+            ("法文", "très bien, cœur garçon"),
+            ("西班牙文", "¿Dónde estás? niño"),
+            ("意大利文", "così città virtù"),
+            ("俄文", "Привет мир"),
+            ("希腊文", "Καλημέρα"),
+        ];
+        for family in &families {
+            let id = FontId::new(11.0, family.clone());
+            // 负向对照：未分配码位 U+10FFFE 必然无字形。若连它都“有字形”，
+            // 说明 has_glyphs 的判定已失效，上面的断言就没有意义了。
+            assert!(
+                !ctx.fonts(|fonts| fonts.has_glyphs(&id, "\u{10FFFE}")),
+                "negative control failed: has_glyphs 判定失效，覆盖断言不可信"
+            );
+            for (lang, text) in samples {
+                assert!(
+                    ctx.fonts(|fonts| fonts.has_glyphs(&id, text)),
+                    "{lang} 在 {family:?} 下仍缺字，歌词会显示豆腐块"
+                );
+            }
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn korean_titles_and_lyrics_have_glyphs_in_all_weights(){

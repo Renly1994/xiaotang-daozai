@@ -153,6 +153,13 @@ pub fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>
     if own && auth.refresh.is_some() && matches!(&result,Err(ureq::Error::Status(401,_))){
         auth=renew(agent,&auth).map_err(|e|(e,0))?;save_session(slot,&auth).map_err(|e|(e,0))?;result=usage_request(agent,&url,&auth.token);
     }
+    // 部分代理出口会对本接口返回 403 或连接失败（同一令牌直连可用），此时改走直连重试一次。
+    if let Err(error)=&result{
+        if matches!(error,ureq::Error::Status(403,_)|ureq::Error::Transport(_)){
+            let direct=ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).redirects(0).build();
+            if let Ok(ok)=usage_request(&direct,&url,&auth.token){result=Ok(ok);}
+        }
+    }
     let value=read_json(result.map_err(http_error)?).map_err(|e|(e,60))?;
     if !own && stamp!=fs::metadata(&account.source).and_then(|m|m.modified()).ok(){return Err(("Grok Bot 登录已更新，请刷新额度".into(),0));}
     parse(&value).map_err(|e|(e,60))

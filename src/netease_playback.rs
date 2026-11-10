@@ -1,5 +1,5 @@
 //! 网易云原生播放事件：只读增量日志，不依赖 SMTC 或特定 DLL 版本。
-use super::{MediaKind,NowPlaying};
+use super::{MediaKind,NowPlaying,PlayMode};
 use std::{fs::File,io::{Read,Seek,SeekFrom},path::Path,sync::{mpsc,Arc},time::{Duration,Instant}};
 
 const MAX_READ:u64=4*1024*1024;
@@ -25,6 +25,32 @@ fn historical_millis(line:&str,now:u64)->Option<u64> {
         if millis<=now.saturating_add(1000){return Some(millis.min(now));}
     }
     None
+}
+
+/// 最近一次读到的时长，供「按秒定位」换算成进度条比例。
+static LAST_DURATION_MS:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
+/// 已经点过进度条的目标位置（毫秒，-1 表示没有），轮询线程据此校正本地时间轴。
+static PENDING_SEEK_MS:std::sync::atomic::AtomicI64=std::sync::atomic::AtomicI64::new(-1);
+static MODE_PROBED:std::sync::atomic::AtomicBool=std::sync::atomic::AtomicBool::new(false);
+
+/// 网易云日志里的模式名（"播放模式切换" 事件）。
+fn mode_from_log(name:&str)->Option<PlayMode> {
+    match name {
+        "playRandom"=>Some(PlayMode::Random),
+        "playOrder"=>Some(PlayMode::Order),
+        "playAi"|"playHeartbeat"=>Some(PlayMode::Heart),
+        "playCycle"=>Some(PlayMode::Cycle),
+        "playOneCycle"=>Some(PlayMode::OneCycle),
+        _=>None,
+    }
+}
+
+/// 日志行是 `"旧播放模式::","playRandom","新播放模式::","playOrder"`，取新值。
+fn mode_from_event(args:&str)->Option<PlayMode> {
+    let rest=args.split("新播放模式::").nth(1)?;
+    rest.split('"')
+        .map(|piece|piece.trim_matches(|c:char|c==','||c==' '))
+        .find_map(mode_from_log)
 }
 
 // elog 的逐字节替换格式，参考 https://github.com/344272586-sketch/dsh-pet-qqmusic/blob/main/lib/netease-elog.js
@@ -88,6 +114,8 @@ impl Playback {
                 if event=="checkPlayPrivilege" && self.media.song_id.is_some(){return;}
                 *self=Self{media:metadata.0,artwork_url:metadata.1,at,observed_at:now,ready:false};
             }else{self.metadata(metadata);}
+        }else if event=="播放模式切换"{
+            if let Some(mode)=mode_from_event(args){super::set_play_mode(mode);}
         }else if event.starts_with("native") && event.contains("load完成"){
             let Some(id)=serde_json::from_str::<serde_json::Value>(args).ok().and_then(|v|song_id(v.get("songId")?))else{return;};
             if self.media.song_id!=Some(id){*self=Self::default();self.media.song_id=Some(id);}
@@ -257,6 +285,15 @@ impl Reader {
             }
             self.lookup=(id,now);
         }
+        // 时长给「按秒定位」换算比例用；点过进度条后把本地时间轴对齐到目标位置，
+        // 因为这个版本的日志不再上报 setPlayingPosition，拖完不校正就会继续按旧起点外推。
+        let duration=self.playback.media.duration;
+        if duration>0.0 {LAST_DURATION_MS.store((duration*1000.0) as u64,std::sync::atomic::Ordering::Relaxed);}
+        let pending=PENDING_SEEK_MS.swap(-1,std::sync::atomic::Ordering::Relaxed);
+        if pending>=0 && self.playback.media.song_id.is_some() {
+            self.playback.media.position=pending as f64/1000.0;
+            self.playback.at=now;
+        }
         self.playback.snapshot(now)
     }
     pub(super) fn poll(&mut self)->Option<NowPlaying>{
@@ -310,6 +347,220 @@ pub(super) fn control(command:super::Transport){
         let atom=GlobalFindAtomW(&HSTRING::from(name));
         if atom!=0 {let _=PostMessageW(window,WM_HOTKEY,WPARAM(atom as usize),LPARAM(0));}
     }}
+}
+
+// ---------------------------------------------------------------
+// 界面通道（网易云 3.x）：
+// - 播放模式按钮是标准 UIA 按钮，名字随模式变化，可以直接 Invoke 切换；
+// - 进度条不在 UIA 树里，也没有定位热键，只能按像素位置点它。
+// ---------------------------------------------------------------
+/// 底栏模式按钮的 UIA 名称 → 播放模式。
+fn mode_from_button(name:&str)->Option<PlayMode> {
+    match name {
+        "shuffle"=>Some(PlayMode::Random),
+        "order"=>Some(PlayMode::Order),
+        "heartbeat"=>Some(PlayMode::Heart),
+        "loop"=>Some(PlayMode::Cycle),
+        "singleloop"=>Some(PlayMode::OneCycle),
+        _=>None,
+    }
+}
+
+#[cfg(windows)]
+fn mode_button()->Option<windows::Win32::UI::Accessibility::IUIAutomationElement> {
+    use windows::core::{w,PCWSTR};
+    use windows::Win32::System::Com::{CoCreateInstance,CoInitializeEx,CLSCTX_ALL,COINIT_MULTITHREADED};
+    use windows::Win32::UI::Accessibility::{CUIAutomation,IUIAutomation,TreeScope_Descendants};
+    use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
+    unsafe{
+        let _=CoInitializeEx(None,COINIT_MULTITHREADED);
+        let window=FindWindowW(w!("OrpheusBrowserHost"),PCWSTR::null()).ok()?;
+        let automation:IUIAutomation=CoCreateInstance(&CUIAutomation,None,CLSCTX_ALL).ok()?;
+        let root=automation.ElementFromHandle(window).ok()?;
+        let condition=automation.CreateTrueCondition().ok()?;
+        // 首次查询会让网易云异步构建无障碍树，前几次可能只拿到半个树，轮询等它建好。
+        for attempt in 0..6 {
+            if attempt>0 {std::thread::sleep(Duration::from_millis(400));}
+            let Ok(elements)=root.FindAll(TreeScope_Descendants,&condition) else{continue;};
+            for index in 0..elements.Length().unwrap_or(0) {
+                let Ok(element)=elements.GetElement(index) else{continue;};
+                if element.CurrentControlType().map(|kind|kind.0).unwrap_or_default()!=50000 {continue;}
+                let name=element.CurrentName().map(|name|name.to_string()).unwrap_or_default();
+                if mode_from_button(&name).is_some(){return Some(element);}
+            }
+        }
+        None
+    }
+}
+
+/// 读当前播放模式；首次读取会让网易云构建无障碍树，耗时约一秒。
+#[cfg(windows)]
+fn read_play_mode()->Option<PlayMode> {
+    let button=mode_button()?;
+    let name=unsafe{button.CurrentName().ok()?.to_string()};
+    mode_from_button(&name)
+}
+
+/// 点击模式按钮后的下一个模式。3.1.42 实测顺序：
+/// 随机 → 顺序 → 心动 → 列表循环 → 单曲循环 → 随机。
+fn next_mode(mode:PlayMode)->PlayMode {
+    match mode {
+        PlayMode::Random=>PlayMode::Order,
+        PlayMode::Order=>PlayMode::Heart,
+        PlayMode::Heart=>PlayMode::Cycle,
+        PlayMode::Cycle=>PlayMode::OneCycle,
+        PlayMode::OneCycle=>PlayMode::Random,
+        PlayMode::Unknown=>PlayMode::Unknown,
+    }
+}
+
+/// 底栏按钮行的位置（3.1.42 实测）：播放控制组以暂停键居中，
+/// 按钮行中心距客户区底 40px，模式按钮在水平中心左侧 92px。
+#[cfg(windows)]
+const MODE_BUTTON_FROM_BOTTOM:i32=40;
+#[cfg(windows)]
+const MODE_BUTTON_FROM_CENTER:i32=92;
+
+/// 点一下底栏的模式按钮。和进度条一样只投递窗口消息：
+/// 不显示窗口、不动光标、不抢前台，网易云收在托盘时也能点。
+#[cfg(windows)]
+fn click_mode_button()->bool {
+    use windows::Win32::Foundation::{LPARAM,RECT,WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{GetClientRect,PostMessageW,WM_LBUTTONDOWN,WM_LBUTTONUP,WM_MOUSEMOVE};
+    const MK_LBUTTON:usize=0x0001;
+    let Some(window)=render_widget() else{trace("mode: 找不到渲染窗口");return false;};
+    unsafe{
+        let mut rect=RECT::default();
+        if GetClientRect(window,&mut rect).is_err(){trace("mode: GetClientRect 失败");return false;}
+        let (width,height)=(rect.right-rect.left,rect.bottom-rect.top);
+        if width<400 || height<300 {trace(&format!("mode: 客户区过小 {width}x{height}"));return false;}
+        let x=width/2-MODE_BUTTON_FROM_CENTER;
+        let y=height-MODE_BUTTON_FROM_BOTTOM;
+        let point=((y as isize)<<16)|(x as isize & 0xFFFF);
+        trace(&format!("mode: client={width}x{height} point=({x},{y})"));
+        let _=PostMessageW(window,WM_MOUSEMOVE,WPARAM(0),LPARAM(point));
+        std::thread::sleep(Duration::from_millis(40));
+        let _=PostMessageW(window,WM_LBUTTONDOWN,WPARAM(MK_LBUTTON),LPARAM(point));
+        std::thread::sleep(Duration::from_millis(50));
+        let _=PostMessageW(window,WM_LBUTTONUP,WPARAM(0),LPARAM(point));
+        std::thread::sleep(Duration::from_millis(120));
+    }
+    true
+}
+
+/// 切到下一个播放模式。点完立刻按固定顺序前移本地状态，图标不用等日志回读就变；
+/// 网易云随后写下的「播放模式切换」事件会以真实值覆盖，偏差最多一帧。
+#[cfg(windows)]
+pub(super) fn cycle_play_mode()->bool {
+    if !click_mode_button(){return false;}
+    if let Some(mode)=Some(next_mode(super::play_mode())).filter(|mode|*mode!=PlayMode::Unknown){super::set_play_mode(mode);}
+    true
+}
+
+/// 启动后补一次模式读取（网易云没切过模式时日志里没有事件）。
+/// 只在窗口本来就可见时读，不为了读模式去弹窗口。
+#[cfg(windows)]
+pub(super) fn probe_play_mode_once() {
+    use std::sync::atomic::Ordering;
+    use windows::core::{w,PCWSTR};
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW,IsWindowVisible};
+    if super::play_mode()!=PlayMode::Unknown {return;}
+    if MODE_PROBED.load(Ordering::Relaxed) {return;}
+    // 先便宜地看一眼窗口：收在托盘时 UIA 树是空的，读了也是白读，别为此反复起线程。
+    let visible=unsafe{FindWindowW(w!("OrpheusBrowserHost"),PCWSTR::null())
+        .map(|window|IsWindowVisible(window).as_bool()).unwrap_or(false)};
+    if !visible {return;}
+    if MODE_PROBED.swap(true,Ordering::Relaxed) {return;}
+    std::thread::spawn(||{
+        if let Some(mode)=read_play_mode(){super::set_play_mode(mode);}
+    });
+}
+
+/// 定位过程的诊断日志：只在 debug 构建里写到临时目录，发布版本是空实现。
+fn trace(message:&str){
+    #[cfg(debug_assertions)]{
+        use std::io::Write;
+        let stamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_secs()).unwrap_or(0);
+        if let Ok(mut file)=std::fs::OpenOptions::new().create(true).append(true).open(std::env::temp_dir().join("daozai-seek.log")){
+            let _=writeln!(file,"[{stamp}] {message}");
+        }
+    }
+    #[cfg(not(debug_assertions))] let _=message;
+}
+
+/// 底栏高度与进度条在其中的位置按 3.1.42 实测：进度条在底栏顶部，距客户区底 82px。
+#[cfg(windows)]
+fn click_progress(fraction:f64)->bool {
+    use windows::Win32::Foundation::{LPARAM,RECT,WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{GetClientRect,PostMessageW,WM_LBUTTONDOWN,WM_LBUTTONUP,WM_MOUSEMOVE};
+    const BAR_FROM_BOTTOM:i32=82;
+    const BAR_MARGIN:f64=8.0;
+    const MK_LBUTTON:usize=0x0001;
+    // 只把消息投给 CEF 的渲染子窗口：抬前台或移动光标都会打断用户，而顶层窗口不处理鼠标消息。
+    let Some(window)=render_widget() else{trace("click: 找不到渲染窗口");return false;};
+    unsafe{
+        let mut rect=RECT::default();
+        if GetClientRect(window,&mut rect).is_err(){trace("click: GetClientRect 失败");return false;}
+        let (width,height)=(rect.right-rect.left,rect.bottom-rect.top);
+        if width<400 || height<300 {trace(&format!("click: 客户区过小 {width}x{height}"));return false;}
+        let x=(BAR_MARGIN+fraction.clamp(0.0,1.0)*(width as f64-BAR_MARGIN*2.0)) as i32;
+        let y=height-BAR_FROM_BOTTOM;
+        let point=((y as isize)<<16)|(x as isize & 0xFFFF);
+        trace(&format!("click: frac={fraction:.3} client={width}x{height} point=({x},{y})"));
+        let _=PostMessageW(window,WM_MOUSEMOVE,WPARAM(0),LPARAM(point));
+        std::thread::sleep(Duration::from_millis(40));
+        let _=PostMessageW(window,WM_LBUTTONDOWN,WPARAM(MK_LBUTTON),LPARAM(point));
+        std::thread::sleep(Duration::from_millis(50));
+        let _=PostMessageW(window,WM_LBUTTONUP,WPARAM(0),LPARAM(point));
+    }
+    true
+}
+
+/// 网易云的鼠标事件由 CEF 的渲染窗口接收：
+/// OrpheusBrowserHost → CefBrowserWindow → Chrome_WidgetWin_0 → Chrome_RenderWidgetHostHWND。
+#[cfg(windows)]
+fn render_widget()->Option<windows::Win32::Foundation::HWND>{
+    use windows::core::w;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW,GetClassNameW,GetWindow,GW_CHILD,GW_HWNDNEXT};
+    unsafe fn child(parent:HWND,class:&str)->Option<HWND>{
+        let mut child=GetWindow(parent,GW_CHILD).ok()?;
+        loop {
+            let mut name=[0u16;128];
+            let length=GetClassNameW(child,&mut name) as usize;
+            if String::from_utf16_lossy(&name[..length.min(128)])==class {return Some(child);}
+            child=GetWindow(child,GW_HWNDNEXT).ok()?;
+        }
+    }
+    unsafe{
+        let top=FindWindowW(w!("OrpheusBrowserHost"),None).ok()?;
+        let cef=child(top,"CefBrowserWindow")?;
+        let host=child(cef,"Chrome_WidgetWin_0")?;
+        child(host,"Chrome_RenderWidgetHostHWND")
+    }
+}
+
+/// 秒 → 进度条比例。时长未知时不猜，直接放弃（宁可不跳，也不要跳错位置）。
+fn seek_fraction(seconds:f64,duration:f64)->Option<f64>{
+    if !(duration>0.0) || !seconds.is_finite() {return None;}
+    Some((seconds.max(0.0)/duration).clamp(0.0,1.0))
+}
+
+/// 定位到第 `seconds` 秒。日志不上报位置，点击成功后由轮询线程接管本地时间轴。
+/// `fallback` 是界面侧已知的总时长：日志里还没读到元数据时（续播、日志滚动）用它换算。
+#[cfg(windows)]
+pub(super) fn seek(seconds:f64,fallback:f64)->bool {
+    use std::sync::atomic::Ordering;
+    let mut duration=LAST_DURATION_MS.load(Ordering::Relaxed) as f64/1000.0;
+    if !(duration>0.0) {duration=fallback;}
+    let Some(fraction)=seek_fraction(seconds,duration) else{
+        trace(&format!("seek: 没有时长 seconds={seconds:.2} fallback={fallback:.2}"));
+        return false;
+    };
+    trace(&format!("seek: seconds={seconds:.2} duration={duration:.2} frac={fraction:.3}"));
+    if !click_progress(fraction) {trace("seek: 点击失败");return false;}
+    PENDING_SEEK_MS.store((seconds.max(0.0)*1000.0) as i64,Ordering::Relaxed);
+    true
 }
 
 #[cfg(test)]
@@ -368,6 +619,46 @@ mod tests{
         assert_eq!(control_hotkey(Transport::Prev),Some("prev_local"));
         assert_eq!(control_hotkey(Transport::Seek(30.0)),None);
     }
+    #[test]
+    fn play_mode_names_map_to_modes(){
+        use super::super::PlayMode;
+        // 日志：旧 -> 新，取新值
+        assert_eq!(mode_from_event("\"旧播放模式::\",\"playRandom\",\"新播放模式::\",\"playOrder\""),Some(PlayMode::Order));
+        assert_eq!(mode_from_event("\"旧播放模式::\",\"playOrder\",\"新播放模式::\",\"playAi\""),Some(PlayMode::Heart));
+        assert_eq!(mode_from_event("\"旧播放模式::\",\"playAi\",\"新播放模式::\",\"playCycle\""),Some(PlayMode::Cycle));
+        assert_eq!(mode_from_event("\"旧播放模式::\",\"playCycle\",\"新播放模式::\",\"playOneCycle\""),Some(PlayMode::OneCycle));
+        assert_eq!(mode_from_event("\"旧播放模式::\",\"playOneCycle\",\"新播放模式::\",\"playRandom\""),Some(PlayMode::Random));
+        assert_eq!(mode_from_event("没有模式字段"),None);
+        // UIA 按钮名（3.1.42 实测）
+        for (button,mode) in [("shuffle",PlayMode::Random),("order",PlayMode::Order),("heartbeat",PlayMode::Heart),("loop",PlayMode::Cycle),("singleloop",PlayMode::OneCycle)]{
+            assert_eq!(mode_from_button(button),Some(mode),"{button} 应映射到 {}",mode.label());
+        }
+        assert_eq!(mode_from_button("pause"),None);
+    }
+
+    #[test]
+    fn play_mode_cycle_order_matches_the_client(){
+        use super::super::PlayMode;
+        // 3.1.42 实测：随机 → 顺序 → 心动 → 列表循环 → 单曲循环 → 随机。
+        assert_eq!(next_mode(PlayMode::Random),PlayMode::Order);
+        assert_eq!(next_mode(PlayMode::Order),PlayMode::Heart);
+        assert_eq!(next_mode(PlayMode::Heart),PlayMode::Cycle);
+        assert_eq!(next_mode(PlayMode::Cycle),PlayMode::OneCycle);
+        assert_eq!(next_mode(PlayMode::OneCycle),PlayMode::Random);
+        assert_eq!(next_mode(PlayMode::Unknown),PlayMode::Unknown,"当前模式未知时不猜下一个");
+    }
+
+    #[test]
+    fn seek_fraction_maps_seconds_onto_the_bar(){
+        assert_eq!(seek_fraction(50.0,250.0),Some(0.2));
+        assert_eq!(seek_fraction(0.0,250.0),Some(0.0));
+        assert_eq!(seek_fraction(-30.0,250.0),Some(0.0),"-30 秒要贴在左端，不能抛出去");
+        assert_eq!(seek_fraction(999.0,250.0),Some(1.0),"> 时长要贴在右端");
+        assert_eq!(seek_fraction(50.0,0.0),None,"时长未知时不跳");
+        assert_eq!(seek_fraction(50.0,-1.0),None);
+        assert_eq!(seek_fraction(f64::NAN,250.0),None);
+    }
+
     #[test]
     fn native_track_reads_public_album_cover_and_clears_it_on_song_change(){
         let mut state=Playback::default();

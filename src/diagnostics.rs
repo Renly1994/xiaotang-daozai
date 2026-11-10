@@ -43,6 +43,19 @@ pub fn startup(stage:&str) {
     }
 }
 
+/// 轻量生命周期日志：心跳与退出记录共用。文件名由调用方指定，避免互相覆盖。
+///
+/// 进程无声消失时区分三种可能：有退出记录 = 事件循环正常结束；
+/// 有心跳无退出记录且无错误报告 = 被外力终止（或 native 崩溃，需配合系统 dump）。
+pub fn note(file:&str,details:&str) {
+    let directory=daozai::model::config_dir().join("diagnostics");
+    if std::fs::create_dir_all(&directory).is_ok() {
+        let timestamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        let _=std::fs::write(directory.join(file),format!(
+            "岛仔 {}\n进程：{}\n时间（Unix 秒）：{timestamp}\n{details}\n",env!("CARGO_PKG_VERSION"),std::process::id()));
+    }
+}
+
 /// 记录实际使用的图形设备，避免把电脑里的显卡列表误当作当前渲染设备。
 pub fn graphics(cc:&eframe::CreationContext<'_>) {
     use eframe::glow::HasContext;

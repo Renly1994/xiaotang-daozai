@@ -164,6 +164,21 @@ pub fn toggle_mute() -> Option<bool> {
     }
 }
 
+/// 只读主音量，供「拿不到应用音频会话」时兜底。
+#[cfg(windows)]
+pub fn volume() -> Option<(u32, bool)> {
+    unsafe {
+        let a = audio().ok()?;
+        Some((
+            (a.GetMasterVolumeLevelScalar().ok()? * 100.0).round() as u32,
+            a.GetMute().ok()?.as_bool(),
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn volume() -> Option<(u32, bool)> { None }
+
 pub fn idle_seconds() -> f64 {
     unsafe {
         let mut info = LASTINPUTINFO {
