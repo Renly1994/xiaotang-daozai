@@ -577,7 +577,8 @@ impl eframe::App for Shell {
                 cmd @ (Cmd::RequestNotifications|Cmd::RequestQqNotifications)=>{
                     #[cfg(windows)] {self.app.settings.qq_only=matches!(cmd,Cmd::RequestQqNotifications);self.app.settings.read_notifications=true;self.app.settings.save();self.incoming=None;match daozai::system::connect(ctx.clone(),self.app.settings.qq_only){Ok(rx)=>{self.incoming=Some(rx);self.app.listener_status="正在请求 Windows 通知权限…".into();},Err(e)=>self.app.listener_status=format!("Windows 未允许读取通知：{}。需要相应的系统权限或应用身份。",e.code())}}
                 },
-                Cmd::MailSync=>{
+                cmd @ (Cmd::MailSync | Cmd::MailReconnect)=>{
+                    if matches!(cmd,Cmd::MailReconnect){self.mail.sync(&[],self.app.settings.mail_interval);}
                     let enabled=self.app.settings.mail_enabled;
                     let accounts=if enabled{self.app.mail_accounts().to_vec()}else{Vec::new()};
                     self.mail.sync(&accounts,self.app.settings.mail_interval);
