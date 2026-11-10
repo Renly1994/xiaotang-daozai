@@ -32,6 +32,8 @@ pub mod model;
 pub mod otp;
 pub mod quota;
 mod quota_ui;
+pub mod weather;
+mod weather_ui;
 mod pages;
 mod extras;
 mod pet;
