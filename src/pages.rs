@@ -519,8 +519,60 @@ impl App {
         let items = self.shelf.items.clone();
         self.icons.retain(&items);
         self.shelf_x.retain(|p, _| items.contains(p));
+        let ctx = c.ui.ctx();
+        let primary = egui::PointerButton::Primary;
+        let (down, released, held, moved, pointer) = ctx.input(|input| {
+            let pointer = &input.pointer;
+            let held = pointer.press_start_time().map_or(0.0, |start| input.time - start);
+            let moved = pointer.press_origin().zip(pointer.interact_pos())
+                .is_some_and(|(start, current)| start.distance(current) >= 6.0);
+            (pointer.primary_down(), pointer.primary_released(), held, moved, pointer.interact_pos())
+        });
+        let body_pointer = pointer.filter(|pos| row.painter.clip_rect().contains(*pos));
+        let sorting = if down { self.shelf_sort.clone() } else { self.shelf_sort.take() };
+        let source = sorting.as_ref().and_then(|(path, _)| items.iter().position(|item| item == path));
+        if let Some(((path, next_scroll), pos)) = sorting.as_ref().zip(pointer).filter(|_| down) {
+            let x = row.to_local(pos).x;
+            let max_first = n.saturating_sub(5);
+            let next = if x <= 64.0 {
+                self.shelf_first.saturating_sub(1)
+            } else if x >= 355.0 {
+                (self.shelf_first + 1).min(max_first)
+            } else {
+                self.shelf_first
+            };
+            if next != self.shelf_first {
+                let delay = (*next_scroll - self.t).max(0.0);
+                if delay == 0.0 {
+                    self.shelf_first = next;
+                    self.shelf_sort = Some((path.clone(), self.t + 0.20));
+                    ctx.request_repaint();
+                } else {
+                    ctx.request_repaint_after(std::time::Duration::from_secs_f64(delay));
+                }
+            }
+        }
+        let slot_x = |index: usize| center + (index as f32 - scroll - (visible - 1.0) / 2.0) * slot;
+        let destination = source.zip(pointer).map(|(source, pos)| {
+            let before = (((row.to_local(pos).x - slot_x(0)) / slot).ceil() as usize).min(n);
+            before - usize::from(source < before)
+        });
+        if let Some((source, destination)) = source.zip(destination).filter(|(from, to)| from != to) {
+            if released {
+                let item = self.shelf.items.remove(source);
+                self.shelf.items.insert(destination, item);
+                self.shelf.save();
+                ctx.request_repaint();
+                return;
+            }
+        }
         for (i, p) in items.iter().enumerate() {
-            let target = center + (i as f32 - scroll - (visible - 1.0) / 2.0) * slot;
+            let index = match source.zip(destination) {
+                Some((from, to)) if from < i && i <= to => i - 1,
+                Some((from, to)) if to <= i && i < from => i + 1,
+                _ => i,
+            };
+            let target = slot_x(index);
             let born = self.shelf_born.get(p).copied();
             let s = self.shelf_x.entry(p.clone()).or_insert_with(|| {
                 // 新放入的从右侧滑进来；启动时已有的直接就位
@@ -529,7 +581,12 @@ impl App {
             });
             s.target = target;
             s.step(dt);
-            let x = s.pos;
+            let dragging = down && source == Some(i);
+            let x = if dragging {
+                pointer.map_or(s.pos, |pos| row.to_local(pos).x.clamp(40.0, 379.0))
+            } else {
+                s.pos
+            };
             if x < 0.0 || x > 420.0 {
                 continue;
             }
@@ -540,7 +597,7 @@ impl App {
                 continue;
             }
             let r = row.hit_drag(x - 31.0, 30.0, 62.0, 78.0, ("shelf", p));
-            let show_hint=self.shelf_menu_rect.is_none() && !r.context_menu_opened() && !r.secondary_clicked();
+            let show_hint=sorting.is_none() && self.shelf_menu_rect.is_none() && !r.context_menu_opened() && !r.secondary_clicked();
             if show_hint {r.clone().on_hover_text(p.display().to_string());}
             let (h, pr) = row.hover_t(&r);
             let cc = row.faded(a).scaled(x, 66.0, 1.0 - 0.04 * pr);
@@ -554,7 +611,19 @@ impl App {
             cc.text(x, 86.0, &name, size::SMALL, W::Semibold, theme::WHITE, H::Center);
             let meta=self.icons.get(c.ui.ctx(),p).map(|preview|preview.metadata).unwrap_or_default();
             cc.text(x, 99.0, &meta, size::TINY, W::Regular, theme::GRAY, H::Center);
-            if r.drag_started() && p.exists() {cmds.push(Cmd::DragFile(p.clone()));}
+            if dragging {
+                cc.stroke(x - 31.0, 30.0, 62.0, 78.0, 10.0, 1.5, theme::WHITE);
+            } else if sorting.is_none() && down && r.is_pointer_button_down_on() {
+                let hold = 0.4 - held;
+                if hold <= 0.0 || (moved && r.dragged_by(primary) && body_pointer.is_some()) {
+                    self.shelf_sort = Some((p.clone(), self.t + 0.20));
+                    ctx.request_repaint();
+                } else if moved && r.dragged_by(primary) && p.exists() {
+                    cmds.push(Cmd::DragFile(p.clone()));
+                } else {
+                    ctx.request_repaint_after(std::time::Duration::from_secs_f64(hold));
+                }
+            }
             let remove=row.hit(x+15.0,30.0,17.0,18.0,("shelf-remove",p));
             let remove_card=row.faded(a);
             remove_card.circle(x+23.5,39.0,7.5,Color32::from_rgb(55,40,46));
@@ -569,7 +638,7 @@ impl App {
                 self.shelf_menu_rect=Some(egui::Frame::menu(ui.style()).widget_rect(ui.min_rect()));
             });
             if delete { self.shelf.remove(p); self.icons.remove(p); self.shelf_x.remove(p); self.shelf_born.remove(p); self.shelf_first=self.shelf_first.min(self.shelf.items.len().saturating_sub(5)); }
-            else if r.clicked() { if p.exists(){cmds.push(Cmd::Open(p.clone()));} else {self.say("文件已移动或删除，可从置物架移除");} }
+            else if r.clicked() && sorting.is_none() { if p.exists(){cmds.push(Cmd::Open(p.clone()));} else {self.say("文件已移动或删除，可从置物架移除");} }
         }
     }
 

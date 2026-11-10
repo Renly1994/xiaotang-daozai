@@ -1575,10 +1575,38 @@ fn wheel_scrolls_lists_only_inside_content_and_respects_edges(){
         h.wheel(-40.0);
         assert_eq!(h.app.page,page,"有更多内容时应先滚动列表");
         assert_eq!(if page==3 {h.app.shelf_first}else{h.app.todo_first},1);
-        h.hover(H::local(300.0,60.0),0.25);h.wheel(-40.0);
+        h.hover(H::local(300.0,60.0),0.6);h.wheel(-40.0);
         assert_eq!(h.app.page,if page==3 {page+1}else{page},"待办溢出时滚到底也应留在本页");
         h.app.show_page(page);h.hover(H::local(210.0,18.0),0.3);h.wheel(-40.0);
         assert_eq!(h.app.page,page+1,"顶栏滚轮不应被内容列表拦截");
+    }
+}
+
+#[test]
+fn wheel_shelf_edges_require_a_new_gesture_to_turn_the_page() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = H::new();
+    h.app.shelf.items = (0..7).map(|i| format!("file-{i}.txt").into()).collect();
+    let body = H::local(300.0, 60.0);
+    for (delta, edge, page) in [(-40.0, 2, 4), (40.0, 0, 2)] {
+        h.app.shelf_first = 1;
+        h.app.show_page(3);
+        h.hover(body, 1.0);
+        for _ in 0..4 {
+            h.wheel(delta);
+            h.hover(body, 0.3);
+        }
+        assert_eq!(h.app.page, 3);
+        assert_eq!(h.app.shelf_first, edge);
+
+        h.wheel(-delta);
+        assert_eq!(h.app.shelf_first, 1);
+        h.wheel(delta);
+        h.hover(body, 0.6);
+        h.wheel(delta / 10.0);
+        assert_eq!(h.app.page, 3);
+        h.wheel(delta / 10.0);
+        assert_eq!(h.app.page, page);
     }
 }
 
@@ -2228,6 +2256,89 @@ fn timer_counts_elapsed_time_after_sleep() {
     h.t += 60.0;
     h.frame(vec![]);
     assert!(h.app.pomo.remaining < 61.0, "挂起恢复后必须补算实际流逝时间");
+}
+
+#[test]
+fn shelf_long_press_inserts_files_and_persists_the_order() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = H::new();
+    let dir = crate::model::config_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let first = dir.join("first.txt");
+    let second = dir.join("second.txt");
+    let third = dir.join("third.txt");
+    for file in [&first, &second, &third] {
+        std::fs::write(file, "内容").unwrap();
+        h.app.shelf.add(file).unwrap();
+    }
+    h.hover(Pos2::new(WIN_W / 2.0, 12.0), 1.0);
+    h.app.go(3, 1.0);
+    let start = H::local(277.5, 65.0);
+    let end = H::local(134.0, 65.0);
+    h.hover(start, 0.8);
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos, pressed, button: egui::PointerButton::Primary, modifiers: Default::default(),
+    };
+    h.frame(vec![button(start, true)]);
+    h.hover(start, 0.5);
+    h.hover(end, 0.05);
+    assert_eq!(h.app.shelf.items, [first.clone(), second.clone(), third.clone()]);
+    h.frame(vec![button(end, false)]);
+    assert!(!h.cmds.iter().any(|cmd| matches!(cmd, crate::app::Cmd::DragFile(_))));
+    assert_eq!(h.app.shelf.items, [third.clone(), first.clone(), second.clone()]);
+    assert_eq!(crate::model::Shelf::load().items, [third.clone(), first.clone(), second.clone()]);
+
+    h.hover(end, 0.5);
+    h.frame(vec![button(end, true)]);
+    let last = H::local(287.0, 65.0);
+    h.hover(last, 0.05);
+    h.frame(vec![button(last, false)]);
+    assert!(!h.cmds.iter().any(|cmd| matches!(cmd, crate::app::Cmd::DragFile(_))));
+    assert_eq!(crate::model::Shelf::load().items, [first, second, third]);
+}
+
+
+#[test]
+fn shelf_drag_scrolls_to_both_ends_and_inserts_beyond_the_initial_view() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = H::new();
+    let files: Vec<_> = (0..9).map(|i| crate::model::config_dir().join(format!("item-{i}.txt"))).collect();
+    h.app.shelf.items = files.clone();
+    h.hover(Pos2::new(WIN_W / 2.0, 12.0), 1.0);
+    h.app.go(3, 1.0);
+    let left = H::local(45.0, 65.0);
+    let right = H::local(373.0, 65.0);
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos, pressed, button: egui::PointerButton::Primary, modifiers: Default::default(),
+    };
+    for (start, edge, scroll) in [(H::local(74.0, 65.0), right, 4), (H::local(345.0, 65.0), left, 0)] {
+        h.hover(start, 0.8);
+        h.frame(vec![button(start, true)]);
+        h.hover(start, 0.5);
+        h.hover(H::local(209.5, 230.0), 0.8);
+        assert!(h.app.open, "拖出置物架时应保持展开");
+        h.hover(edge, 1.5);
+        assert_eq!(h.app.shelf_first, scroll);
+        h.frame(vec![button(edge, false)]);
+        let mut expected = files.clone();
+        if scroll != 0 { expected.rotate_left(1); }
+        assert_eq!(h.app.shelf.items, expected);
+        assert_eq!(crate::model::Shelf::load().items, expected);
+    }
+    let start = H::local(74.0, 65.0);
+    let outside = H::local(160.0, 230.0);
+    h.hover(start, 0.8);
+    h.frame(vec![button(start, true)]);
+    h.hover(start, 0.5);
+    h.hover(outside, 0.8);
+    assert!(h.app.open);
+    h.frame(vec![button(outside, false)]);
+    h.hover(outside, 0.8);
+    assert!(!h.app.open);
+    let mut expected = files;
+    expected.swap(0, 1);
+    assert_eq!(h.app.shelf.items, expected);
+    assert_eq!(crate::model::Shelf::load().items, expected);
 }
 
 #[test]

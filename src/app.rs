@@ -609,6 +609,7 @@ pub struct App {
     dots: [Spring; 8],
     wheel_delta: f32,
     wheel_at: f64,
+    shelf_scrolled_in_wheel_burst: bool,
     wheel_page_at: f64,
 
     // 拖入
@@ -619,6 +620,7 @@ pub struct App {
     // 置物架
     pub(crate) shelf_scroll: Spring,
     pub(crate) shelf_first: usize,
+    pub(crate) shelf_sort: Option<(PathBuf, f64)>,
     pub(crate) shelf_menu_rect: Option<Rect>,
     pub(crate) shelf_x: HashMap<PathBuf, Spring>,
     pub(crate) shelf_born: HashMap<PathBuf, f64>,
@@ -770,12 +772,14 @@ impl App {
             dots: std::array::from_fn(|i| Spring::new(if i == initial_page { 16.0 } else { 4.0 }, 380.0, 0.86)),
             wheel_delta: 0.0,
             wheel_at: -1.0,
+            shelf_scrolled_in_wheel_burst: false,
             wheel_page_at: -1.0,
             drag_hot: false,
             drag_a: 0.0,
             drag_saved: None,
             shelf_scroll: Spring::new(0.0, 300.0, 0.9),
             shelf_first: 0,
+            shelf_sort: None,
             shelf_menu_rect: None,
             shelf_x: HashMap::new(),
             shelf_born: HashMap::new(),
@@ -1618,6 +1622,9 @@ impl App {
                 else {
                     // 累积高精度滚轮的小幅输入；停顿或反向时丢弃上一段余量。
                     if self.t-self.wheel_at>0.18 || self.wheel_delta*scroll<0.0 {self.wheel_delta=0.0;}
+                    if self.t - self.wheel_at >= 0.55 {
+                        self.shelf_scrolled_in_wheel_burst = false;
+                    }
                     self.wheel_at=self.t;
                     self.wheel_delta+=scroll;
                     if self.wheel_delta.abs()>=8.0 {
@@ -1627,13 +1634,14 @@ impl App {
                         let calendar_body=self.page==CALENDAR_PAGE && Rect::from_min_max(Pos2::new(163.0,52.0),Pos2::new(378.0,208.0)).contains(cursor);
                         let clipboard_tab=self.page==3 && self.shelf_tab==1;
                         let clipboard_body=clipboard_tab && Rect::from_min_max(Pos2::new(42.0,31.0),Pos2::new(377.0,124.0)).contains(cursor);
+                        let shelf_body=self.page==3 && !clipboard_tab && Rect::from_min_max(Pos2::new(36.0,28.0),Pos2::new(383.0,128.0)).contains(cursor);
                         let list=match self.page {
                             CALENDAR_PAGE if calendar_body=>Some((&mut self.calendar.view.first,calendar_max)),
                             4 if Rect::from_min_max(Pos2::new(196.0,31.0),Pos2::new(377.0,124.0)).contains(cursor)
                                 =>Some((&mut self.todo_first,self.todos.items.len().saturating_sub(3))),
                             3 if clipboard_body
                                 =>Some((&mut self.clip_first,self.clipboard.lock().items.len().saturating_sub(crate::pages::CLIP_ROWS))),
-                            3 if !clipboard_tab && Rect::from_min_max(Pos2::new(36.0,28.0),Pos2::new(383.0,128.0)).contains(cursor)
+                            3 if shelf_body
                                 =>Some((&mut self.shelf_first,self.shelf.items.len().saturating_sub(5))),
                             _=>None,
                         };
@@ -1642,8 +1650,12 @@ impl App {
                             let target=if next {(*first+1).min(max)}else{first.saturating_sub(1)};
                             let changed=target!=*first;*first=target;changed
                         });
-                        // 内容溢出时滚动列表并停在边界；未溢出时滚轮翻页。
-                        if !scrolled && !content_scrolls && !self.todo_choosing && self.t-self.wheel_page_at>=0.20 {
+                        if shelf_body && scrolled {
+                            self.shelf_scrolled_in_wheel_burst = true;
+                        }
+                        let shelf_inertia = shelf_body && self.shelf_scrolled_in_wheel_burst;
+                        // 置物架滚到头后，等这一段滚轮输入结束，再允许翻页。
+                        if !scrolled && !content_scrolls && !shelf_inertia && !self.todo_choosing && self.t-self.wheel_page_at>=0.20 {
                             self.navigate_page(next);
                             self.wheel_page_at=self.t;
                         }
@@ -1652,7 +1664,9 @@ impl App {
                 }
             }
         } else {self.wheel_delta=0.0;}
-        let want = (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open);
+        let sorting_shelf = self.open && self.page == 3 && self.shelf_tab == 0
+            && self.shelf_sort.is_some() && ctx.input(|i| i.pointer.primary_down());
+        let want = sorting_shelf || (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open);
         self.morph(want, inside, env.t, dt);
         self.update_pet(env, cx);
 
