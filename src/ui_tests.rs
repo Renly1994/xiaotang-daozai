@@ -634,6 +634,12 @@ impl H {
     fn wheel(&mut self,delta:f32) {
         self.frame(vec![egui::Event::MouseWheel{unit:egui::MouseWheelUnit::Point,delta:Vec2::new(0.0,delta),modifiers:Default::default()}]);
     }
+    fn swipe(&mut self,delta_x:f32) {
+        self.frame(vec![egui::Event::MouseWheel{unit:egui::MouseWheelUnit::Point,delta:Vec2::new(delta_x,0.0),modifiers:Default::default()}]);
+    }
+    fn touch(&mut self,phase:egui::TouchPhase,id:u64,pos:Pos2) {
+        self.frame(vec![egui::Event::Touch{device_id:egui::TouchDeviceId(0),id:egui::TouchId::from(id),phase,pos,force:None}]);
+    }
     fn picker_frame(&mut self,events:Vec<egui::Event>){
         self.frame(events);
     }
@@ -1633,6 +1639,152 @@ fn wheel_handles_small_deltas_without_skipping_pages_on_bursts(){
     h.hover(H::local(210.0,18.0),0.3);
     for _ in 0..5 {h.wheel(-40.0);}
     assert_eq!(h.app.page,2,"一次连续滚动不能瞬间跳过多个页面");
+}
+
+#[test]
+fn trackpad_swipe_turns_pages_in_the_finger_direction_and_ignores_jitter(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.hover(H::local(210.0,18.0),0.3);
+    for _ in 0..4 {h.swipe(5.0);}
+    assert_eq!(h.app.page,0,"不到 24 点的横向抖动不能翻页");
+    h.swipe(5.0);
+    assert_eq!(h.app.page,1,"手指向左（正的横向增量）应到下一页");
+    h.hover(H::local(210.0,18.0),0.3);
+    for _ in 0..5 {h.swipe(40.0);}
+    assert_eq!(h.app.page,2,"一次连续左滑不能跳过多个页面");
+    h.hover(H::local(210.0,18.0),0.3);
+    h.swipe(-40.0);
+    assert_eq!(h.app.page,1,"手指向右应回到上一页");
+    h.hover(H::local(210.0,18.0),0.3);
+    h.frame(vec![egui::Event::MouseWheel{unit:egui::MouseWheelUnit::Point,delta:Vec2::new(3.0,-40.0),modifiers:Default::default()}]);
+    assert_eq!(h.app.page,2,"竖向滚轮仍向下翻页，少量横向分量不能抢走这次滚动");
+}
+
+#[test]
+fn horizontal_swipe_changes_pages_over_a_list_without_scrolling_it(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.shelf.items=(0..6).map(|i|std::path::PathBuf::from(format!("swipe-shelf-{i}.txt"))).collect();
+    h.app.show_page(3);h.hover(H::local(300.0,60.0),1.0);
+    h.swipe(40.0);
+    assert_eq!(h.app.page,4,"列表上的左右滑应直接翻页");
+    assert_eq!(h.app.shelf_first,0,"左右滑不能把置物架当成竖向滚动");
+    h.app.show_page(3);h.hover(H::local(300.0,60.0),0.3);h.wheel(-40.0);
+    assert_eq!(h.app.page,3,"同一位置的竖向滚轮仍然先滚列表");
+    assert_eq!(h.app.shelf_first,1);
+}
+
+#[test]
+fn click_still_changes_pages_after_a_small_swipe(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    h.swipe(4.0);
+    h.hover(H::local(300.0,60.0),0.2);
+    h.click(H::local(398.0,68.0));
+    assert_eq!(h.app.page,1,"轻微滑动之后点击下一页仍然有效");
+}
+
+#[test]
+fn touch_swipe_turns_pages_in_the_finger_direction_and_ignores_jitter(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.hover(H::local(210.0,18.0),0.3);
+    let origin=H::local(210.0,18.0);
+    h.touch(egui::TouchPhase::Start,1,origin);
+    for step in 1..=4 {h.touch(egui::TouchPhase::Move,1,origin+Vec2::new(-5.0*step as f32,0.0));}
+    assert_eq!(h.app.page,0,"不到 24 点的触摸抖动不能翻页");
+    h.touch(egui::TouchPhase::Move,1,origin+Vec2::new(-25.0,0.0));
+    assert_eq!(h.app.page,1,"手指向左应到下一页");
+    h.hover(H::local(210.0,18.0),0.3);
+    let mut pos=origin+Vec2::new(-25.0,0.0);
+    for _ in 0..5 {
+        pos.x-=40.0;
+        h.touch(egui::TouchPhase::Move,1,pos);
+    }
+    assert_eq!(h.app.page,2,"一次连续左滑不能跳过多个页面");
+    h.hover(H::local(210.0,18.0),0.3);
+    pos.x+=40.0;
+    h.touch(egui::TouchPhase::Move,1,pos);
+    assert_eq!(h.app.page,1,"手指向右应回到上一页");
+    h.touch(egui::TouchPhase::End,1,pos);
+    h.hover(H::local(210.0,18.0),0.3);
+    h.frame(vec![egui::Event::MouseWheel{unit:egui::MouseWheelUnit::Point,delta:Vec2::new(3.0,-40.0),modifiers:Default::default()}]);
+    assert_eq!(h.app.page,2,"竖向滚轮仍向下翻页，触摸手势结束后触控板路径不变");
+}
+
+#[test]
+fn touch_swipe_changes_pages_over_a_list_without_scrolling_it(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.shelf.items=(0..6).map(|i|std::path::PathBuf::from(format!("touch-shelf-{i}.txt"))).collect();
+    h.app.show_page(3);h.hover(H::local(300.0,60.0),1.0);
+    let origin=H::local(300.0,60.0);
+    h.touch(egui::TouchPhase::Start,1,origin);
+    h.touch(egui::TouchPhase::Move,1,origin+Vec2::new(-40.0,3.0));
+    assert_eq!(h.app.page,4,"列表上的左右滑应直接翻页");
+    assert_eq!(h.app.shelf_first,0,"左右滑不能把置物架当成竖向滚动");
+    h.touch(egui::TouchPhase::End,1,origin+Vec2::new(-40.0,3.0));
+    h.app.show_page(3);h.hover(H::local(300.0,60.0),0.3);
+    h.touch(egui::TouchPhase::Start,2,origin);
+    h.touch(egui::TouchPhase::Move,2,origin+Vec2::new(-3.0,-40.0));
+    assert_eq!(h.app.page,3,"竖向分量更大时仍先滚列表");
+    assert_eq!(h.app.shelf_first,1,"手指上滑应让列表跟上手指");
+    h.touch(egui::TouchPhase::End,2,origin+Vec2::new(-3.0,-40.0));
+    h.app.shelf_first=0;
+    h.hover(H::local(300.0,60.0),0.3);h.wheel(-40.0);
+    assert_eq!(h.app.page,3,"竖向滚轮在这次触摸之后仍然先滚列表");
+    assert_eq!(h.app.shelf_first,1);
+}
+
+#[test]
+fn click_still_changes_pages_after_a_small_touch_swipe(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    let origin=H::local(300.0,60.0);
+    h.touch(egui::TouchPhase::Start,1,origin);
+    h.touch(egui::TouchPhase::Move,1,origin+Vec2::new(-4.0,1.0));
+    h.touch(egui::TouchPhase::End,1,origin+Vec2::new(-4.0,1.0));
+    h.hover(H::local(300.0,60.0),0.2);
+    h.click(H::local(398.0,68.0));
+    assert_eq!(h.app.page,1,"轻微触摸滑动之后点击下一页仍然有效");
+}
+
+#[test]
+fn touch_lift_discards_partial_swipe_and_mouse_drag_does_not_turn_pages(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.hover(H::local(210.0,18.0),0.3);
+    let origin=H::local(210.0,18.0);
+    h.touch(egui::TouchPhase::Start,1,origin);
+    h.touch(egui::TouchPhase::Move,1,origin+Vec2::new(-20.0,0.0));
+    h.touch(egui::TouchPhase::End,1,origin+Vec2::new(-20.0,0.0));
+    h.touch(egui::TouchPhase::Start,2,origin);
+    h.touch(egui::TouchPhase::Move,2,origin+Vec2::new(-20.0,0.0));
+    assert_eq!(h.app.page,0,"松手会丢掉没过线的余量，不能和下一笔加在一起");
+    h.touch(egui::TouchPhase::End,2,origin+Vec2::new(-20.0,0.0));
+    let dragged=origin+Vec2::new(-80.0,0.0);
+    h.frame(vec![egui::Event::PointerButton{pos:origin,button:egui::PointerButton::Primary,pressed:true,modifiers:Default::default()}]);
+    h.frame(vec![egui::Event::PointerMoved(dragged)]);
+    h.frame(vec![egui::Event::PointerButton{pos:dragged,button:egui::PointerButton::Primary,pressed:false,modifiers:Default::default()}]);
+    assert_eq!(h.app.page,0,"普通鼠标拖动不翻页");
+    h.touch(egui::TouchPhase::Start,3,origin);
+    h.touch(egui::TouchPhase::Start,4,origin+Vec2::new(0.0,28.0));
+    h.touch(egui::TouchPhase::Move,3,origin+Vec2::new(-80.0,0.0));
+    assert_eq!(h.app.page,0,"第二根手指按下时不把单指滑动当成翻页");
+    h.touch(egui::TouchPhase::End,3,origin+Vec2::new(-80.0,0.0));
+    h.touch(egui::TouchPhase::End,4,origin+Vec2::new(0.0,28.0));
+    h.swipe(40.0);
+    assert_eq!(h.app.page,1,"双指触摸没有吃掉触控板横滑");
+}
+
+#[test]
+fn touch_swipe_keeps_the_island_open_when_the_mouse_cursor_is_elsewhere(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.hover(H::local(210.0,18.0),0.3);
+    assert!(h.app.open && h.app.reveal>0.95);
+    let origin=H::local(210.0,18.0);
+    h.touch(egui::TouchPhase::Start,1,origin);
+    h.cursor=Some(Pos2::new(8.0,260.0));
+    for _ in 0..20 {h.frame(vec![]);}
+    assert!(h.app.open,"手指还按在岛上时，系统光标不在岛上也不应收起");
+    h.touch(egui::TouchPhase::Move,1,origin+Vec2::new(-40.0,0.0));
+    assert_eq!(h.app.page,1,"触摸点在岛内就应翻页，不依赖 GetCursorPos");
 }
 
 #[test]
