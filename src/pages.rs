@@ -37,14 +37,14 @@ fn cover_colors(title: &str) -> (Color32, Color32) {
 impl App {
     // ================= 音乐 =================
     pub(crate) fn page_music(&mut self, c: &Card, _env: &Env, cmds: &mut Vec<Cmd>) {
-        let np=self.media.clone();
-        let has=!np.title.is_empty();
+        let has=self.show_music();
+        let np=if has {self.media.clone()}else{Default::default()};
         let with_lyrics=has && self.show_lyrics;
         let ctx=c.ui.ctx().clone();
         let playing_t=ctx.animate_bool_with_time(egui::Id::new("np-playing"),np.playing,0.22);
         let art_size=if with_lyrics {44.0}else{62.0};
         let art_y=if with_lyrics {23.0}else{13.0};
-        if let Some((image,texture))=&self.music_artwork {
+        if let Some((image,texture))=self.music_artwork.as_ref().filter(|_|has) {
             let [w,h]=image.size;
             let (uw,vh)=if w>h {(h as f32/w as f32,1.0)}else{(1.0,w as f32/h as f32)};
             let uv=Rect::from_center_size(Pos2::new(0.5,0.5),egui::vec2(uw,vh));
@@ -80,7 +80,8 @@ impl App {
         let position=seek_position.unwrap_or(np.position);
         let frac=if np.duration>0.0 {(position/np.duration).clamp(0.0,1.0) as f32}else{0.0};
         let (time_y,time_size,right)=if with_lyrics {(100.0,10.0,220.0)}else{(97.0,15.0,375.0)};
-        c.text(44.0,time_y,&mmss(position),time_size,W::Regular,tc,H::Left);
+        let elapsed=if has && np.sampled_at.is_none() && seek_position.is_none(){format!("≈{}",mmss(position))}else{mmss(position)};
+        c.text(44.0,time_y,&elapsed,time_size,W::Regular,tc,H::Left);
         let remaining=if has && np.duration<=0.0{"--:--".into()}else{format!("-{}",mmss((np.duration-position).max(0.0)))};
         c.text(right,time_y,&remaining,time_size,W::Regular,tc,H::Right);
         let (bh,_)=c.hover_t(&bar);

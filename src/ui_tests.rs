@@ -892,11 +892,55 @@ fn music_clients_keep_lyrics_across_two_repeat_cycles(){
 }
 
 #[test]
-fn music_without_a_timeline_does_not_invent_elapsed_time(){
+fn music_without_a_timeline_advances_lyrics_and_preserves_pause_position(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.media=crate::smtc::NowPlaying{source:"QQMusic.exe".into(),title:"歌曲".into(),playing:true,playback_type:crate::smtc::MediaKind::Music,..Default::default()};
-    for _ in 0..240{h.frame(vec![]);}
-    assert_eq!(h.app.media.title,"歌曲");assert_eq!(h.app.media.position,0.0);assert_eq!(h.app.media.duration,0.0);
+    h.app.settings.island_lyrics=true;
+    h.media=crate::smtc::NowPlaying{source:"Muyu.exe".into(),title:"歌曲".into(),artist:"歌手".into(),playing:true,
+        playback_type:crate::smtc::MediaKind::Music,..Default::default()};
+    h.frame(vec![]);
+    h.app.set_lyrics("歌曲","歌手",0.0,crate::lyrics::parse_lrc("[00:00]作词：歌手\n[00:05]第一句\n[00:20]第二句"));
+    h.t+=6.0;h.frame(vec![]);
+    assert!((6.0..6.1).contains(&h.app.media.position),"Muyu 持续上报零位置时仍需推进歌词时钟");
+    assert_eq!(h.app.island_lyric().map(|(_,line)|line),Some("第一句"));
+    assert_eq!(h.media.position,0.0,"不得修改播放器原始进度");
+    assert_eq!(h.app.media.duration,0.0,"未知总时长不得编造并用于严格匹配");
+    assert_eq!(h.app.ly.key,"歌曲|歌手|0");
+    h.media.playing=false;h.frame(vec![]);let paused=h.app.media.position;
+    h.t+=30.0;h.frame(vec![]);assert_eq!(h.app.media.position,paused,"暂停期间停止本地计时");
+    h.media.playing=true;h.frame(vec![]);assert_eq!(h.app.media.position,paused,"恢复时不能跳回零或算入暂停时间");
+    h.t+=15.0;h.frame(vec![]);
+    assert_eq!(h.app.island_lyric().map(|(_,line)|line),Some("第二句"));
+}
+
+#[test]
+fn music_without_a_timeline_resets_on_identity_change_and_accepts_real_seek(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.media=crate::smtc::NowPlaying{source:"Muyu.exe".into(),title:"歌曲".into(),artist:"歌手".into(),song_id:Some(1),playing:true,
+        playback_type:crate::smtc::MediaKind::Music,..Default::default()};
+    for change in 0..6 {
+        h.frame(vec![]);h.t+=10.0;h.frame(vec![]);assert!(h.app.media.position>=10.0);
+        match change {
+            0=>h.media.source="other-player.exe".into(),
+            1=>h.media.artist="另一歌手".into(),
+            2=>h.media.album="另一专辑".into(),
+            3=>h.media.title="新歌".into(),
+            4=>h.media.song_id=Some(123),
+            _=>h.media.song_id=Some(456),
+        }
+        h.frame(vec![]);assert_eq!(h.app.media.position,0.0,"切歌或同名歌曲切来源必须重置本地计时");
+    }
+    h.t+=10.0;h.frame(vec![]);
+    h.media.position=45.0;h.media.sampled_at=Some(std::time::Instant::now());h.frame(vec![]);
+    assert!((45.0..45.2).contains(&h.app.media.position),"真实时间轴出现时必须替代估算");
+    h.media.position=0.0;h.media.sampled_at=Some(std::time::Instant::now());h.frame(vec![]);
+    assert!(h.app.media.position<0.2,"真实跳转到开头必须生效");
+    h.media.position=12.0;h.media.sampled_at=Some(std::time::Instant::now());h.frame(vec![]);
+    h.media.sampled_at=None;h.media.position=0.0;h.frame(vec![]);
+    assert!((12.0..12.2).contains(&h.app.media.position),"时间轴暂时消失时从最后真实位置继续计时");
+    h.media=Default::default();h.frame(vec![]);
+    h.media=crate::smtc::NowPlaying{source:"Muyu.exe".into(),title:"歌曲".into(),playing:true,
+        playback_type:crate::smtc::MediaKind::Music,..Default::default()};
+    h.frame(vec![]);assert_eq!(h.app.media.position,0.0,"会话退出后重开必须清除旧进度");
 }
 
 #[test]
@@ -970,6 +1014,107 @@ fn transient_lyric_failures_retry_but_missing_songs_do_not_loop(){
         assert!(!h.app.ly.loading);
         if let Some(at)=h.app.ly.retry_at {assert!((at-h.t-30.0).abs()<0.001,"网络恢复重试应有间隔");}
     }
+}
+
+#[test]
+fn unknown_media_is_shown_only_after_synced_lyrics_confirm_it(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.show_lyrics=true;
+    h.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),source:"Chrome".into(),duration:120.0,playback_type:crate::smtc::MediaKind::Music,..Default::default()};
+    h.frame(vec![]);
+    assert_eq!(h.app.media.kind(),crate::smtc::MediaKind::Unknown);
+    assert!(!h.app.show_music(),"查词反证完成前不能提前显示未知内容");
+    h.app.ly.key="Track|Artist|120".into();
+    let (tx,rx)=std::sync::mpsc::channel();
+    h.app.ly.rx=Some(rx);h.app.ly.loading=true;
+    tx.send(Ok((crate::lyrics::parse_lrc("[00:01.00]第一句\n[00:05.00]第二句"),false))).unwrap();
+    h.app.show_lyrics=false;h.app.settings.island_lyrics=false;
+    h.app.opts.fetch_lyrics=true;
+    h.frame(vec![]);
+    assert!(h.app.show_music(),"严格匹配到同步歌词后应确认音乐");
+    h.frame(vec![]);
+    assert!(h.app.show_music(),"后续 SMTC 刷新不能覆盖确认结果");
+    h.app.show_lyrics=false;
+    h.frame(vec![]);
+    assert!(h.app.show_music(),"关闭歌词显示不能撤销音乐识别结果");
+    h.app.opts.fetch_lyrics=false;
+    h.media.duration=140.0;h.frame(vec![]);
+    assert!(!h.app.show_music(),"曲长改变后必须重新确认，不能沿用其他版本的结论");
+}
+
+#[test]
+fn unknown_media_plain_or_empty_lyrics_do_not_confirm_music(){
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|error|error.into_inner());
+    for lyrics in [crate::lyrics::from_plain("纯文本"),crate::lyrics::parse_lrc("[00:01.00]")] {
+        let mut harness=H::new();
+        harness.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),source:"Chrome".into(),duration:120.0,..Default::default()};
+        harness.frame(vec![]);
+        harness.app.ly.key="Track|Artist|120".into();
+        let (sender,receiver)=std::sync::mpsc::channel();
+        harness.app.ly.rx=Some(receiver);
+        sender.send(Ok((lyrics,false))).unwrap();
+        harness.app.opts.fetch_lyrics=true;
+        harness.frame(vec![]);harness.frame(vec![]);
+        assert!(!harness.app.show_music());
+        assert!(harness.app.ly_worker.is_none(),"匹配结果已处理，下一帧不得重复查询");
+    }
+}
+
+#[test]
+fn unknown_media_page_hides_track_and_controls_until_confirmed(){
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|error|error.into_inner());
+    let mut harness=H::new();
+    harness.media=crate::smtc::NowPlaying{title:"Unconfirmed track".into(),artist:"Artist".into(),source:"Chrome".into(),playing:true,duration:120.0,..Default::default()};
+    harness.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    assert!(!harness.app.show_music());
+    assert!(harness.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(text) if text.galley.text()=="暂无音乐")));
+    harness.click(H::local(210.5,118.0));
+    assert!(!harness.cmds.iter().any(|command|matches!(command,crate::app::Cmd::Media(_))));
+}
+
+#[test]
+fn unknown_media_source_switch_discards_pending_lyrics(){
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|error|error.into_inner());
+    let mut harness=H::new();
+    harness.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),source:"Chrome".into(),duration:120.0,..Default::default()};
+    harness.frame(vec![]);
+    let (sender,receiver)=std::sync::mpsc::channel();
+    harness.app.ly.key="Track|Artist|120".into();harness.app.ly.rx=Some(receiver);
+    harness.media.source="msedge".into();harness.frame(vec![]);
+    assert!(sender.send(Ok((crate::lyrics::parse_lrc("[00:01.00]旧来源"),false))).is_err());
+    assert!(!harness.app.show_music());
+}
+
+#[test]
+fn unknown_media_stays_hidden_when_lyrics_are_not_found(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.show_lyrics=true;
+    h.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),source:"Chrome".into(),duration:120.0,playback_type:crate::smtc::MediaKind::Music,..Default::default()};
+    h.frame(vec![]);
+    assert!(!h.app.show_music());
+    h.app.ly.key="Track|Artist|120".into();
+    let (tx,rx)=std::sync::mpsc::channel();
+    h.app.ly.rx=Some(rx);h.app.ly.loading=true;
+    tx.send(Err(crate::lyrics::FetchError::NotFound)).unwrap();
+    h.app.opts.fetch_lyrics=true;
+    h.frame(vec![]);
+    h.frame(vec![]);
+    assert!(!h.app.show_music(),"严格匹配无结果时不能显示为音乐");
+}
+
+#[test]
+fn unknown_media_without_artist_does_not_start_a_lyrics_request(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.opts.fetch_lyrics=true;h.app.show_lyrics=true;
+    h.media=crate::smtc::NowPlaying{title:"Unknown title".into(),source:"SomePlayer.exe".into(),playing:true,..Default::default()};
+    h.frame(vec![]);
+    assert!(!h.app.show_music());
+    assert!(h.app.ly_worker.is_none(),"缺少歌手时不应发起严格匹配必然失败的请求");
+    h.frame(vec![]);
+    assert!(!h.app.show_music());
 }
 
 #[test]
@@ -2946,6 +3091,7 @@ fn music_seek_drag_previews_and_commits_on_release(){
         let (x,w,y)=if lyrics{(44.0,176.0,82.0)}else{(96.0,221.0,92.6)};
         let press=H::local(x+w*0.1,y);h.cursor=Some(press);
         h.frame(vec![egui::Event::PointerMoved(press)]);
+        assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text().starts_with('≈'))),"本地计时的播放位置应标记为估算");
         h.frame(vec![egui::Event::PointerButton{pos:press,button:egui::PointerButton::Primary,pressed:true,modifiers:Default::default()}]);
         let to=H::local(x+w*0.75,y);h.cursor=Some(to);
         h.frame(vec![egui::Event::PointerMoved(to)]);

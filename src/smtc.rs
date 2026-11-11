@@ -56,13 +56,14 @@ impl NowPlaying {
             return MediaKind::Video;
         }
         let source=self.source.to_lowercase();
-        if matches!(source.as_str(),"kugou"|"kugou.exe"|"qqmusic"|"qqmusic.exe"|"cloudmusic.exe"|"汽水音乐"|"sodamusic.exe"|"spotify"|"spotify.exe"|"kwmusic.exe") && self.playback_type==MediaKind::Music{return MediaKind::Music;}
         if ["chrome","msedge","firefox","brave","opera"].iter().any(|name|source.contains(name)) {
             let album=self.album.trim().to_lowercase();
             if ["youtube","bilibili","抖音","哔哩哔哩"].contains(&album.as_str()){return MediaKind::Video;}
             // 视频作者也可能被放进 Artist；浏览器缺少专辑信息时不自动认作歌曲。
             if album.is_empty(){return MediaKind::Unknown;}
+            if self.artist.trim().is_empty(){return MediaKind::Unknown;}
         }
+        if self.playback_type==MediaKind::Music{return MediaKind::Music;}
         if self.artist.trim().is_empty(){MediaKind::Unknown}else{MediaKind::Music}
     }
 
@@ -246,19 +247,23 @@ fn choose_media(system:Option<NowPlaying>,native:Option<NowPlaying>)->Option<Now
             return Some(media);
         }
     }
-    if system.as_ref().is_some_and(|m|m.playing && m.is_music()){system}
-    else if native.as_ref().is_some_and(|m|m.playing && m.is_music()){native}
-    else if system.as_ref().is_some_and(NowPlaying::is_music){system}
-    else{native.or(system)}
+    match (system,native) {
+        (Some(system),Some(native))=>Some(if media_rank(&system)<=media_rank(&native){system}else{native}),
+        (system,native)=>system.or(native),
+    }
 }
 
 fn media_rank(media:&NowPlaying)->u8{
-    match (media.is_music(),media.playing){(true,true)=>0,(true,false)=>1,(false,true)=>2,_=>3}
+    match (media.kind(),media.playing){
+        (MediaKind::Music,true)=>0,(MediaKind::Unknown,true)=>1,
+        (MediaKind::Music,false)=>2,(MediaKind::Unknown,false)=>3,
+        (MediaKind::Video,true)=>4,(MediaKind::Video,false)=>5,
+    }
 }
 
 fn choose_media_for_source(system:Option<NowPlaying>,native:Option<NowPlaying>,previous:&str,native_pending:bool)->Option<NowPlaying>{
     // 暂停或载入下一首时保留控制对象，其他客户端开始播放则照常切换。
-    if previous.eq_ignore_ascii_case("cloudmusic.exe") && !system.as_ref().is_some_and(|m|m.playing && m.is_music())
+    if previous.eq_ignore_ascii_case("cloudmusic.exe") && !system.as_ref().is_some_and(|m|m.playing && !m.title.trim().is_empty() && m.kind()!=MediaKind::Video)
         && (native.is_some() || native_pending) {
         if native.is_some() && system.as_ref().is_some_and(|m|m.source.eq_ignore_ascii_case(previous)){return choose_media(system,native);}
         return native;
@@ -526,7 +531,7 @@ fn init_winrt() {}
 struct PlaybackClock { previous: Option<NowPlaying> }
 impl PlaybackClock {
     fn update(&mut self, media: &mut NowPlaying) {
-        if !media.is_music() || media.sampled_at.is_none() {
+        if media.kind()==MediaKind::Video || media.title.trim().is_empty() || media.sampled_at.is_none() {
             self.previous=None;
             return;
         }
@@ -567,6 +572,19 @@ fn kugou_repeated_samples_do_not_freeze_lyrics() {
         assert_eq!(media.sampled_at,Some(now));
         assert_eq!(media.position,position);
     }
+}
+
+#[test]
+fn unknown_media_repeated_samples_keep_the_clock_running() {
+    let mut clock=PlaybackClock::default();
+    let start=std::time::Instant::now();
+    let mut media=NowPlaying{source:"Chrome".into(),title:"Track".into(),artist:"Artist".into(),playback_type:MediaKind::Music,
+        position:10.0,duration:120.0,playing:true,sampled_at:Some(start),..Default::default()};
+    assert_eq!(media.kind(),MediaKind::Unknown);
+    clock.update(&mut media);
+    media.sampled_at=Some(start+Duration::from_secs(1));
+    clock.update(&mut media);
+    assert_eq!(media.sampled_at,Some(start));
 }
 
 #[test]
@@ -711,6 +729,124 @@ pub fn spawn_poller(state: Shared,ctx:eframe::egui::Context)->Poller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn any_music_player_is_accepted_not_only_whitelist() {
+        for source in ["AppleMusic.exe", "lx-music.exe", "listen1.exe", "foobar2000.exe", "UnlistedPlayer_123!App",
+                       "AIMP.exe", "MusicBee.exe", "YesPlayMusic.exe", "PotPlayer.exe",
+                       "spotify.exe", "kwmusic.exe", "cloudmusic.exe", "QQMusic.exe"] {
+            let np = NowPlaying {
+                title: "测试歌曲".into(),
+                source: source.into(),
+                playback_type: MediaKind::Music,
+                playing: true,
+                ..Default::default()
+            };
+            assert_eq!(np.kind(), MediaKind::Music, "{source} 应被识别为音乐");
+        }
+    }
+
+    #[test]
+    fn playing_unknown_session_can_be_checked_while_another_player_is_paused(){
+        let candidate=NowPlaying{title:"Track".into(),artist:"Artist".into(),source:"Chrome".into(),playing:true,..Default::default()};
+        let paused=NowPlaying{title:"Paused track".into(),artist:"Artist".into(),source:"cloudmusic.exe".into(),..Default::default()};
+        let video=NowPlaying{title:"Video".into(),playing:true,playback_type:MediaKind::Video,..Default::default()};
+        assert!(media_rank(&candidate)<media_rank(&paused));
+        assert!(media_rank(&candidate)<media_rank(&video));
+        let selected=choose_media_for_source(Some(candidate),Some(paused),"cloudmusic.exe",false).unwrap();
+        assert_eq!(selected.source,"Chrome");
+    }
+
+    #[test]
+    fn unknown_type_with_artist_becomes_music() {
+        let np = NowPlaying {
+            title: "歌曲".into(),
+            artist: "歌手".into(),
+            source: "SomePlayer.exe".into(),
+            playback_type: MediaKind::Unknown,
+            ..Default::default()
+        };
+        assert_eq!(np.kind(), MediaKind::Music);
+    }
+
+    #[test]
+    fn unknown_type_without_artist_stays_unknown() {
+        let np = NowPlaying {
+            title: "可能是歌曲也可能是视频".into(),
+            source: "SomePlayer.exe".into(),
+            playback_type: MediaKind::Unknown,
+            ..Default::default()
+        };
+        assert_eq!(np.kind(), MediaKind::Unknown);
+    }
+
+    #[test]
+    fn video_type_is_still_excluded() {
+        let np = NowPlaying {
+            title: "视频标题".into(),
+            source: "SomePlayer.exe".into(),
+            playback_type: MediaKind::Video,
+            ..Default::default()
+        };
+        assert_eq!(np.kind(), MediaKind::Video);
+    }
+
+    #[test]
+    fn video_title_suffix_is_still_excluded() {
+        for title in ["小唐的Token的抖音 - 抖音", "Movie - YouTube", "视频_哔哩哔哩_bilibili"] {
+            let np = NowPlaying {
+                title: title.into(),
+                artist: "作者".into(),
+                source: "Chrome".into(),
+                playback_type: MediaKind::Music,
+                ..Default::default()
+            };
+            assert_eq!(np.kind(), MediaKind::Video, "{title} 应被排除为视频");
+        }
+    }
+
+    #[test]
+    fn browser_without_album_stays_unknown() {
+        let np = NowPlaying {
+            title: "页面标题".into(),
+            artist: "作者".into(),
+            source: "Chrome".into(),
+            playback_type: MediaKind::Music,
+            ..Default::default()
+        };
+        assert_eq!(np.kind(), MediaKind::Unknown);
+    }
+
+    #[test]
+    fn browser_with_music_album_is_music() {
+        let mut np = NowPlaying {
+            title: "歌曲".into(),
+            artist: "歌手".into(),
+            album: "专辑".into(),
+            source: "Chrome".into(),
+            playback_type: MediaKind::Music,
+            ..Default::default()
+        };
+        assert_eq!(np.kind(), MediaKind::Music);
+        np.artist.clear();
+        assert_eq!(np.kind(), MediaKind::Unknown);
+    }
+
+    #[test]
+    fn browser_with_video_album_is_video() {
+        for album in ["YouTube", "bilibili", "抖音", "哔哩哔哩"] {
+            let np = NowPlaying {
+                title: "视频".into(),
+                artist: "作者".into(),
+                album: album.into(),
+                source: "Chrome".into(),
+                playback_type: MediaKind::Music,
+                ..Default::default()
+            };
+            assert_eq!(np.kind(), MediaKind::Video, "专辑 {album} 应被排除为视频");
+        }
+    }
+
     #[test]
     #[cfg(windows)]
     fn resource_media_metadata_cannot_feed_unbounded_text_to_the_renderer(){
@@ -1067,7 +1203,7 @@ mod tests {
         assert_eq!(np.kind(),MediaKind::Video,"浏览器错误上报音乐类型时仍应识别明确的视频标题");
         np.title="Movie - YouTube".into();assert_eq!(np.kind(),MediaKind::Video);
         np.title="阿拉斯加海湾".into();np.artist="蓝心羽".into();assert!(np.is_music());
-        np.artist.clear();assert_eq!(np.kind(),MediaKind::Unknown,"只有页面标题不能确认是歌曲");
+        np.artist.clear();assert_eq!(np.kind(),MediaKind::Music,"SMTC 报告 Music 时即使无歌手也信任");
     }
 
     #[test]

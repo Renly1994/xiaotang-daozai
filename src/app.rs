@@ -659,8 +659,10 @@ pub struct App {
     pub(crate) ly_worker: Option<std::thread::JoinHandle<()>>,
     pub(crate) show_lyrics: bool,
     island_lyric_layout: Option<std::sync::Arc<egui::Galley>>,
-    media_anchor: (String, f64, f64, bool),
+    // Last reported position, local position at the anchor, and monotonic UI time.
+    media_anchor: (f64, f64, f64),
     pub(crate) media: NowPlaying,
+    media_confirmed: bool,
     pub(crate) music_artwork: Option<(std::sync::Arc<egui::ColorImage>,egui::TextureHandle)>,
 
     forced_open_until:f64,
@@ -733,6 +735,10 @@ pub struct App {
 }
 
 impl App {
+    pub(crate) fn show_music(&self) -> bool {
+        self.media.is_music() || self.media_confirmed
+    }
+
     pub fn new(ctx: &egui::Context, opts: Options) -> Self {
         theme::load_fonts(ctx);
         egui_extras::install_image_loaders(ctx);
@@ -805,8 +811,9 @@ impl App {
             ly_worker: None,
             show_lyrics: initial_lyrics,
             island_lyric_layout: None,
-            media_anchor: (String::new(), 0.0, 0.0, false),
+            media_anchor: (0.0, 0.0, 0.0),
             media: NowPlaying::default(),
+            media_confirmed: false,
             music_artwork: None,
             forced_open_until:0.0, settings_open:false, displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_tab:0, settings_category:0, wechat_status:String::new(), notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
             listener_status: "尚未连接".into(),
@@ -1387,7 +1394,7 @@ impl App {
 
     fn island_lyrics_active(&self)->bool {
         if self.side() {return false;}
-        self.settings.island_lyrics && self.settings.visible_pages[0] && self.media.is_music()
+        self.settings.island_lyrics && self.settings.visible_pages[0] && self.show_music()
             && !self.browser_minimal_active
     }
     pub(crate) fn compact_notices(&self)->bool {self.island_lyrics_active()&&!self.open&&!self.notice.as_ref().is_some_and(|a|a.meeting.is_some()||self.settings.notification_preview&&matches!(a.source,crate::extras::AlertSource::External(_)))}
@@ -1538,9 +1545,12 @@ impl App {
         self.notice_width.target=notice_target;
         if self.compact_notices(){self.notice_width.step(dt);}else{self.notice_width.snap(0.0);self.notice_details=false;}
         self.update_media(env,&ctx);
+        if self.opts.fetch_lyrics {
+            self.poll_lyrics();
+        }
         let bell=self.t<self.notification_bell_until&&!self.compact_notices();
         self.resident_power=(env.battery,env.charging);
-        let mut layout=Layout::new(self.settings.show_battery&&env.battery.is_some(),self.quota_bar_indices().len(),self.media.is_music()&&!bell,self.pomo.running,bell,self.pet_enabled());
+        let mut layout=Layout::new(self.settings.show_battery&&env.battery.is_some(),self.quota_bar_indices().len(),self.show_music()&&!bell,self.pomo.running,bell,self.pet_enabled());
         layout.reorder(&self.settings.resident_order);
         for (position,extra) in self.quota_balance_layout(&ctx){layout.balance_tail(position,extra);}
         if self.settings.clock_period!=0 { layout.widen_clock(40.0); }
@@ -1549,9 +1559,6 @@ impl App {
             else if self.island_lyrics_active() {layout.x[bar::PET]=Some(60.0-self.lyric_bar_width()/2.0);}
         }
         self.resident.step(layout,dt,ctx.style().animation_time>0.0&&bar::animations_enabled());
-        if self.opts.fetch_lyrics {
-            self.poll_lyrics();
-        }
         self.update_island_lyric_layout(&ctx);
 
         let cx = win.center().x;
@@ -1884,7 +1891,7 @@ impl App {
             || !self.notice_width.settled(1.0);
         let pet_visible=self.pet_a>0.01 && !self.open && !minimal_pill;
         let ambient=self.settings.skin==model::Skin::Fluid && self.fluid.animating() || self.pomo.running && (self.open && self.page==1 || !self.open && !minimal_pill && self.notice.is_none() && bar::animations_enabled())
-            || self.media.playing && (self.open && self.page==0 || !self.open && !minimal_pill && self.notice.is_none() && self.media.is_music())
+            || self.media.playing && (self.open && self.page==0 || !self.open && !minimal_pill && self.notice.is_none() && self.show_music())
             || self.notice.as_ref().is_some_and(|notice|notice.meeting.is_some());
         let animating=transitioning || ambient || pet_visible && self.pet.state!=PetState::Sleeping;
         // 交互形变保持 60 帧，媒体 30 帧；小表情 20 帧，睡眠 10 帧，静态界面每秒核对提醒。
@@ -2297,7 +2304,7 @@ impl App {
         let hd = gx + battery_space;
         let hc = hd + date_w + 8.0;
         // 药丸起点布局
-        let has_music=self.media.is_music();
+        let has_music=self.show_music();
         let layout=self.resident.current();
         let pb=(local_cx+layout.x[bar::BATTERY].unwrap_or(0.0),15.0);
         let pcx=local_cx+layout.x[bar::CLOCK].unwrap()-paint::clock_width(base,&clock,size::PILL_CLOCK)/2.0;
@@ -2608,26 +2615,41 @@ impl App {
     /// 媒体进度在两次 SMTC 刷新之间按时间外推，进度条才会连续走动。
     fn update_media(&mut self, env: &Env, ctx: &egui::Context) {
         let m = &env.media;
-        if !m.is_music() {
+        let kind=m.kind();
+        if kind==crate::smtc::MediaKind::Video || m.title.trim().is_empty() {
             self.media=NowPlaying::default();
-            self.media_anchor=(String::new(),0.0,0.0,false);
+            self.media_anchor=(0.0,0.0,0.0);
             self.music_artwork=None;
             self.ly=LyricsState::default();
+            self.media_confirmed=false;
             return;
         }
-        let a = &self.media_anchor;
-        if a.0 != m.title || (a.1 - m.position).abs() > 0.01 || a.3 != m.playing {
-            self.media_anchor = (m.title.clone(), m.position, env.t, m.playing);
-        }
+        // None <-> Some IDs can alternate between SMTC and a native reader for the same song.
+        let other_song=matches!((self.media.song_id,m.song_id),(Some(old),Some(new)) if old!=new);
+        let song_changed=self.media.source!=m.source || self.media.title!=m.title || self.media.artist!=m.artist || other_song;
+        let identity_changed=song_changed || self.media.album!=m.album;
         let mut np = m.clone();
-        if m.playing {
-            let (_, pos, _, _) = &self.media_anchor;
-            np.position = if let Some(sampled)=m.sampled_at {m.position+sampled.elapsed().as_secs_f64()}
-                else {*pos};
-            if m.duration>0.0 {np.position=np.position.min(m.duration);}
+        if let Some(sampled)=m.sampled_at {
+            if m.playing {np.position+=sampled.elapsed().as_secs_f64();}
+            self.media_anchor=(m.position,np.position,env.t);
+        } else {
+            let (reported,position,at)=self.media_anchor;
+            let timeline_lost=self.media.sampled_at.is_some() && m.position==0.0;
+            if identity_changed || (reported-m.position).abs()>0.01 && !timeline_lost {
+                self.media_anchor=(m.position,m.position,env.t);
+            } else if m.playing!=self.media.playing || self.media.sampled_at.is_some() {
+                // Missing timelines still need pause/resume to keep the accumulated local position.
+                let elapsed=if self.media.playing {(env.t-at).max(0.0)}else{0.0};
+                self.media_anchor=(m.position,position+elapsed,env.t);
+            }
+            let (_,position,at)=self.media_anchor;
+            np.position=position+if m.playing {(env.t-at).max(0.0)}else{0.0};
         }
-        // 网易云的 song_id 只来自本机日志，SMTC 那一路没有；None 与 Some 之间来回不是换歌，不能每次都清空歌词重查。
-        let other_song=matches!((self.media.song_id,np.song_id),(Some(old),Some(new)) if old!=new);
+        if m.duration>0.0 {np.position=np.position.min(m.duration);}
+        let track_changed=song_changed || format!("{:.0}",self.media.duration)!=format!("{:.0}",np.duration);
+        if track_changed {
+            self.media_confirmed=false;
+        }
         if self.media.source != np.source || other_song { self.ly=LyricsState::default(); }
         self.media = np;
         if let Some(image)=&self.media.artwork {
@@ -2638,10 +2660,14 @@ impl App {
     }
 
     fn poll_lyrics(&mut self) {
-        if !self.media.is_music(){self.ly=LyricsState::default();return;}
-        if !self.show_lyrics && !self.settings.island_lyrics {self.ly=LyricsState::default();return;}
+        if self.media.kind()==crate::smtc::MediaKind::Video {self.ly=LyricsState::default();return;}
+        if !self.show_lyrics && !self.settings.island_lyrics && self.show_music() {self.ly=LyricsState::default();return;}
         let np = &self.media;
         if np.title.is_empty(){self.ly=LyricsState::default();return;}
+        if !self.show_music() && np.artist.trim().is_empty() {
+            self.ly=LyricsState::default();
+            return;
+        }
         let key = format!("{}|{}|{:.0}", np.title, np.artist, np.duration);
         let id_arrived=key==self.ly.key && !self.ly.loading && self.ly.song_id.is_none() && np.song_id.is_some()
             && !self.ly.lyrics.as_ref().is_some_and(|lyrics|lyrics.synced);
@@ -2699,6 +2725,9 @@ impl App {
             let mut found=None;
             while let Ok(result)=rx.try_recv(){if result.is_some(){found=result;}}
             if let Some(lyrics)=found {
+                if lyrics.synced && lyrics.lines.iter().any(|line|!line.text.trim().is_empty()) {
+                    self.media_confirmed=true;
+                }
                 self.ly.lyrics=Some(lyrics);self.ly.loading=false;self.ly.error=None;
                 self.ly.retry_at=None;self.ly.rx=None;self.ly.native_rx=None;
             }
@@ -2711,6 +2740,9 @@ impl App {
                         self.ly.error=None;
                         self.ly.retry_at=None;
                         if (waiting_native || lyrics::is_soda(&self.media.source) && !l.synced) && self.ly.attempts<NATIVE_RETRIES {self.ly.retry_at=Some(self.t+5.0);}
+                        if l.synced && l.lines.iter().any(|line|!line.text.trim().is_empty()) {
+                            self.media_confirmed=true;
+                        }
                         self.ly.lyrics = Some(l);
                     },
                     Err(error) => {
