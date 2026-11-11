@@ -16,6 +16,9 @@ mod kugou_control;
 #[cfg(windows)]
 #[path="player_seek.rs"]
 mod player_seek;
+#[cfg(windows)]
+#[path="muyu_timeline.rs"]
+mod muyu_timeline;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -89,6 +92,8 @@ impl ArtworkWorker {
 
 #[derive(Default)]
 struct ArtworkCache {
+    #[cfg(windows)]
+    muyu:muyu_timeline::Reader,
     #[cfg(windows)]
     kugou:kugou_metadata::Cache,
     #[cfg(windows)]
@@ -377,7 +382,9 @@ fn read_session(session:&windows::Media::Control::GlobalSystemMediaTransportCont
     let album=media_text(props.AlbumTitle())?;
     if !has_position{sampled_at=None;}
     let playback_type=match playback_type.map(|kind|kind.0){Some(1)=>MediaKind::Music,Some(2)=>MediaKind::Video,_=>MediaKind::Unknown};
-    Some(NowPlaying { title, artist, album, source, song_id:None, playing, position, sampled_at, event_time_ms, duration, artwork:None, playback_type })
+    let mut media=NowPlaying { title, artist, album, source, song_id:None, playing, position, sampled_at, event_time_ms, duration, artwork:None, playback_type };
+    artwork.muyu.apply(&mut media);
+    Some(media)
 }
 
 #[cfg(not(windows))]

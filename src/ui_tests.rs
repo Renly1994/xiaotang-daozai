@@ -865,15 +865,17 @@ fn delayed_media_samples_keep_the_live_position_and_follow_pause_and_seek(){
 }
 
 #[test]
-fn kugou_external_seek_updates_lyrics_in_both_directions(){
+fn client_external_seek_updates_lyrics_in_both_directions(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.app.settings.island_lyrics=true;
-    h.media=crate::smtc::NowPlaying{source:"KuGou.exe".into(),title:"Track".into(),artist:"Artist".into(),duration:120.0,playing:true,..Default::default()};
-    h.frame(vec![]);
-    h.app.set_lyrics("Track","Artist",120.0,crate::lyrics::parse_lrc("[00:00]开头\n[00:30]中段\n[01:00]后段"));
-    for (position,line) in [(65.0,"后段"),(10.0,"开头"),(35.0,"中段")] {
-        h.media.position=position;h.media.sampled_at=Some(std::time::Instant::now());h.frame(vec![]);
-        assert_eq!(h.app.island_lyric().map(|(_,text)|text),Some(line),"酷狗跳转后应立即切换到对应歌词");
+    for source in ["KuGou.exe","Muyu.exe"]{
+        h.media=crate::smtc::NowPlaying{source:source.into(),title:"Track".into(),artist:"Artist".into(),duration:120.0,playing:true,..Default::default()};
+        h.frame(vec![]);
+        h.app.set_lyrics("Track","Artist",120.0,crate::lyrics::parse_lrc("[00:00]开头\n[00:30]中段\n[01:00]后段"));
+        for (position,line) in [(65.0,"后段"),(10.0,"开头"),(35.0,"中段"),(0.0,"开头")] {
+            h.media.position=position;h.media.sampled_at=Some(std::time::Instant::now());h.frame(vec![]);
+            assert_eq!(h.app.island_lyric().map(|(_,text)|text),Some(line),"{source} 跳转后应立即切换到对应歌词");
+        }
     }
 }
 
