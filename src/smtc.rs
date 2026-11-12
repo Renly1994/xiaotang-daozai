@@ -369,7 +369,18 @@ fn read_session(session:&windows::Media::Control::GlobalSystemMediaTransportCont
             position=current;sampled_at=Some(std::time::Instant::now());has_position=true;
         }
     }
-    let album=media_text(props.AlbumTitle())?;
+    let mut album=media_text(props.AlbumTitle())?;
+    // Apple Music（AppleMusicWin）会把「歌手 — 专辑」整串写进系统媒体接口的 Artist，
+    // AlbumTitle 留空；整串当歌手会让所有歌词源都匹配不到，这里拆回歌手和专辑。
+    if album.trim().is_empty() && source.to_ascii_lowercase().contains("applemusic") {
+        if let Some((name,record))=artist.split_once(" — ") {
+            let (name,record)=(name.trim().to_owned(),record.trim().to_owned());
+            if !name.is_empty() && !record.is_empty() {
+                artist=name;
+                album=record;
+            }
+        }
+    }
     if !has_position{sampled_at=None;}
     let playback_type=match playback_type.map(|kind|kind.0){Some(1)=>MediaKind::Music,Some(2)=>MediaKind::Video,_=>MediaKind::Unknown};
     Some(NowPlaying { title, artist, album, source, song_id:None, playing, position, sampled_at, event_time_ms, duration, artwork:None, playback_type })
