@@ -62,10 +62,14 @@ pub fn sections(rect: Rect, flare: f32, flare_h: f32, radius: f32) -> Vec<(f32, 
     let (x0, y0, x1, y1) = (rect.left(), rect.top(), rect.right(), rect.bottom());
     let r = radius.min(rect.height() * 0.5).min(rect.width() * 0.5).max(0.0);
     let fh = flare_h.min(rect.height() * 0.5).max(0.5);
-    let mut rows = Vec::with_capacity(48);
-    const N_FLARE: usize = 14;
-    for i in 0..=N_FLARE {
-        let t = i as f32 / N_FLARE as f32;
+    // 采样密度跟随尺寸：弦线段长超过约 1.2 逻辑点时，1080p 下（1 点 = 1 物理像素）
+    // 曲线上能看出弦切折角，所以按周长自适应加密，下限保持原固定值。
+    const FLARE_MIN: usize = 14;
+    const FLARE_STEP: f32 = 1.2;
+    let n_flare = ((fh / FLARE_STEP).ceil() as usize).clamp(FLARE_MIN, 64);
+    let mut rows = Vec::with_capacity(n_flare + n_flare / 4 + 48);
+    for i in 0..=n_flare {
+        let t = i as f32 / n_flare as f32;
         // 肩部曲线：(1-t)^2.4 比三次方更饱满，过渡更柔。
         let wing = flare * (1.0 - t).powf(2.4);
         rows.push((y0 + fh * t, x0 - wing, x1 + wing));
@@ -73,9 +77,11 @@ pub fn sections(rect: Rect, flare: f32, flare_h: f32, radius: f32) -> Vec<(f32, 
     if y1 - r > y0 + fh {
         rows.push((y1 - r, x0, x1));
     }
-    const N_CORNER: usize = 20;
-    for i in 1..=N_CORNER {
-        let a = i as f32 / N_CORNER as f32 * std::f32::consts::FRAC_PI_2;
+    // 底部圆角按四分之一弧长加密：半径 33 点时约 44 段（原来固定 20 段）。
+    const CORNER_MIN: usize = 20;
+    let n_corner = ((r * std::f32::consts::FRAC_PI_2 / FLARE_STEP).ceil() as usize).clamp(CORNER_MIN, 128);
+    for i in 1..=n_corner {
+        let a = i as f32 / n_corner as f32 * std::f32::consts::FRAC_PI_2;
         rows.push((y1 - r + r * a.sin(), x0 + r - r * a.cos(), x1 - r + r * a.cos()));
     }
     rows

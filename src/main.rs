@@ -956,6 +956,13 @@ fn run() -> eframe::Result<()> {
         .with_taskbar(false)
         .with_always_on_top()
         .with_visible(false);
-    let opts = eframe::NativeOptions { viewport, vsync: !cfg!(windows), ..Default::default() };
+    // 4 倍多重采样：岛体轮廓网格、胶囊圆角的三角边在 1080p（1 点 = 1 物理像素）下
+    // 只靠 1px 羽化不够，硬边光栅化会出现锯齿台阶；MSAA 让每条网格边都有覆盖率渐变。
+    let opts = eframe::NativeOptions {
+        viewport,
+        vsync: !cfg!(windows),
+        multisampling: 4,
+        ..Default::default()
+    };
     graphics::run(opts,|opts|eframe::run_native("岛仔", opts, Box::new(|cc| Ok(Box::new(Shell::new(cc))))))
 }
