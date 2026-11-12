@@ -176,7 +176,7 @@ impl App {
             PetState::Focused
         } else if self.pet.worried {
             PetState::Worried
-        } else if self.media.playing && self.media.is_music() {
+        } else if self.media.playing && self.show_music() {
             if self.notice.is_some() || self.hud_notice.is_some() {PetState::Awake}else{PetState::Music}
         } else if self.pet.hovered {
             PetState::Curious
