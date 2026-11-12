@@ -551,22 +551,81 @@ fn file_data_object(path: &std::path::Path) -> Result<windows::Win32::System::Co
     }
 }
 /// 原生拖出只允许复制，取消拖放不会改变置物架与原文件。
-pub fn drag_file(path: &std::path::Path) -> Result<()> {
-    unsafe {
-        use windows::Win32::System::Ole::{OleInitialize, OleUninitialize, DROPEFFECT_COPY};
-        use windows::Win32::UI::Shell::SHDoDragDrop;
-        let initialized = OleInitialize(None).is_ok();
-        let result = file_data_object(path)
-            .and_then(|data| SHDoDragDrop(None, &data, None, DROPEFFECT_COPY).map(|_| ()));
-        if initialized {
-            OleUninitialize();
+pub fn primary_button_down() -> bool {
+    unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(1) < 0 }
+}
+
+#[windows::core::implement(windows::Win32::System::Ole::IDropSource)]
+struct ShelfDropSource {
+    bounds: Option<[f32; 4]>,
+    outside: std::cell::Cell<bool>,
+    returned: std::rc::Rc<std::cell::Cell<bool>>,
+}
+impl windows::Win32::System::Ole::IDropSource_Impl for ShelfDropSource_Impl {
+    fn QueryContinueDrag(&self, escape: windows::Win32::Foundation::BOOL, keys: windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS) -> windows::core::HRESULT {
+        use windows::Win32::Foundation::{DRAGDROP_S_CANCEL, DRAGDROP_S_DROP};
+        if escape.as_bool() { return DRAGDROP_S_CANCEL; }
+        if keys.0 & 1 == 0 { return DRAGDROP_S_DROP; }
+        if let Some([left, top, right, bottom]) = self.bounds {
+            let mut p = windows::Win32::Foundation::POINT::default();
+            if unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p) }.is_ok() {
+                let inside = p.x as f32 >= left && p.x as f32 <= right && p.y as f32 >= top && p.y as f32 <= bottom;
+                if !inside { self.outside.set(true); }
+                if inside && self.outside.get() {
+                    self.returned.set(true);
+                    return DRAGDROP_S_CANCEL;
+                }
+            }
         }
+        windows::core::HRESULT(0)
+    }
+    fn GiveFeedback(&self, _: windows::Win32::System::Ole::DROPEFFECT) -> windows::core::HRESULT {
+        windows::Win32::Foundation::DRAGDROP_S_USEDEFAULTCURSORS
+    }
+}
+
+/// 返回 true 表示按住鼠标返回了置物架，调用方继续内部排序。
+pub fn drag_file(path: &std::path::Path, bounds: Option<[f32; 4]>) -> Result<bool> {
+    unsafe {
+        use windows::Win32::System::Ole::{OleInitialize, OleUninitialize, DROPEFFECT_COPY, IDropSource};
+        use windows::Win32::UI::Shell::SHDoDragDrop;
+        // egui/winit 在按下时捕获鼠标；进入 OLE 前必须交还捕获，外部窗口才能接收拖放。
+        let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+        let initialized = OleInitialize(None).is_ok();
+        let returned = std::rc::Rc::new(std::cell::Cell::new(false));
+        let source: IDropSource = ShelfDropSource { bounds, outside: std::cell::Cell::new(false), returned: returned.clone() }.into();
+        let result = file_data_object(path)
+            .and_then(|data| SHDoDragDrop(None, &data, &source, DROPEFFECT_COPY).map(|_| returned.get()));
+        if initialized { OleUninitialize(); }
         result
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shelf_native_drag_returns_while_held_but_drops_on_release() {
+        use windows::Win32::System::Ole::IDropSource;
+        use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
+        use windows::Win32::Foundation::{BOOL, POINT, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP};
+        let mut cursor = POINT::default();
+        unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut cursor) }.unwrap();
+        let x = cursor.x as f32;
+        let y = cursor.y as f32;
+        let returned = std::rc::Rc::new(std::cell::Cell::new(false));
+        let source: IDropSource = ShelfDropSource {
+            bounds: Some([x - 100.0, y - 100.0, x + 100.0, y + 100.0]),
+            outside: std::cell::Cell::new(true), returned: returned.clone(),
+        }.into();
+        unsafe {
+            assert_eq!(source.QueryContinueDrag(BOOL(0), MODIFIERKEYS_FLAGS(0)), DRAGDROP_S_DROP);
+            assert!(!returned.get(), "松手不能重新进入内部排序");
+            assert_eq!(source.QueryContinueDrag(BOOL(1), MODIFIERKEYS_FLAGS(1)), DRAGDROP_S_CANCEL);
+            assert!(!returned.get(), "Esc 取消不能恢复排序");
+            assert_eq!(source.QueryContinueDrag(BOOL(0), MODIFIERKEYS_FLAGS(1)), DRAGDROP_S_CANCEL);
+            assert!(returned.get(), "仍按住返回面板时必须交还内部排序");
+        }
+    }
     #[test]
     fn notifications_skip_history_but_detect_reused_ids_and_updated_content(){
         let mut baseline=NotificationBaseline{primed:true,..Default::default()};

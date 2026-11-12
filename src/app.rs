@@ -668,6 +668,10 @@ pub struct App {
     // 置物架
     pub(crate) shelf_scroll: Spring,
     pub(crate) shelf_first: usize,
+    pub(crate) shelf_hold: Option<(PathBuf, f64)>,
+    pub shelf_reorder: Option<PathBuf>,
+    pub(crate) shelf_edge_at: f64,
+    pub shelf_drag_bounds: Option<Rect>,
     pub(crate) shelf_menu_rect: Option<Rect>,
     pub(crate) shelf_x: HashMap<PathBuf, Spring>,
     pub(crate) shelf_born: HashMap<PathBuf, f64>,
@@ -849,6 +853,10 @@ impl App {
             drag_saved: None,
             shelf_scroll: Spring::new(0.0, 300.0, 0.9),
             shelf_first: 0,
+            shelf_hold: None,
+            shelf_reorder: None,
+            shelf_edge_at: 0.0,
+            shelf_drag_bounds: None,
             shelf_menu_rect: None,
             shelf_x: HashMap::new(),
             shelf_born: HashMap::new(),
@@ -1789,7 +1797,7 @@ impl App {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.is_editing() {
             self.cancel_edit();
         }
-        if (!self.is_editing() || self.todo_choosing) && inside && self.open && self.reveal > 0.95 {
+        if self.shelf_reorder.is_none() && (!self.is_editing() || self.todo_choosing) && inside && self.open && self.reveal > 0.95 {
             let (scroll, left, right, esc) = ctx.input(|i| (i.raw_scroll_delta.y, i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight), i.key_pressed(egui::Key::Escape)));
             if esc { self.hover_lock = true; }
             if (left || right) && !self.todo_choosing {
@@ -1840,7 +1848,7 @@ impl App {
             }
         } else {self.wheel_delta=0.0;}
         let volume_dragging=self.music_volume_open && ctx.is_being_dragged(egui::Id::new(("card-drag",true,"m-volume-track")));
-        let want = (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || volume_dragging || (self.is_editing() && self.open);
+        let want = (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || self.shelf_reorder.is_some() || volume_dragging || (self.is_editing() && self.open);
         self.morph(want, inside, env.t, dt);
         self.update_pet(env, cx);
 
