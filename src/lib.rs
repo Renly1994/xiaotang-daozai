@@ -40,6 +40,7 @@ mod quota_ui;
 pub mod weather;
 mod weather_ui;
 mod pages;
+mod shelf_drag;
 mod extras;
 mod pet;
 mod pet_expressions;

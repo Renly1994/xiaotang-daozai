@@ -637,7 +637,18 @@ impl eframe::App for Shell {
                     #[cfg(windows)] match daozai::system::pick_files(){Ok(files)=>if !files.is_empty(){self.app.on_drop(files);self.app.show_page(3);},Err(e)=>self.app.say(format!("无法选择文件：{}",e.code()))}
                 },
                 Cmd::DragFile(p)=>{
-                    #[cfg(windows)] if let Err(e)=daozai::system::drag_file(&p){self.app.say(format!("无法拖出文件：{}",e.code()));}
+                    #[cfg(windows)] {
+                        let ppp = ctx.pixels_per_point();
+                        let origin = self.native.as_ref().and_then(|w| w.logical_origin(ppp))
+                            .or_else(|| ctx.input(|i| i.viewport().outer_rect).map(|r| r.min));
+                        let bounds = self.app.shelf_drag_bounds.zip(origin).map(|(r, o)|
+                            [(r.left()+o.x)*ppp, (r.top()+o.y)*ppp, (r.right()+o.x)*ppp, (r.bottom()+o.y)*ppp]);
+                        match daozai::system::drag_file(&p, bounds) {
+                            Ok(true) => { self.app.shelf_reorder = Some(p); ctx.request_repaint(); }
+                            Ok(false) => {},
+                            Err(e) => self.app.say(format!("无法拖出文件：{}",e.code())),
+                        }
+                    }
                     ctx.input_mut(|i| i.pointer=Default::default());
                 },
                 Cmd::DisconnectNotifications=>{#[cfg(windows)]{self.incoming=None;self.app.settings.read_notifications=false;self.app.settings.save();self.app.listener_status="已断开，不再读取 Windows 通知".into();}},
