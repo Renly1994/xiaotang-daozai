@@ -1502,6 +1502,12 @@ impl App {
                             setting_row(ui,"极简刘海","收起时显示一条细线",&mut minimal);
                             if minimal!=self.settings.minimal {self.set_minimal(minimal);}
                             ui.separator();
+                            let mut collapse_delay=self.settings.collapse_delay_ms as f64/1000.0;
+                            if setting_number(ui,"移出后收起",&mut collapse_delay,0.0,crate::model::COLLAPSE_DELAY_MAX_MS as f64/1000.0," 秒",0.05) {
+                                self.settings.collapse_delay_ms=(collapse_delay*1000.0).round().clamp(0.0,crate::model::COLLAPSE_DELAY_MAX_MS as f64) as u32;
+                            }
+                            settings_hint(ui,"鼠标移出岛体后等待多久再收起；0 秒为立即收起。");
+                            ui.separator();
 
                             let mut pet=self.settings.pet;
                             setting_row(ui,"岛仔吉祥物","收起时常驻，播放音乐时一起唱歌",&mut pet);
