@@ -346,6 +346,11 @@ impl App {
         self.quota.note.clear();self.quota.kiro_connecting=Some(quota::kiro::Connect::start(path,self.quota.alias.clone(),target));
     }
     pub fn quota_config(&self)->&Config{&self.quota.config}
+    /// 当前账号要画几行额度：额度页按行数决定卡片高度（超过两条窗口时整页长高）。
+    pub fn quota_card_rows(&self)->usize{
+        let rows=self.quota.config.selected_index().and_then(|index|self.quota.rows.get(&self.quota.config.accounts[index].id));
+        match rows{Some(Ok(snapshot))=>snapshot.ordered().len(),_=>0}
+    }
     pub fn quota_initialize(&mut self){if !crate::model::config_dir().join("ai-quota.json").exists(){self.quota.config.discover();self.quota.config.save();}}
     pub fn quota_pending(&mut self,accounts:&[Account]){self.quota.busy.extend(accounts.iter().map(|a|a.id.clone()));}
     pub fn quota_event(&mut self,event:quota::Event){self.quota.receive(event);}
@@ -428,7 +433,7 @@ impl App {
                     else if a.provider==Provider::Claude{format!("本地记录 · {time}")}
                     else if let Some(wallet)=&s.wallet{let b=wallet.primary();if wallet.balances.len()>1{let other=wallet.balances.iter().find(|other|other.currency!=b.currency).unwrap();format!("另有 {} {} · {time}",other.currency,other.full(other.total))}else{format!("{} · {time} 更新",b.currency)}}
                     else{format!("{time} 更新")};
-                let x=if a.provider.balance(){125.0}else{157.0};let width=357.0-x;let y=154.0;
+                let x=if a.provider.balance(){125.0}else{157.0};let width=357.0-x;let y=if self.quota_card_rows()>2{176.0}else{154.0};
                 c.centered_text(x,y,&c.fit(&status,10.0,W::Regular,width),10.0,W::Regular,if stale.is_some()&&!busy{Color32::from_rgb(255,166,77)}else{theme::DIM},H::Left);
                 c.hit(x,y-6.0,width,8.0,("quota-update-time",&a.id)).on_hover_text(if let Some(reason)=stale{format!("{status}\n{reason}")}else{status});
             }
@@ -524,7 +529,9 @@ impl App {
         let raw_plan=snapshot.map(|s|s.plan.as_str()).unwrap_or_default();let plan=match raw_plan{"pro"|"prolite"|"pro_lite"=>"Pro","plus"=>"Plus","free"=>"Free","team"|"business"=>"Business","enterprise"=>"Enterprise",other=>other};let label=if a.provider==Provider::Claude{"Claude · 本地记录".into()}else if plan.is_empty(){a.provider.name().to_owned()}else{format!("{} · {}",a.provider.name(),plan)};
         c.text(157.0,64.0,&c.fit(&label,12.0,W::Semibold,145.0),12.0,W::Semibold,theme::WHITE,H::Left);
         if let Some(s)=snapshot{
-            let windows=s.rings();let now=chrono::Local::now();
+            let windows=s.ordered();let now=chrono::Local::now();
+            // 超过两条窗口时行距收紧、整页长高，否则重置时间会顶到下一行。
+            let tall=windows.len()>2;let rows_top=if tall{78.0}else{86.0};let rows_pitch=if tall{24.0}else{35.0};
             if windows.is_empty() && a.provider==Provider::ZCode{
                 c.text(157.0,104.0,"官网未分配体验额度",11.0,W::Regular,theme::GRAY,H::Left);
             }else if windows.len()==1{
@@ -534,7 +541,7 @@ impl App {
             }else{
                 c.text(355.0,64.0,"剩余",10.5,W::Regular,theme::GRAY,H::Right);
                 for (i,w)in windows.iter().enumerate(){
-                    let y=86.0+i as f32*35.0;c.circle(159.0,y-4.0,2.5,colors[i]);
+                    let y=rows_top+i as f32*rows_pitch;c.circle(159.0,y-4.0,2.5,colors[i%colors.len()]);
                     c.text(168.0,y,&w.label,11.5,W::Semibold,theme::WHITE,H::Left);
                     let reset=quota_reset_text(s,w,&now);
                     c.text(168.0,y+17.0,&c.fit(&reset,11.0,W::Regular,185.0),11.0,W::Regular,theme::GRAY,H::Left);

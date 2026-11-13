@@ -8380,3 +8380,27 @@ fn every_module_settings_tab_maps_to_its_page(){
     }
     pages.sort();assert_eq!(pages,(0..crate::app::PAGE_NAMES.len()).collect::<Vec<_>>(),"每个功能页面各有一个设置分页");
 }
+
+
+#[test]
+fn quota_card_lists_every_window_not_just_the_first_two() {
+    // 卡片以前只画 Snapshot::rings()（前两条），第三条之后的窗口永远看不到：这里钉住「全部列出」。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    let account=crate::quota::Account{id:"multi".into(),provider:crate::quota::Provider::Gemini,alias:"多窗口".into(),source:std::path::PathBuf::new(),slot:None,enabled:true,pinned:true};
+    h.app.quota.config.accounts.push(account.clone());h.app.quota.config.selected=account.id.clone();
+    let window=|label:&str,seconds:i64,remaining:f32|crate::quota::Window{label:label.into(),seconds:Some(seconds),remaining,reset:None,amount:None};
+    let windows=vec![
+        window("5 小时",18_000,87.0),
+        window("Gemini 每周",604_800,42.0),
+        window("Gemini 4 Argon 每周",604_800,0.0),
+        window("Claude/GPT 每周",604_800,100.0),
+    ];
+    h.app.quota.rows.insert(account.id.clone(),Ok(crate::quota::Snapshot{windows,at:1,..Default::default()}));
+    h.app.show_page(6);h.hover(H::local(300.0,60.0),1.0);
+    let texts:Vec<String>=h.shapes.iter().filter_map(|shape|match &shape.shape{egui::Shape::Text(text)=>Some(text.galley.text().to_owned()),_=>None}).collect();
+    for label in ["5 小时","Gemini 每周","Gemini 4 Argon 每周","Claude/GPT 每周"]{
+        assert!(texts.iter().any(|text|text==label),"额度卡片应列出 {label}，实际只有 {texts:?}");
+    }
+    assert_eq!(h.app.quota_card_rows(),4,"四条窗口应让卡片长高到四行");
+}
