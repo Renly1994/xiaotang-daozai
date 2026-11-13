@@ -6,6 +6,8 @@ use base64::Engine;
 pub(crate) mod grok;
 #[path="gemini_quota.rs"]
 pub(crate) mod gemini;
+#[path="antigravity_quota.rs"]
+pub(crate) mod antigravity;
 #[path="doubao_quota.rs"]
 pub(crate) mod doubao;
 #[path="claude_quota.rs"]
@@ -120,6 +122,16 @@ impl Config {
         }
         let id=format!("Gemini-{slot}");let pinned=self.pinned_indices().len()<3;
         self.selected=id.clone();self.accounts.push(Account{id:id.clone(),provider:Provider::Gemini,alias,source:PathBuf::new(),slot:Some(slot),enabled:true,pinned});id
+    }
+    /// 连接本机 Antigravity 的登录态：与浏览器 Cookie 走同一个 Gemini 槽位，
+    /// 但 `source` 标成 `antigravity`，额度查询就会走本机凭据而不是网页会话。
+    pub(crate) fn connect_antigravity(&mut self,alias:String)->String{
+        if let Some(a)=self.accounts.iter_mut().find(|a|a.provider==Provider::Gemini && a.source.to_string_lossy()==antigravity::SOURCE){
+            a.enabled=true;if !alias.trim().is_empty(){a.alias=alias;}self.selected=a.id.clone();return a.id.clone();
+        }
+        let id=format!("Gemini-{}",antigravity::SOURCE);let pinned=self.pinned_indices().len()<3;
+        self.selected=id.clone();
+        self.accounts.push(Account{id:id.clone(),provider:Provider::Gemini,alias,source:PathBuf::from(antigravity::SOURCE),slot:Some(antigravity::SOURCE.into()),enabled:true,pinned});id
     }
     pub(crate) fn import_grok(&mut self,path:&Path,alias:&str)->Result<usize,String>{
         let profiles=grok::profiles(path)?;let path=fs::canonicalize(path).unwrap_or_else(|_|path.to_owned());let mut added=0;
@@ -247,6 +259,15 @@ impl Account {
 }
 impl Snapshot {
     pub fn rings(&self)->Vec<&Window>{let mut all:Vec<_>=self.windows.iter().collect();all.sort_by_key(|w|w.seconds.unwrap_or(i64::MAX));all.truncate(2);all}
+    /// 全部窗口按「同心环从外到内」的顺序排好：先按周期升序，同周期再按它该落在第几环。
+    /// 额度卡片的展开列表用它，所以 Gemini 每周与 Claude/GPT 每周不会因为只画两环而消失。
+    pub fn ordered(&self)->Vec<&Window>{let mut all:Vec<_>=self.windows.iter().collect();all.sort_by_key(|w|(w.seconds.unwrap_or(i64::MAX),antigravity::rank(&w.label)));all}
+    /// 额度卡片的固定三行（外→中→内）：5 小时、Gemini 每周、Gemini 4 Argon 每周。
+    /// 缺哪条就返回 None，由界面写「读取中…」；Claude/GPT 只留在悬停明细里。
+    pub fn card_windows(&self)->[Option<&Window>;3]{
+        let labels=[antigravity::FIVE_HOUR_LABEL,antigravity::GEMINI_WEEKLY_LABEL,antigravity::ARGON_WEEKLY_LABEL];
+        labels.map(|label|self.windows.iter().find(|w|w.label==label))
+    }
 }
 fn number(v:&Value)->Option<f64>{v.as_f64().or_else(||v.as_str()?.parse().ok()).filter(|n|n.is_finite())}
 fn reset(v:&Value)->Option<i64>{v.as_i64().filter(|n|*n>0).or_else(||chrono::DateTime::parse_from_rfc3339(v.as_str()?).ok().map(|d|d.timestamp()))}
@@ -394,7 +415,7 @@ impl Service {
         None
     }
 }
-fn http_agent()->ureq::Agent{
+pub(crate) fn http_agent()->ureq::Agent{
     http_agent_with_connect_timeout(Duration::from_secs(30))
 }
 fn http_agent_with_connect_timeout(timeout:Duration)->ureq::Agent{
@@ -421,7 +442,11 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
     if account.provider==Provider::WorkBuddy{return workbuddy::fetch(agent,account);}
     if account.provider==Provider::DeepSeek{return deepseek::fetch(agent,account);}
     if account.provider==Provider::GrokBot{return grok::fetch(agent,account);}
-    if account.provider==Provider::Gemini{return gemini::fetch(agent,account);}
+    if account.provider==Provider::Gemini{
+        // 同一个 Gemini 槽位有两种来源：Antigravity 登录态（本机凭据 + 订阅额度）与网页会话。
+        if account.source.to_string_lossy()==antigravity::SOURCE{return antigravity::fetch(agent,account);}
+        return gemini::fetch(agent,account);
+    }
     if account.provider==Provider::Kiro{return kiro::fetch(agent,account);}
     if account.provider==Provider::Doubao{return doubao::fetch(agent,account);}
     let auth=account_credentials(account).map_err(|e|(e,0))?;

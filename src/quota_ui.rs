@@ -21,6 +21,16 @@ pub(crate) struct State {
     pub kiro_connecting:Option<quota::kiro::Connect>,
     pub stale:HashMap<String,String>,
     pub gemini_connecting:Option<quota::gemini::Connect>,pub gemini_email:String,pub gemini_cookie:String,
+    pub antigravity_connecting:Option<quota::antigravity::Connect>,pub antigravity_email:Option<String>,
+    /// CLI 登录态：邮箱 + 令牌到期时间，只读系统凭据。`login_at` 控制多久重读一次（本地读，不发请求）。
+    pub antigravity_login:Option<quota::antigravity::Login>,pub login_at:Option<std::time::Instant>,
+    pub renew_rx:Option<std::sync::mpsc::Receiver<Result<i64,String>>>,pub renew_note:Option<String>,
+    /// 内存里那枚令牌的到期时间，以及上一次自动续期的尝试时间（一分钟内不重复打 OAuth）。
+    pub renewed_until:Option<i64>,pub auto_renew_at:Option<std::time::Instant>,pub renew_auto:bool,
+    /// 周额度要跑一次本机 CLI（6~10 秒），单独记它什么时候排过、这一轮跑完没有。
+    pub weekly_pending:Option<quota::antigravity::WeeklyFetch>,pub weekly_at:Option<std::time::Instant>,
+    /// 下一轮自动刷新什么时候排下、排多长间隔，供页面显示「Ns 后刷新」。
+    pub scheduled_at:Option<std::time::Instant>,pub scheduled_every:std::time::Duration,
     pub doubao_connecting:Option<quota::doubao::Connect>,pub doubao_cookie:String,
 }
 impl State {
@@ -93,9 +103,122 @@ impl State {
         let old_local_record=self.config.accounts.iter().any(|a|a.id==event.id&&a.provider==Provider::Claude)&&event.result.as_ref().is_ok_and(|s|chrono::Utc::now().timestamp()-s.at>1800);
         self.stale.remove(&event.id);
         if old_local_record{self.stale.insert(event.id.clone(),"本地记录较旧，等待 Claude 更新".into());}
+        // 周额度是另跑 CLI 拿的，接口这一轮刷新没有它：把旧值接回来，别让那两扇窗忽隐忽现。
+        if let Ok(next)=&mut event.result{if let Some(Ok(old))=self.rows.get(&event.id){preserve_weekly(old,next);}}
         self.rows.insert(event.id,event.result);
         if success{self.save_snapshots();}
     }
+    /// 把 CLI 读回来的周额度并进快照：只替换那两条周窗，接口给的窗口保持原样。
+    fn apply_weekly(&mut self,weekly:quota::antigravity::Weekly){
+        let Some(id)=self.config.accounts.iter().find(|a|a.provider==Provider::Gemini&&a.source.to_string_lossy()==quota::antigravity::SOURCE).map(|a|a.id.clone())else{return;};
+        let Some(Ok(snapshot))=self.rows.get(&id)else{return;};
+        let mut next=snapshot.clone();
+        next.windows.retain(|w|w.label!=quota::antigravity::GEMINI_WEEKLY_LABEL&&w.label!=quota::antigravity::ARGON_WEEKLY_LABEL);
+        next.windows.extend(weekly.gemini);
+        next.windows.extend(weekly.argon);
+        quota::antigravity::sort_windows(&mut next.windows);
+        self.rows.insert(id,Ok(next));self.save_snapshots();
+    }
+    /// 轮询后台的 CLI 读数：拿到就并进快照；卡住超过 90 秒就放弃这一轮，下一轮再说。
+    pub fn poll_weekly(&mut self){
+        let Some(fetch)=self.weekly_pending.as_ref()else{return;};
+        let polled=fetch.poll();let expired=fetch.timed_out();
+        if let Some(weekly)=polled{self.weekly_pending=None;self.apply_weekly(weekly);}
+        else if expired{self.weekly_pending=None;}
+    }
+    /// 周额度五分钟补一次就够：CLI 一次要 6~10 秒，没必要跟着接口一起转。
+    pub fn should_start_weekly(&self)->bool{
+        if cfg!(test){return false;}
+        self.weekly_pending.is_none()
+            && self.weekly_at.is_none_or(|at|at.elapsed()>=std::time::Duration::from_secs(300))
+            && self.config.enabled
+            && self.config.accounts.iter().any(|a|a.enabled&&a.provider==Provider::Gemini&&a.source.to_string_lossy()==quota::antigravity::SOURCE)
+    }
+    pub fn maybe_start_weekly(&mut self){
+        if !self.should_start_weekly(){return;}
+        self.weekly_at=Some(std::time::Instant::now());
+        self.weekly_pending=Some(quota::antigravity::WeeklyFetch::start());
+    }
+    /// 重读本机 CLI 登录态：只读系统凭据，不发请求，也不改动任何文件。
+    pub fn refresh_login(&mut self){
+        self.antigravity_login=quota::antigravity::login_state();
+        keep_freshest(&mut self.antigravity_login,self.renewed_until);
+        self.login_at=Some(std::time::Instant::now());
+    }
+    /// 登录态半分钟刷新一次就够；点「续期」的结果也从这里取回来。
+    pub fn poll_login(&mut self){
+        if self.login_at.is_none_or(|at|at.elapsed()>=std::time::Duration::from_secs(30)){self.refresh_login();}
+        self.auto_renew();
+        let Some(rx)=self.renew_rx.as_ref()else{return;};
+        let Ok(result)=rx.try_recv()else{return;};
+        self.renew_rx=None;
+        match result {
+            Ok(expires_at)=>{
+                let when=chrono::DateTime::from_timestamp(expires_at,0).map(|at|at.with_timezone(&chrono::Local).format("%H:%M").to_string()).unwrap_or_default();
+                self.renewed_until=Some(expires_at);
+                self.renew_note=Some(if self.renew_auto{format!("令牌快到期，已自动续期到 {when}")}else{format!("已续期，令牌到 {when} 失效")});
+                self.renew_auto=false;
+                self.refresh_login();
+            }
+            Err(error)=>{self.renew_auto=false;self.renew_note=Some(error);}
+        }
+    }
+    /// 令牌快过期就自己换一枚：只换内存里的，不动系统凭据，也不碰 Antigravity 的文件。
+    pub fn auto_renew(&mut self){
+        if cfg!(test){return;}
+        let now=chrono::Local::now().timestamp();
+        if self.auto_renew_if_due(now){self.renew();}
+    }
+    /// 判据与节流都在这里：真的该续才记一次尝试时间并返回 true（发不发请求由调用方决定）。
+    fn auto_renew_if_due(&mut self,now:i64)->bool{
+        if !renew_due(self.antigravity_login.as_ref(),self.auto_renew_at,now){return false;}
+        self.auto_renew_at=Some(std::time::Instant::now());
+        self.renew_auto=true;
+        true
+    }
+    /// 用户点「续期」：后台线程换一枚新令牌（只进内存缓存，不写回系统凭据）。
+    pub fn renew(&mut self){
+        if self.renew_rx.is_some(){return;}
+        let (sender,receiver)=std::sync::mpsc::channel();
+        std::thread::spawn(move||{
+            let agent=quota::http_agent();
+            let _=sender.send(quota::antigravity::renew(&agent));
+        });
+        self.renew_rx=Some(receiver);self.renew_note=None;
+    }
+    /// 下一轮刷新还剩几秒；没排过就返回 None（这时不显示倒计时，避免画一个假数字）。
+    fn countdown(&self)->Option<String>{
+        let at=self.scheduled_at?;
+        let every=self.scheduled_every.as_secs_f32();
+        if !(every>0.0){return None;}
+        countdown_label((every-at.elapsed().as_secs_f32()).max(0.0))
+    }
+}
+/// 自动续期的判据：只知道「快到期了」才动手，一分钟内不重复试；
+/// 到期时间读不出来（没有 expiry 字段）就不猜，宁可等用户点「续期」。
+fn renew_due(login:Option<&quota::antigravity::Login>,last:Option<std::time::Instant>,now:i64)->bool{
+    let Some(expires)=login.and_then(|login|login.expires_at)else{return false;};
+    if last.is_some_and(|at|at.elapsed()<std::time::Duration::from_secs(60)){return false;}
+    expires-now<=600
+}
+/// 内存里续过期就用内存里的到期时间，别让系统凭据里的旧时间把界面又拉回「已过期」。
+fn keep_freshest(login:&mut Option<quota::antigravity::Login>,renewed:Option<i64>){
+    let Some(until)=renewed else{return;};
+    if let Some(login)=login{
+        if until>login.expires_at.unwrap_or(0){login.expires_at=Some(until);}
+    }
+}
+/// 倒计时文案：向上取整（还剩 0.2 秒也算 1 秒），归零写 0s，绝不出现负数。
+fn countdown_label(left:f32)->Option<String>{
+    if !left.is_finite(){return None;}
+    Some(format!("{}s 后刷新",left.ceil().max(0.0) as u64))
+}
+/// 接口刷新会把周窗冲掉（它只回 5 小时与 Claude/GPT 每周两条），这里把 CLI 读到的两条接回来。
+fn preserve_weekly(old:&Snapshot,next:&mut Snapshot){
+    for window in old.windows.iter().filter(|w|w.label==quota::antigravity::GEMINI_WEEKLY_LABEL||w.label==quota::antigravity::ARGON_WEEKLY_LABEL){
+        if !next.windows.iter().any(|w|w.label==window.label){next.windows.push(window.clone());}
+    }
+    quota::antigravity::sort_windows(&mut next.windows);
 }
 fn accent_color(accent:Accent,provider:Provider)->Color32{
     if accent==Accent::Brand&&provider==Provider::DeepSeek{return Color32::from_rgb(77,107,254);}
@@ -106,6 +229,12 @@ fn accent_color(accent:Accent,provider:Provider)->Color32{
 fn accent_colors(config:&Config,a:&Account)->[Color32;2]{
     let main=accent_color(config.colors.get(&a.id).copied().unwrap_or_default(),a.provider);
     [main,crate::paint::mix(main,Color32::WHITE,0.16)]
+}
+fn ring_colors(config:&Config,a:&Account)->[Color32;3]{
+    let main=accent_color(config.colors.get(&a.id).copied().unwrap_or_default(),a.provider);
+    let middle=crate::paint::mix(main,Color32::WHITE,0.88);
+    let inner=if main.b()>=main.r(){Color32::from_rgb(255,190,0)}else{Color32::from_rgb(0,213,242)};
+    [main,middle,inner]
 }
 fn color_picker(ui:&mut egui::Ui,provider:Provider,value:&mut Accent){
     ui.allocate_ui_with_layout(egui::vec2(ui.available_width(),30.0),egui::Layout::left_to_right(egui::Align::Center),|ui|{
@@ -180,17 +309,30 @@ fn deepseek_badge(c:&Card,skin:crate::model::Skin,x:f32,y:f32,size:f32){
         c.painter.image(texture.id(),egui::Rect::from_min_size(min,egui::Vec2::splat(pixels as f32/ppp)),egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)),Color32::WHITE);
     }
 }
-fn ring(c:&Card,a:&Account,snapshot:Option<&Snapshot>,x:f32,y:f32,size:f32,colors:[Color32;2]){
-    let windows=snapshot.map(Snapshot::rings).unwrap_or_default();let dual=windows.len()>1;
-    let stroke=if dual{if size<35.0{2.2}else{6.5}}else{(size*0.102).clamp(3.0,6.5)};
+fn ring(c:&Card,a:&Account,snapshot:Option<&Snapshot>,x:f32,y:f32,size:f32,colors:[Color32;3]){
+    // 三圈统一画 5 小时 / Gemini 每周 / Argon 每周。小环（27 像素的常驻位）只有 13 像素半径，
+    // 三条弧如果都用「暗弧 + 亮弧 + 圆头」，缩到 1.5 像素宽就糊成碎块：小环改成先铺一条暗轨、
+    // 再把剩余量画成亮弧，不画端头，三圈才读得出是一圈套一圈。
+    let max=3;
+    let windows:Vec<&quota::Window>=snapshot.map(|s|{let mut all=s.ordered();all.truncate(max);all}).unwrap_or_default();
+    let count=windows.len();let dual=count>1;let triple=count>2;
+    let small=size<35.0;
+    let stroke=if small{if triple{1.3}else if dual{2.2}else{(size*0.102).clamp(3.0,6.5)}}else if triple{4.5}else if dual{6.5}else{(size*0.102).clamp(3.0,6.5)};
     let radius=size/2.0-stroke/2.0-1.0;
-    let gap=if size<35.0{1.5}else{3.0};
+    let gap=if small{if triple{1.3}else{1.5}}else if triple{2.5}else{3.0};
     let start=-std::f32::consts::FRAC_PI_2;
-    for i in 0..if dual{2}else{1}{
+    for i in 0..count{
         let r=radius-i as f32*(stroke+gap);
         if let Some(w)=windows.get(i){
-            let col=colors[i];let dark=crate::paint::mix(col,Color32::BLACK,0.8);
-            if w.remaining>=100.0{c.ring(x,y,r,stroke,col);}else if w.remaining<=0.0{c.ring(x,y,r,stroke,dark);}else{
+            let col=colors[i.min(2)];let dark=crate::paint::mix(col,Color32::BLACK,0.8);
+            if small{
+                // 小环：同色压暗的细轨 + 剩余亮弧，都从 12 点开始（读数方向一致），不画端头圆点。
+                c.ring(x,y,r,stroke*0.55,crate::paint::mix(col,Color32::BLACK,0.55));
+                if w.remaining>=100.0{c.ring(x,y,r,stroke,col);}else if w.remaining>0.0{
+                    let end=start+std::f32::consts::TAU*w.remaining.clamp(0.0,100.0)/100.0;
+                    c.arc(x,y,r,start,end,stroke,col);
+                }
+            }else if w.remaining>=100.0{c.ring(x,y,r,stroke,col);}else if w.remaining<=0.0{c.ring(x,y,r,stroke,dark);}else{
                 let end=start+std::f32::consts::TAU*w.remaining/100.0;
                 c.arc(x,y,r,end,start+std::f32::consts::TAU,stroke,dark);
                 c.arc(x,y,r,start,end,stroke,col);
@@ -198,14 +340,44 @@ fn ring(c:&Card,a:&Account,snapshot:Option<&Snapshot>,x:f32,y:f32,size:f32,color
             }
         }
     }
-    if a.provider==Provider::Kiro{logo(c,a.provider,x,y,if size<35.0{if dual{10.0}else{12.0}}else if dual{24.0}else{34.0});}
+    let logo_size=if small{if triple{6.0}else if dual{10.0}else{12.0}}else if triple{20.0}else if dual{24.0}else{34.0};
+    // 小环最内圈半径只有 6 上下，logo 收到 7.5 才留得出一圈暗隙，双子星标志不会被金圈切到。
+    if a.provider==Provider::Kiro{logo(c,a.provider,x,y,logo_size);}
     else if a.provider==Provider::ZCode && windows.is_empty(){logo(c,a.provider,x,y,if size<35.0{size-3.0}else{size*0.72});}
-    else if size<35.0 {logo(c,a.provider,x,y,if dual{10.0}else{12.0});}else if dual {logo(c,a.provider,x,y,24.0);}else if let Some(w)=windows.first(){
+    else if dual {logo(c,a.provider,x,y,logo_size);}else if let Some(w)=windows.first(){
         let value=format!("{:.0}",w.remaining);let large=if value.len()>2{22.0}else{28.0};
         let number_width=c.text_w(&value,large,W::Bold);let width=number_width+c.text_w("%",11.0,W::Semibold)+2.0;
         let left=x-width/2.0;c.centered_text(left,y,&value,large,W::Bold,theme::WHITE,H::Left);
         c.centered_text(left+number_width+2.0,y+3.0,"%",11.0,W::Semibold,theme::GRAY,H::Left);
     }else{c.centered_text(x,y,"—",24.0,W::Semibold,theme::DIM,H::Center);}
+}
+/// 三圈釉面环（Antigravity 的 Gemini 专属形态）：外「5 小时」、中「Gemini 每周」、内「Argon 每周」，
+/// 每圈按自己的剩余量在绿→黄→红之间取色，中央是彩虹四角星。27 像素的常驻位走 micro。
+fn gemini_ring(c:&Card,snapshot:Option<&Snapshot>,x:f32,y:f32,size:f32){
+    let micro=size<35.0;
+    // 只画两圈：5 小时（外）与 Gemini 每周（内）。Argon 每周那圈在 27 像素上只剩几段短弧，
+    // 读不出量，干脆不画——它仍然出现在卡片下面的额度行里，数值不丢。
+    let mut windows:Vec<&quota::Window>=snapshot.map(|s|s.card_windows().into_iter().flatten().collect()).unwrap_or_default();
+    windows.truncate(2);
+    let count=windows.len().max(1);
+    let(width,gap,radii)=crate::quota_visual::ring_layout(size,count,micro);
+    let radius=radii.first().copied().unwrap_or(0.0);
+    let inner_r=radii.last().copied().unwrap_or(radius);
+    // 只留两圈之后中间空出来了，星可以放大到压住内圈：不切缺口，环保持完整，星盖在上面。
+    let overlap=if micro{2.0}else{3.0};
+    let star=(inner_r-width*0.5+overlap).max(3.0);
+    let _=gap;
+    if windows.is_empty(){
+        crate::quota_visual::glossy_ring(c,x,y,radius,width,0.0,theme::GRAY,micro,&[]);
+        crate::quota_visual::gemini_star(c,x,y,star.max(3.0),micro);
+        return;
+    }
+    for (i,w) in windows.iter().enumerate(){
+        let r=radii.get(i).copied().unwrap_or(radius);
+        let base=crate::quota_visual::quota_color(w.remaining);
+        crate::quota_visual::glossy_ring(c,x,y,r,width,w.remaining,base,micro,&[]);
+    }
+    crate::quota_visual::gemini_star(c,x,y,star.max(3.0),micro);
 }
 fn reset_text(at:Option<i64>,now:&chrono::DateTime<chrono::Local>)->String {
     let Some(at)=at.and_then(|at|chrono::DateTime::from_timestamp(at,0)) else{return "重置时间未知".into();};
@@ -214,8 +386,22 @@ fn reset_text(at:Option<i64>,now:&chrono::DateTime<chrono::Local>)->String {
     let format=if at.date_naive()==now.date_naive(){"今天 %H:%M 重置"}else if at.year()==now.year(){"%-m月%-d日 %H:%M 重置"}else{"%Y/%-m/%-d %H:%M 重置"};
     at.format(format).to_string()
 }
-fn snapshot_details(snapshot:&Snapshot)->String{
-    if let Some(relay)=&snapshot.relay{return relay.full();}
+/// 卡片底部那行「CLI · 邮箱 · 令牌几点到期」。只读系统凭据，不发请求；点它去设置面板。
+fn cli_login_line(c:&Card,login:Option<&quota::antigravity::Login>,id:&str,cli_y:f32)->bool{
+    let line=match login{
+        Some(login)=>{
+            let when=login.expires_at.and_then(|at|chrono::DateTime::from_timestamp(at,0)).map(|at|at.with_timezone(&chrono::Local).format("%H:%M").to_string()).unwrap_or_default();
+            if login.expired(){format!("CLI · {} · 令牌已过期",login.email)}
+            else if when.is_empty(){format!("CLI · {}",login.email)}
+            else{format!("CLI · {} · 令牌 {when} 到期",login.email)}
+        }
+        None=>"CLI · 未检测到登录态（Gemini 每周与 Argon 每周读不到）".to_string(),
+    };
+    let warn=login.is_none_or(quota::antigravity::Login::expired);
+    c.centered_text(157.0,cli_y,&c.fit(&line,9.0,W::Regular,200.0),9.0,W::Regular,if warn{Color32::from_rgb(226,164,44)}else{theme::DIM},H::Left);
+    c.hit(157.0,cli_y-7.0,200.0,13.0,("quota-cli-login",id)).on_hover_text("本机 Antigravity CLI 登录态：两个周额度都靠它读。点这里打开设置面板，可检测、续期或重新登录。").clicked()
+}
+fn snapshot_details(snapshot:&Snapshot)->String{    if let Some(relay)=&snapshot.relay{return relay.full();}
     if snapshot.kiro.is_some(){return kiro_details(snapshot);}
     let mut lines=Vec::new();let now=chrono::Local::now();
     for w in snapshot.windows.iter().chain(snapshot.extra.iter()){
@@ -257,10 +443,15 @@ impl App {
         self.quota.connect_open=false;self.quota.connect_target=None;
         self.quota.api_connecting=None;self.quota.api_key.clear();
         self.quota.gemini_connecting=None;
+        self.quota.antigravity_connecting=None;
         self.quota.deepseek_key.clear();self.quota.gemini_cookie.clear();
         self.quota.doubao_connecting=None;self.quota.doubao_cookie.clear();
     }
     pub(crate) fn quota_tick(&mut self){
+        // 周额度是跑本机 CLI 拿的（6~10 秒），单开一轮，别跟着接口刷新一起转。
+        self.quota.poll_weekly();self.quota.maybe_start_weekly();
+        // 登录态与「续期」结果：只读凭据 + 后台线程换令牌，不碰 CLI 进程。
+        self.quota.poll_login();
         if (!self.settings_open||!self.quota.connect_open)&&self.quota.gemini_connecting.is_some(){self.quota.gemini_connecting=None;self.quota.gemini_cookie.clear();}
         if (!self.settings_open||!self.quota.connect_open)&&self.quota.doubao_connecting.is_some(){self.quota_close_connection();}
         if !self.settings_open && self.quota.api_connecting.is_some(){self.quota_close_connection();}
@@ -316,6 +507,18 @@ impl App {
                 },Err(error)=>self.quota.note=error}
             }
         }
+        if self.quota.antigravity_connecting.as_ref().is_some_and(|connect|connect.timed_out()){self.quota.antigravity_connecting=None;self.quota.note="读取本机 Antigravity 登录态超时，请稍后重试".into();}
+        let result=self.quota.antigravity_connecting.as_ref().and_then(|connect|connect.poll());
+        if let Some(result)=result{
+            self.quota.antigravity_connecting=None;
+            if self.settings_open&&self.quota.connect_open{
+                match result{Ok(connected)=>{
+                    let previous=self.quota.config.clone();let id=self.quota.config.connect_antigravity(connected.label);
+                    if let Err(error)=self.quota.config.save_checked(){self.quota.config=previous;self.quota.note=error;}
+                    else{self.quota.rows.insert(id.clone(),Ok(connected.snapshot));self.quota.stale.remove(&id);self.quota.save_snapshots();self.quota.connect_target=None;self.quota.note="Gemini 已通过本机 Antigravity 登录态连接".into();self.quota.maybe_start_weekly();self.pending.push(Cmd::QuotaConnected);}
+                },Err(error)=>self.quota.note=error}
+            }
+        }
         if let Some(result)=self.quota.doubao_connecting.as_ref().and_then(|connect|connect.poll()){
             self.quota.doubao_connecting=None;
             if self.settings_open&&self.quota.connect_open{
@@ -348,6 +551,14 @@ impl App {
     pub fn quota_config(&self)->&Config{&self.quota.config}
     pub fn quota_initialize(&mut self){if !crate::model::config_dir().join("ai-quota.json").exists(){self.quota.config.discover();self.quota.config.save();}}
     pub fn quota_pending(&mut self,accounts:&[Account]){self.quota.busy.extend(accounts.iter().map(|a|a.id.clone()));}
+    /// 额度页是否正开着（页 6 且这一页没在设置里被隐藏）：决定自动刷新用 30 秒还是 3 分钟。
+    pub fn quota_page_live(&self)->bool{self.open&&self.page()==6&&self.settings.visible_pages[6]}
+    /// 卡片里要排几行窗口：四行时要把额度页撑高，否则重置时间和下一行会叠在一起。
+    pub fn quota_card_rows(&self)->usize{
+        self.quota.config.selected_index().and_then(|index|self.quota.config.accounts.get(index)).and_then(|a|self.quota.rows.get(&a.id)).and_then(|r|r.as_ref().ok()).map(|s|s.ordered().len()).unwrap_or(0)
+    }
+    /// 记下这一轮刷新按多长间隔排的，页面靠它显示「Ns 后刷新」。
+    pub fn quota_scheduled(&mut self,every:std::time::Duration){self.quota.scheduled_at=Some(std::time::Instant::now());self.quota.scheduled_every=every;}
     pub fn quota_event(&mut self,event:quota::Event){self.quota.receive(event);}
     pub fn quota_set_source(&mut self,path:std::path::PathBuf){self.quota.source=path.to_string_lossy().into_owned();}
     pub(crate) fn quota_bar_indices(&self)->Vec<usize>{
@@ -395,16 +606,21 @@ impl App {
             // 有具体点数的额度（如 Kiro）在环右侧跟一段剩余点数，与余额类的排布一致。
             let extra=(layout.widths[crate::bar_layout::quota_slot(position)]-27.0).max(0.0);
             let x=if extra>0.0{x-extra/2.0}else{x};
-            ring(c,a,snapshot,x,15.0,27.0,accent_colors(&self.quota.config,a));
+            if a.provider==Provider::Gemini&&a.source.to_string_lossy()==quota::antigravity::SOURCE{gemini_ring(c,snapshot,x,15.0,29.0);}else{ring(c,a,snapshot,x,15.0,27.0,ring_colors(&self.quota.config,a));}
             if extra>0.0{let stale=self.quota.stale.contains_key(&a.id);if let Some(text)=self.quota.tail_text(&a.id){c.text(x+15.5,21.0,&text,theme::size::PILL_CLOCK,W::Bold,if stale{theme::GRAY}else{theme::WHITE},H::Left);}}
             let mut same=self.quota.config.accounts.iter().filter(|other|other.provider==a.provider && other.enabled);
             if same.clone().count()>1{let n=same.position(|other|other.id==a.id).unwrap_or(0)+1;c.circle(x+10.0,24.0,4.5,Color32::from_gray(225));c.text(x+10.0,26.8,&n.to_string(),6.5,W::Bold,Color32::BLACK,H::Center);}
-            let summary=snapshot.map(|s|s.rings().iter().map(|w|w.summary()).collect::<Vec<_>>().join(" · ")).unwrap_or_else(||if self.quota.busy.contains(&a.id){"正在更新".into()}else{"额度暂不可用".into()});
+            let summary=snapshot.map(|s|s.ordered().iter().map(|w|w.summary()).collect::<Vec<_>>().join(" · ")).unwrap_or_else(||if self.quota.busy.contains(&a.id){"正在更新".into()}else{"额度暂不可用".into()});
             if bar_tooltip(c.hit(x-14.0,1.0,28.0+extra,28.0,("quota-pin",&a.id)),format!("{} · {}\n{}",a.provider.name(),a.alias,summary)).clicked(){chosen=Some(a.id.clone());}
         }
         if let Some(id)=chosen{self.quota.config.selected=id;self.quota.config.save();self.show_page(6);}
     }
     pub(crate) fn page_quota(&mut self,c:&Card){
+        // 页面每帧都会走这里：登录态（本地读凭据）与倒计时都在这一帧对齐。
+        self.quota.poll_login();
+        // Antigravity 的 Gemini 账号用专属的釉面卡片：底色最先铺，胶囊、刷新、内容都叠在它上面。
+        let gemini_form=self.quota.config.selected_index().map(|i|{let a=&self.quota.config.accounts[i];a.provider==Provider::Gemini&&a.source.to_string_lossy()==quota::antigravity::SOURCE}).unwrap_or(false);
+        // 不再自绘卡片底色：底下那层由页面统一铺，自己再盖一块会露出圆角和色调的差。
         if c.hit(303.0,8.0,32.0,21.0,"quota-refresh").on_hover_text("刷新额度").clicked(){self.pending.push(Cmd::QuotaRefresh);}
         c.text(319.0,23.0,if self.quota.busy.is_empty(){"刷新"}else{"更新中"},10.5,W::Regular,theme::GRAY,H::Center);
         let Some(selected)=self.quota.config.selected_index() else{
@@ -418,7 +634,13 @@ impl App {
         for (column,index)in indices.iter().skip(start).take(3).enumerate(){let a=&self.quota.config.accounts[*index];let x=59.0+column as f32*99.0;let on=*index==selected;let colors=accent_colors(&self.quota.config,a);let color=colors[0];let(r,b)=crate::paint::capsule(c,x,30.0,94.0,21.0,&format!("quota-account-{}",a.id),if on{Color32::from_rgb(color.r()/5,color.g()/5,color.b()/5)}else{Color32::BLACK},theme::BTN_HOVER);let text=b.fit(&a.alias,10.5,W::Regular,84.0);b.text(x+47.0,45.0,&text,10.5,W::Regular,if on{colors[1]}else{theme::GRAY},H::Center);if r.on_hover_text(format!("{} · {}",a.provider.name(),a.alias)).clicked(){picked=Some(*index);}}
         if let Some(i)=picked{self.quota.config.selected=self.quota.config.accounts[i].id.clone();self.quota.config.save();}
         let a=&self.quota.config.accounts[selected];let result=self.quota.rows.get(&a.id);let snapshot=result.and_then(|r|r.as_ref().ok());
-        let colors=accent_colors(&self.quota.config,a);
+        let colors=ring_colors(&self.quota.config,a);
+        // 四条窗口时页面会被撑高到 208：行距、状态行、CLI 行一起下移，任何两行之间都留出空隙。
+        let tall=self.quota_card_rows()>2;
+        let rows_top=if tall{78.0}else{86.0};
+        let rows_pitch=if tall{24.0}else{35.0};
+        let status_y=if tall{176.0}else{154.0};
+        let cli_y=if tall{188.0}else{167.0};
         if let Some(s)=snapshot.filter(|s|s.at>0){
             if let Some(at)=chrono::DateTime::from_timestamp(s.at,0){
                 let at=at.with_timezone(&chrono::Local);let time=at.format(if at.date_naive()==chrono::Local::now().date_naive(){"%H:%M"}else{"%m/%d %H:%M"}).to_string();
@@ -428,10 +650,51 @@ impl App {
                     else if a.provider==Provider::Claude{format!("本地记录 · {time}")}
                     else if let Some(wallet)=&s.wallet{let b=wallet.primary();if wallet.balances.len()>1{let other=wallet.balances.iter().find(|other|other.currency!=b.currency).unwrap();format!("另有 {} {} · {time}",other.currency,other.full(other.total))}else{format!("{} · {time} 更新",b.currency)}}
                     else{format!("{time} 更新")};
-                let x=if a.provider.balance(){125.0}else{157.0};let width=357.0-x;let y=154.0;
+                // 有排期就补上「Ns 后刷新」：用户一眼知道下一次自己动的时间，不用猜。
+                let countdown=self.quota.countdown();
+                let status=match &countdown{Some(left)=>format!("{status} · {left}"),None=>status};
+                let x=if a.provider.balance(){125.0}else{157.0};let width=357.0-x;let y=status_y;
                 c.centered_text(x,y,&c.fit(&status,10.0,W::Regular,width),10.0,W::Regular,if stale.is_some()&&!busy{Color32::from_rgb(255,166,77)}else{theme::DIM},H::Left);
                 c.hit(x,y-6.0,width,8.0,("quota-update-time",&a.id)).on_hover_text(if let Some(reason)=stale{format!("{status}\n{reason}")}else{status});
+                if countdown.is_some(){c.ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));}
             }
+        }
+        // Gemini（本机 Antigravity 登录态）的专属卡片：固定三行额度 + 三圈釉面环，Claude/GPT 只在悬停明细里。
+        if gemini_form{
+            let id=a.id.clone();
+            let plan=snapshot.map(|s|s.plan.as_str()).filter(|p|!p.is_empty()).unwrap_or_default();
+            let title=if plan.is_empty(){"Gemini".to_string()}else{format!("Gemini · {plan}")};
+            c.text(157.0,62.0,&c.fit(&title,12.0,W::Semibold,145.0),12.0,W::Semibold,theme::WHITE,H::Left);
+            gemini_ring(c,snapshot,103.0,118.0,78.0);
+            let rows=snapshot.map(Snapshot::card_windows);
+            // 有 Claude/GPT 的周额度就把第四行也放上：只占一行，环上仍旧只画三圈。
+            let mut labels=vec![quota::antigravity::FIVE_HOUR_LABEL,quota::antigravity::GEMINI_WEEKLY_LABEL,quota::antigravity::ARGON_WEEKLY_LABEL];
+            if snapshot.is_some_and(|s|s.windows.iter().any(|w|w.label==quota::antigravity::CLAUDE_WEEKLY_LABEL)){
+                labels.push(quota::antigravity::CLAUDE_WEEKLY_LABEL);
+            }
+            let pitch=if labels.len()>3{23.0}else{30.0};
+            let now=chrono::Local::now().timestamp();
+            for (i,label) in labels.iter().enumerate(){
+                let y=(if labels.len()>3{82.0}else{88.0})+i as f32*pitch;
+                let window=snapshot.and_then(|s|s.windows.iter().find(|w|w.label==*label));
+                let color=window.map(|w|crate::quota_visual::quota_color(w.remaining)).unwrap_or(theme::GRAY);
+                c.circle(160.0,y-3.5,2.8,color);
+                let (head,head_color)=match window{Some(w)=>(format!("{label} {:.0}%",w.remaining),theme::WHITE),None=>(format!("{label} 读取中…"),theme::GRAY)};
+                c.text(169.0,y,&c.fit(&head,13.5,W::Semibold,180.0),13.5,W::Semibold,head_color,H::Left);
+                let sub=match window{
+                    Some(w)=>match crate::quota_visual::countdown_text(w.reset,now){Some(left)=>format!("重置倒计时：{left}"),None=>"重置时间未知".to_string()},
+                    None=>"等待刷新".to_string(),
+                };
+                c.text(169.0,y+10.0,&c.fit(&sub,if labels.len()>3{9.0}else{9.5},W::Regular,180.0),if labels.len()>3{9.0}else{9.5},W::Regular,theme::GRAY,H::Left);
+                c.hit(152.0,y-8.0,205.0,if labels.len()>3{21.0}else{26.0},("quota-window",&id,i)).on_hover_text(format!("{label}\n{sub}"));
+            }
+            if let Some(snapshot)=snapshot{
+                let details=c.hit(309.0,51.0,88.0,20.0,("api-quota-details",&id)).on_hover_text(snapshot_details(snapshot)).clicked();
+                if details{self.quota.detail_account=Some(id.clone());self.settings_tab=11;self.open_settings();}
+            }
+            let clicked={let login=self.quota.antigravity_login.as_ref();cli_login_line(c,login,&id,cli_y)};
+            if clicked{self.quota.detail_account=Some(id);self.settings_tab=11;self.open_settings();}
+            return;
         }
         if a.provider==Provider::WorkBuddy{
             logo(c,a.provider,85.0,105.0,44.0);
@@ -493,7 +756,7 @@ impl App {
             if let Some(snapshot)=snapshot{
                 let mut main=snapshot.windows.iter().collect::<Vec<_>>();main.sort_by(|a,b|a.remaining.total_cmp(&b.remaining));
                 let meter=Snapshot{windows:main.iter().take(2).map(|w|(**w).clone()).collect(),..Default::default()};
-                ring(c,a,Some(&meter),103.0,105.0,70.0,colors);
+                ring(c,a,Some(&meter),103.0,105.0,70.0,ring_colors(&self.quota.config,a));
                 let displayed=meter.rings();
                 let mut rows=snapshot.windows.iter().chain(snapshot.extra.iter()).take(3).collect::<Vec<_>>();
                 if let Some(limit)=main.first(){
@@ -524,7 +787,9 @@ impl App {
         let raw_plan=snapshot.map(|s|s.plan.as_str()).unwrap_or_default();let plan=match raw_plan{"pro"|"prolite"|"pro_lite"=>"Pro","plus"=>"Plus","free"=>"Free","team"|"business"=>"Business","enterprise"=>"Enterprise",other=>other};let label=if a.provider==Provider::Claude{"Claude · 本地记录".into()}else if plan.is_empty(){a.provider.name().to_owned()}else{format!("{} · {}",a.provider.name(),plan)};
         c.text(157.0,64.0,&c.fit(&label,12.0,W::Semibold,145.0),12.0,W::Semibold,theme::WHITE,H::Left);
         if let Some(s)=snapshot{
-            let windows=s.rings();let now=chrono::Local::now();
+            let windows=s.ordered();let now=chrono::Local::now();
+            // 四条窗口时行距收紧到 17.5，重置时间挪进悬停提示：不然会顶到下面的状态行。
+            let compact=windows.len()>2;
             if windows.is_empty() && a.provider==Provider::ZCode{
                 c.text(157.0,104.0,"官网未分配体验额度",11.0,W::Regular,theme::GRAY,H::Left);
             }else if windows.len()==1{
@@ -534,14 +799,32 @@ impl App {
             }else{
                 c.text(355.0,64.0,"剩余",10.5,W::Regular,theme::GRAY,H::Right);
                 for (i,w)in windows.iter().enumerate(){
-                    let y=86.0+i as f32*35.0;c.circle(159.0,y-4.0,2.5,colors[i]);
-                    c.text(168.0,y,&w.label,11.5,W::Semibold,theme::WHITE,H::Left);
                     let reset=quota_reset_text(s,w,&now);
-                    c.text(168.0,y+17.0,&c.fit(&reset,11.0,W::Regular,185.0),11.0,W::Regular,theme::GRAY,H::Left);
-                    c.centered_text(355.0,y+4.0,&w.value_text(),if w.amount.is_some(){13.0}else{22.0},W::Semibold,theme::WHITE,H::Right);
+                    if compact{
+                        // 四行窗口：标签在上、重置时间贴在下面一行（8pt，左对齐）。页面已撑到 208，
+                        // 行距 23 从 70 排到 139，重置行落在 149，还剩一截给状态行。
+                        let y=rows_top+i as f32*rows_pitch;
+                        c.circle(159.0,y-3.0,2.2,colors[i.min(2)]);
+                        c.text(168.0,y,&c.fit(&w.label,10.5,W::Semibold,150.0),10.5,W::Semibold,theme::WHITE,H::Left);
+                        c.centered_text(355.0,y,&w.value_text(),13.0,W::Semibold,theme::WHITE,H::Right);
+                        c.text(168.0,y+10.0,&c.fit(&reset,8.0,W::Regular,150.0),8.0,W::Regular,theme::GRAY,H::Left);
+                        c.hit(168.0,y-8.5,187.0,20.0,("quota-window",&a.id,i)).on_hover_text(format!("{} · {}\n{}",w.label,w.value_text(),reset));
+                    }else{
+                        let y=rows_top+i as f32*rows_pitch;
+                        c.circle(159.0,y-4.0,2.5,colors[i.min(2)]);
+                        c.text(168.0,y,&c.fit(&w.label,11.5,W::Semibold,150.0),11.5,W::Semibold,theme::WHITE,H::Left);
+                        c.centered_text(355.0,y+4.0,&w.value_text(),22.0,W::Semibold,theme::WHITE,H::Right);
+                        c.text(168.0,y+17.0,&c.fit(&reset,11.0,W::Regular,185.0),11.0,W::Regular,theme::GRAY,H::Left);
+                    }
                 }
             }
         }else{let message=if self.quota.busy.contains(&a.id){"正在更新额度…"}else{result.and_then(|r|r.as_ref().err()).map(String::as_str).unwrap_or("等待更新额度")};for(i,line)in c.wrap(message,11.0,W::Regular,197.0,2).iter().enumerate(){c.text(157.0,103.0+i as f32*17.0,line,11.0,W::Regular,theme::GRAY,H::Left);}}
+        // 卡片底部：本机 CLI 登录态。只对 Antigravity 账号有意义，读的是系统凭据，不发任何请求。
+        if gemini_form{
+            let id=a.id.clone();
+            let clicked={let login=self.quota.antigravity_login.as_ref();cli_login_line(c,login,&id,cli_y)};
+            if clicked{self.quota.detail_account=Some(id);self.settings_tab=11;self.open_settings();}
+        }
     }
     fn quota_open_connection(&mut self,id:Option<String>){
         if self.quota.kiro_connecting.is_some()||self.quota.api_connecting.is_some()||self.quota.workbuddy_connecting.is_some()||self.quota.deepseek_connecting.is_some()||self.quota.gemini_connecting.is_some()||self.quota.doubao_connecting.is_some()||self.quota.login.is_some(){self.quota.connect_open=true;return;}
@@ -553,6 +836,9 @@ impl App {
             if a.provider==Provider::Gemini{self.quota.gemini_email=quota::gemini::address(a).unwrap_or_default();}
         }
         self.quota.connect_target=id;self.quota.connect_open=true;
+        // 连接面板要告诉用户「本机有没有 Antigravity 登录态」，读一次系统凭据（毫秒级）。
+        self.quota.antigravity_email=quota::antigravity::available();
+        self.quota.refresh_login();
     }
     fn quota_remove_account(&mut self,id:&str){
         if let Some(a)=self.quota.config.accounts.iter().find(|a|a.id==id&&(a.provider.api_key()||a.provider==Provider::Doubao)).cloned(){
@@ -563,15 +849,43 @@ impl App {
             self.quota.config=candidate;self.quota.rows.remove(id);self.quota.stale.remove(id);self.quota.busy.remove(id);self.quota.save_snapshots();
             self.quota.note=match if a.provider==Provider::Doubao{quota::doubao::forget(&a)}else{quota::api::cleanup_pending(&self.quota.config)}{Ok(())=>"账号已移除".into(),Err(error)=>error};return;
         }
-        if let Some(a)=self.quota.config.accounts.iter().find(|a|a.id==id){match a.provider{Provider::GrokBot=>quota::grok::forget(a),Provider::Gemini=>quota::gemini::forget(a),Provider::DeepSeek=>quota::deepseek::forget(a),Provider::WorkBuddy=>quota::workbuddy::forget(a),_=>{}}}
+        if let Some(a)=self.quota.config.accounts.iter().find(|a|a.id==id){match a.provider{Provider::GrokBot=>quota::grok::forget(a),
+            // Antigravity 账号用的是系统凭据（用户的 Antigravity 登录态），删账号不能顺手把凭据清掉。
+            Provider::Gemini=>{if a.source.to_string_lossy()!=quota::antigravity::SOURCE{quota::gemini::forget(a)}},Provider::DeepSeek=>quota::deepseek::forget(a),Provider::WorkBuddy=>quota::workbuddy::forget(a),_=>{}}}
         self.quota.config.accounts.retain(|a|a.id!=id);self.quota.config.colors.remove(id);self.quota.rows.remove(id);self.quota.stale.remove(id);self.quota.busy.remove(id);self.quota.save_snapshots();
         if self.quota.config.selected==id{self.quota.config.selected=self.quota.config.accounts.first().map(|a|a.id.clone()).unwrap_or_default();}
     }
     pub(crate) fn quota_settings(&mut self,ui:&mut egui::Ui){
         let before=self.quota.config.clone();
         settings_card(ui,|ui|{
-            setting_row(ui,"开启 AI 额度","每 3 分钟自动更新",&mut self.quota.config.enabled);
+            setting_row(ui,"开启 AI 额度","打开额度页时每 30 秒更新，后台每 3 分钟",&mut self.quota.config.enabled);
             ui.separator();
+            if self.quota.config.accounts.iter().any(|a|a.provider==Provider::Gemini&&a.source.to_string_lossy()==quota::antigravity::SOURCE){
+                let login=self.quota.antigravity_login.clone();
+                ui.horizontal_wrapped(|ui|{
+                    ui.label(egui::RichText::new("Antigravity CLI 登录态").size(12.0).strong());
+                    let (text,color)=match &login{
+                        Some(login) if login.expired()=>(format!("{} · 令牌已过期",login.email),Color32::from_rgb(226,164,44)),
+                        Some(login)=>match login.expires_at.and_then(|at|chrono::DateTime::from_timestamp(at,0)).map(|at|at.with_timezone(&chrono::Local).format("%H:%M").to_string()){
+                            Some(when)=>(format!("{} · 令牌 {when} 到期",login.email),ui.visuals().weak_text_color()),
+                            None=>(format!("{} · 已登录",login.email),ui.visuals().weak_text_color()),
+                        },
+                        None=>("未检测到登录态".to_string(),Color32::from_rgb(226,164,44)),
+                    };
+                    ui.label(egui::RichText::new(text).size(11.0).color(color));
+                });
+                ui.horizontal_wrapped(|ui|{
+                    if ui.button("检测").clicked(){self.quota.renew_note=None;self.quota.refresh_login();}
+                    if ui.add_enabled(self.quota.renew_rx.is_none()&&login.is_some(),egui::Button::new(if self.quota.renew_rx.is_some(){"续期中…"}else{"立即续期"})).clicked(){self.quota.renew_auto=false;self.quota.renew();}
+                    if ui.button("打开 CLI 登录").clicked(){
+                        self.quota.renew_note=Some(match quota::antigravity::open_login(){Ok(())=>"已在新窗口启动 Antigravity CLI：按提示完成 Google 登录，然后点「检测」。".into(),Err(error)=>error});
+                    }
+                });
+                if let Some(note)=&self.quota.renew_note{ui.add(egui::Label::new(egui::RichText::new(note).size(11.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_rgb(231,175,108),Color32::from_rgb(151,94,28)))).wrap());}
+                ui.add(egui::Label::new(egui::RichText::new("令牌快到期（10 分钟内）会自动续期一次，只把新令牌放进内存，不改动 Antigravity 自己的文件；登录态与检测都只读系统凭据；岛仔不会在后台偷偷调用 CLI。").size(11.0).color(ui.visuals().weak_text_color())).wrap());
+                if self.quota.renew_rx.is_some(){ui.ctx().request_repaint_after(std::time::Duration::from_millis(150));}
+                ui.separator();
+            }
             setting_row(ui,"收起时显示常驻账号","WorkBuddy 积分在前，DeepSeek 余额在最后",&mut self.quota.config.compact);
         });
         ui.add_space(10.0);
@@ -612,7 +926,7 @@ impl App {
                             if details.pools.len()>1{if let Some(window)=s.windows.first(){ui.label(format!("{}：{} 点",window.label,window.value_text()));}}
                             ui.label(egui::RichText::new(kiro_details(s)).size(11.0));
                         }else{
-                            let windows=s.rings();let count=windows.len().max(1);let width=(ui.available_width()-12.0*(count-1) as f32)/count as f32;
+                            let windows=s.ordered();let count=windows.len().max(1);let width=(ui.available_width()-12.0*(count-1) as f32)/count as f32;
                             ui.horizontal_top(|ui|{ui.spacing_mut().item_spacing.x=12.0;for window in windows{ui.allocate_ui_with_layout(egui::vec2(width,30.0),egui::Layout::top_down(egui::Align::Min),|ui|{
                                 ui.horizontal(|ui|{ui.label(egui::RichText::new(format!("{}  剩余 {}",window.label,window.value_text())).size(11.0));});
                                 ui.add(egui::ProgressBar::new((window.remaining/100.0).clamp(0.0,1.0)).desired_width(width).desired_height(3.0).fill(accent_colors(&self.quota.config,&a)[0]));
@@ -730,7 +1044,17 @@ impl App {
                 if ui.add_enabled(self.quota.deepseek_connecting.is_none()&&!self.quota.deepseek_key.trim().is_empty(),egui::Button::new("验证并连接")).clicked(){self.quota.note.clear();self.quota.deepseek_connecting=Some(quota::deepseek::Connect::start(self.quota.alias.clone(),std::mem::take(&mut self.quota.deepseek_key)));}
                 if self.quota.deepseek_connecting.is_some(){ui.spinner();ui.label("正在连接 DeepSeek…");ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));}
             }else if self.quota.provider==Provider::Gemini{
-                ui.label(egui::RichText::new("读取 Gemini 网页的 5 小时与每周额度。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75))));
+                // 本机 Antigravity 登录态：读的是同一份 Google AI Pro 订阅额度，不用碰浏览器。
+                let detected=self.quota.antigravity_email.clone();
+                ui.label(egui::RichText::new(match &detected{Some(email)=>format!("本机 Antigravity 已登录 {email}"),None=>"未发现本机 Antigravity 登录态".into()}).size(12.0).color(if detected.is_some(){ui.visuals().weak_text_color()}else{Color32::from_rgb(226,164,44)}));
+                ui.horizontal_wrapped(|ui|{
+                    if ui.add_enabled(self.quota.antigravity_connecting.is_none(),egui::Button::new("用本机 Antigravity 登录态")).clicked(){self.quota.note.clear();self.quota.antigravity_connecting=Some(quota::antigravity::Connect::start(self.quota.alias.clone()));}
+                    if ui.add_enabled(self.quota.antigravity_connecting.is_none(),egui::Button::new("重新检测")).clicked(){self.quota.antigravity_email=quota::antigravity::available();}
+                });
+                ui.add(egui::Label::new(egui::RichText::new("读 5 小时额度，外加 Gemini 每周与 Gemini 4 Argon 每周：周额度要跑一次本机 Antigravity CLI（约 10 秒）。").size(11.0).color(ui.visuals().weak_text_color())).wrap());
+                if self.quota.antigravity_connecting.is_some(){ui.horizontal(|ui|{ui.spinner();ui.label("正在读取本机 Antigravity 额度…");if ui.button("取消").clicked(){self.quota.antigravity_connecting=None;self.quota.note="已取消 Antigravity 连接".into();}});ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));}
+                ui.separator();
+                ui.label(egui::RichText::new("或者按网页会话连接，读取 Gemini 网页的 5 小时与每周额度。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75))));
                 ui.horizontal_wrapped(|ui|{
                     if ui.button("打开默认浏览器登录").clicked(){self.pending.push(Cmd::OpenUrl("https://gemini.google.com/usage".into()));}
                     if ui.add_enabled(self.quota.gemini_connecting.is_none(),egui::Button::new("连接已登录的 Chrome")).clicked(){self.quota.note.clear();self.quota.gemini_connecting=Some(quota::gemini::Connect::start(self.quota.alias.clone(),self.quota.gemini_email.clone(),None,self.quota.connect_target.as_ref().and_then(|id|self.quota.config.accounts.iter().find(|a|&a.id==id)).and_then(|a|a.slot.clone())));}
@@ -830,6 +1154,34 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore="按需导出 27 像素常驻小环的实际渲染"]
+    fn island_ring_preview(){
+        let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_ISLAND_RING_PREVIEW").unwrap());std::fs::create_dir_all(&dest).unwrap();
+        let account=Account{id:"Gemini-antigravity".into(),provider:Provider::Gemini,alias:"user@example.com".into(),source:"antigravity".into(),slot:Some("antigravity".into()),enabled:true,pinned:true};
+        let window=|label:&str,remaining:f32|crate::quota::Window{label:label.into(),seconds:Some(604_800),remaining,reset:Some(4_102_444_800),amount:None};
+        let snapshot=Snapshot{windows:vec![window("5 小时",73.0),window("Gemini 每周",49.0),window("Gemini 4 Argon 每周",16.0)],..Default::default()};
+        let ctx=egui::Context::default();
+        // 默认 8 倍看清结构；传 1 可以看到真机 100% 缩放下的实际像素效果（配合放大查看）。
+        let ppp:f32=std::env::var("DAOZAI_ISLAND_RING_PPP").ok().and_then(|v|v.parse().ok()).unwrap_or(8.0);
+        ctx.set_pixels_per_point(ppp);
+        let size=egui::vec2(80.0,60.0);
+        let mut raster=crate::preview_raster::Raster::new((size.x*ppp)as usize,(size.y*ppp)as usize);
+        for _ in 0..3{
+            let output=ctx.run(egui::RawInput{screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,size)),..Default::default()},|ctx|{
+                egui::CentralPanel::default().frame(egui::Frame::new().fill(egui::Color32::from_rgb(24,26,30))).show(ctx,|ui|{
+                    let c=Card::new(ui,egui::Pos2::ZERO,ui.max_rect());
+                    gemini_ring(&c,Some(&snapshot),40.0,30.0,27.0);let _=&account;
+                });
+            });
+            raster.update_textures(&output.textures_delta);
+            let jobs=ctx.tessellate(output.shapes.clone(),output.pixels_per_point);
+            raster.buf.fill([0.09,0.10,0.12,1.0]);raster.draw(&jobs,output.pixels_per_point);
+            raster.free_textures(&output.textures_delta);
+        }
+        let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+        image::save_buffer(dest.join("island-ring.png"),&rgba,(size.x*ppp)as u32,(size.y*ppp)as u32,image::ColorType::Rgba8).unwrap();
+    }
     #[test]
     fn kiro_pool_details_include_monthly_reset_and_overage_once(){
         let s=quota::parse(Provider::Kiro,&serde_json::json!({"userInfo":{"userId":"details-user"},"usageBreakdownList":[{"resourceType":"CREDIT","usageLimitWithPrecision":1000,"currentUsageWithPrecision":1080,"currentOveragesWithPrecision":80,"overageCapWithPrecision":200,"nextDateReset":1796083200_i64}],"overageConfiguration":{"overageStatus":"ENABLED"}})).unwrap();
@@ -1006,6 +1358,80 @@ mod tests {
         assert_eq!(reset_text(Some(now.timestamp()),&now),"等待刷新");
         assert_eq!(reset_text(Some(now.timestamp()-1),&now),"等待刷新");
     }
+    #[test]
+    fn island_sized_ring_still_draws_three_arcs(){
+        let account=Account{id:"Gemini-antigravity".into(),provider:Provider::Gemini,alias:"user@example.com".into(),source:"antigravity".into(),slot:Some("antigravity".into()),enabled:true,pinned:true};
+        let window=|label:&str,remaining:f32|crate::quota::Window{label:label.into(),seconds:Some(604_800),remaining,reset:None,amount:None};
+        let snapshot=Snapshot{windows:vec![window("5 小时",88.0),window("Gemini 每周",56.0),window("Gemini 4 Argon 每周",28.0)],..Default::default()};
+        let ctx=egui::Context::default();
+        let output=ctx.run(egui::RawInput{screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(90.0,90.0))),..Default::default()},|ctx|{
+            egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{
+                let c=Card::new(ui,egui::Pos2::ZERO,ui.max_rect());
+                gemini_ring(&c,Some(&snapshot),45.0,45.0,27.0);
+            });
+        });
+        // 27 像素改用描边弧（Mesh 硬边在这个尺寸会露锯齿），所以按「不同半径的弧」数圈。
+        let mut radii:Vec<f32>=output.shapes.iter().filter_map(|shape|match &shape.shape{
+            egui::Shape::Path(path) if !path.points.is_empty()=>{
+                let r=path.points.iter().map(|p|((p.x-45.0).powi(2)+(p.y-45.0).powi(2)).sqrt()).sum::<f32>()/path.points.len() as f32;
+                Some((r*4.0).round()/4.0)
+            }
+            _=>None,
+        }).collect();
+        radii.sort_by(f32::total_cmp);radii.dedup();
+        let arcs=radii.len();
+        assert!(arcs>=3,"27 像素的常驻环也要画三圈，实际弧 {arcs}");
+    }
+    #[test]
+    fn island_ring_geometry_keeps_three_visible_bands(){
+        let(width,gap,radii)=crate::quota_visual::ring_layout(27.0,3,true);
+        assert_eq!(radii.len(),3);
+        assert!(width>=1.0&&gap>0.0);
+        for pair in radii.windows(2){assert!(pair[0]-pair[1]>width,"相邻两圈之间要留出肉眼可见的间隙");}
+        // 中央星不能压到最内圈：留出的空档至少半个环宽。
+        assert!(radii[2]-width/2.0>radii[2]*0.66,"星半径不能顶到内圈");
+    }
+    #[test]
+    fn quota_countdown_rounds_up_and_never_shows_negatives(){        assert_eq!(countdown_label(30.0).as_deref(),Some("30s 后刷新"));
+        // 还剩 0.2 秒也算 1 秒：显示 0s 会让人以为已经刷新过了。
+        assert_eq!(countdown_label(0.2).as_deref(),Some("1s 后刷新"));
+        assert_eq!(countdown_label(0.0).as_deref(),Some("0s 后刷新"));
+        assert_eq!(countdown_label(-3.5).as_deref(),Some("0s 后刷新"));
+        assert_eq!(countdown_label(f32::NAN),None);
+    }
+    #[test]
+    fn auto_renew_starts_ten_minutes_before_expiry_at_most_once_a_minute(){
+        let now=1_760_000_000;
+        let login=|expires|quota::antigravity::Login{email:"a@b.c".into(),expires_at:expires};
+        assert!(!renew_due(None,None,now),"没登录态不续期");
+        assert!(!renew_due(Some(&login(None)),None,now),"读不到到期时间就不猜");
+        assert!(!renew_due(Some(&login(Some(now+3600))),None,now),"离到期还早不必惊动");
+        assert!(renew_due(Some(&login(Some(now+300))),None,now),"10 分钟内该动手");
+        assert!(renew_due(Some(&login(Some(now-30))),None,now),"已经过期更要续");
+        assert!(!renew_due(Some(&login(Some(now+300))),Some(std::time::Instant::now()),now),"一分钟内不重复打 OAuth");
+    }
+    #[test]
+    fn renewed_expiry_survives_a_keyring_reread(){
+        // 系统凭据里还是旧时间，内存里刚续的必须留着，否则界面又跳回「已过期」并反复续期。
+        let mut login=Some(quota::antigravity::Login{email:"a@b.c".into(),expires_at:Some(100)});
+        keep_freshest(&mut login,Some(200));
+        assert_eq!(login.as_ref().and_then(|login|login.expires_at),Some(200));
+        keep_freshest(&mut login,Some(50));
+        assert_eq!(login.as_ref().and_then(|login|login.expires_at),Some(200),"旧值不能把内存令牌时间顶回去");
+        keep_freshest(&mut None,Some(300));
+    }
+    #[test]
+    fn auto_renew_fires_once_then_waits_a_minute(){
+        let mut state=State::default();
+        let now=1_760_000_000;
+        state.antigravity_login=Some(quota::antigravity::Login{email:"a@b.c".into(),expires_at:Some(now+120)});
+        assert!(state.auto_renew_if_due(now),"令牌两分钟后到期，应该自动续");
+        assert!(state.renew_auto,"自动续期要能区分出来，提示文案不一样");
+        assert!(!state.auto_renew_if_due(now),"一分钟内不重复打 OAuth");
+        let mut state=State::default();
+        state.antigravity_login=Some(quota::antigravity::Login{email:"a@b.c".into(),expires_at:Some(now+7200)});
+        assert!(!state.auto_renew_if_due(now),"还有两小时就别打扰");
+    }
 }
 
 // ---------------------------------------------------------------- 左右停靠：竖向额度
@@ -1062,10 +1488,10 @@ impl App {
                 summary="正在更新".into();
             }else{summary="余额暂不可用".into();}
         }else{
-            ring(c,&a,snapshot.as_ref(),cx,mid,26.0,accent_colors(&self.quota.config,&a));
+            if a.provider==Provider::Gemini&&a.source.to_string_lossy()==quota::antigravity::SOURCE{gemini_ring(c,snapshot.as_ref(),cx,mid,26.0);}else{ring(c,&a,snapshot.as_ref(),cx,mid,26.0,ring_colors(&self.quota.config,&a));}
             let mut same=self.quota.config.accounts.iter().filter(|other|other.provider==a.provider && other.enabled);
             if same.clone().count()>1{let n=same.position(|other|other.id==a.id).unwrap_or(0)+1;c.circle(cx+10.0,mid+9.0,4.5,Color32::from_gray(225));c.text(cx+10.0,mid+11.8,&n.to_string(),6.5,W::Bold,Color32::BLACK,H::Center);}
-            summary=snapshot.as_ref().map(|s|s.rings().iter().map(|w|w.summary()).collect::<Vec<_>>().join(" · ")).unwrap_or_else(||if self.quota.busy.contains(&a.id){"正在更新".into()}else{"额度暂不可用".into()});
+            summary=snapshot.as_ref().map(|s|s.ordered().iter().map(|w|w.summary()).collect::<Vec<_>>().join(" · ")).unwrap_or_else(||if self.quota.busy.contains(&a.id){"正在更新".into()}else{"额度暂不可用".into()});
         }
         let hit=c.hit(cx-17.0,mid-height/2.0,34.0,height,("quota-side",&a.id));
         if bar_tooltip(hit,format!("{} · {}\n{}",a.provider.name(),a.alias,summary)).clicked(){
