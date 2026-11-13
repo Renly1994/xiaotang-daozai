@@ -37,6 +37,7 @@ pub mod renderer;
 pub mod otp;
 pub mod quota;
 mod quota_ui;
+mod quota_visual;
 pub mod weather;
 mod weather_ui;
 mod pages;

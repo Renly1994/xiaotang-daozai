@@ -543,10 +543,12 @@ impl eframe::App for Shell {
         #[cfg(not(feature="record"))] let quota_demo=false;
         if !quota_demo {
             let (active,config)=(self.app.quota_active(),self.app.quota_config());
-            if !self.quota_sig.as_ref().is_some_and(|known|quota_sig_matches(known,active,config)) || self.quota_at.ready(Duration::from_secs(180)){
+            // 额度页展开时 30 秒一轮，其余时间 3 分钟一轮：看得见实时数据，又不白烧请求。
+            let every=if self.app.quota_page_live(){Duration::from_secs(30)}else{Duration::from_secs(180)};
+            if !self.quota_sig.as_ref().is_some_and(|known|quota_sig_matches(known,active,config)) || self.quota_at.ready(every){
                 let sig=quota_sig(active,config);
                 let accounts:Vec<_>=sig.1.iter().filter(|a|sig.0 && a.enabled).cloned().collect();
-                if self.quota.refresh(accounts.clone()){self.app.quota_pending(&accounts);self.quota_sig=Some(sig);self.quota_at=PollClock::now();}
+                if self.quota.refresh(accounts.clone()){self.app.quota_pending(&accounts);self.quota_sig=Some(sig);self.quota_at=PollClock::now();self.app.quota_scheduled(every);}
             }
             while let Some(ev)=self.quota.try_recv(self.app.quota_config()){self.app.quota_event(ev);}
         }
@@ -646,9 +648,10 @@ impl eframe::App for Shell {
                     #[cfg(windows)] match daozai::system::pick_files_for("选择 AI 账号的登录 JSON 文件",false){Ok(files)=>if let Some(path)=files.into_iter().next(){self.app.quota_set_source(path);},Err(_)=>self.app.say("无法选择登录文件")}
                 },
                 Cmd::QuotaRefresh=>{
-                    if self.quota_at.ready(Duration::from_secs(15)) {
+                    // 手动刷新 5 秒冷却就够：额度页现在 30 秒一轮，用户连点两下也没必要拖他 15 秒。
+                    if self.quota_at.ready(Duration::from_secs(5)) {
                         let (active,config)=(self.app.quota_active(),self.app.quota_config());let accounts:Vec<_>=config.accounts.iter().filter(|a|active && a.enabled).cloned().collect();
-                        if self.quota.refresh(accounts.clone()){self.app.quota_pending(&accounts);self.quota_at=PollClock::now();}
+                        if self.quota.refresh(accounts.clone()){self.app.quota_pending(&accounts);self.quota_at=PollClock::now();self.app.quota_scheduled(if self.app.quota_page_live(){Duration::from_secs(30)}else{Duration::from_secs(180)});}
                     }else{self.app.say("请稍后再刷新");}
                 },
                 Cmd::QuotaConnected=>{self.quota_sig=None;},

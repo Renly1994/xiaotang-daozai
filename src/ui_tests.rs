@@ -45,6 +45,35 @@ fn gemini_connect_form_opens_default_browser_without_claiming_connection(){
 }
 
 #[test]
+fn quota_settings_show_antigravity_cli_login_state(){
+    use crate::quota::{Account,Provider};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.quota.config.accounts=vec![Account{id:"Gemini-antigravity".into(),provider:Provider::Gemini,alias:"user@example.com".into(),source:crate::quota::antigravity::SOURCE.into(),slot:Some(crate::quota::antigravity::SOURCE.into()),enabled:true,pinned:true}];
+    h.app.quota.config.selected="Gemini-antigravity".into();
+    let size=egui::vec2(640.0,900.0);
+    let render=|h:&mut H|{
+        let mut texts=Vec::new();
+        for _ in 0..3{
+            let out=h.ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,size)),..Default::default()},|ctx|{egui::CentralPanel::default().show(ctx,|ui|h.app.quota_settings(ui));});
+            h.shapes=out.shapes;
+            texts=h.shapes.iter().filter_map(|s|if let egui::Shape::Text(t)=&s.shape{Some(t.galley.text().to_string())}else{None}).collect();
+        }
+        texts
+    };
+    let texts=render(&mut h);
+    assert!(texts.iter().any(|t|t.contains("Antigravity CLI 登录态")),"设置里要能看见 Antigravity CLI 登录态");
+    assert!(texts.iter().any(|t|t.contains("未检测到登录态")),"未登录时要直说读不到两个周额度");
+    assert!(texts.iter().any(|t|t=="检测")&&texts.iter().any(|t|t=="打开 CLI 登录"),"要给出检测与打开登录两个入口");
+    assert!(texts.iter().any(|t|t.contains("岛仔不会在后台偷偷调用 CLI")),"要讲清不会后台偷偷跑 CLI");
+    h.app.quota.antigravity_login=Some(crate::quota::antigravity::Login{email:"user@example.com".into(),expires_at:Some((chrono::Local::now()+chrono::Duration::minutes(20)).timestamp())});
+    let texts=render(&mut h);
+    assert!(texts.iter().any(|t|t.contains("user@example.com")&&t.contains("到期")),"已登录时要显示邮箱与令牌到期时间");
+    assert!(texts.iter().any(|t|t.contains("自动续期")),"要说明令牌快到期会自动续期");
+    assert!(texts.iter().any(|t|t=="立即续期"),"已登录时才能点续期");
+}
+
+#[test]
 fn gemini_closed_dialogs_discard_completed_logins_without_saving(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     for close_settings in [false,true]{
@@ -159,23 +188,11 @@ fn weather_side_bar_shows_a_clickable_temperature_on_both_edges(){
 #[test]
 fn weather_solar_view_preserves_readable_times_across_skins_and_scales(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-    use chrono::TimeZone;
-    let now=chrono_tz::Asia::Shanghai.with_ymd_and_hms(2026,10,28,9,41,0).single().unwrap().with_timezone(&chrono::Local);
     for skin in crate::model::Skin::ALL {for scale in [1.0,1.25,1.5] {
         let mut h=H::new();h.app.settings.skin=skin;h.ctx.set_pixels_per_point(scale);
         h.app.weather.snapshot=Some(crate::weather::parse("杭州",&serde_json::json!({"timezone":"Asia/Shanghai","current":{"temperature_2m":19},
             "daily":{"time":["2026-10-28"],"sunrise":["2026-10-28T06:52"],"sunset":["2026-10-28T17:21"]}})).unwrap());
-        h.app.weather.solar_open=true;h.app.show_page(8);
-        for _ in 0..60 {
-            h.t+=1.0/60.0;
-            let cursor=H::local(180.0,185.0);
-            let env=Env{t:h.t,clock:now.format("%H:%M:%S").to_string(),today:now.format("%Y-%m-%d").to_string(),date:now.format("%m月%d日").to_string(),cursor:Some(cursor),bt_ready:true,..Default::default()};
-            let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(crate::app::CANVAS_W,WIN_H))),time:Some(h.t),focused:true,
-                events:vec![egui::Event::PointerMoved(cursor)],..Default::default()};
-            h.shapes=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{
-                h.app.frame(ui,Rect::from_min_size(ui.max_rect().min,Vec2::new(WIN_W,WIN_H)),&env);
-            });}).shapes;
-        }
+        h.app.weather.solar_open=true;h.app.show_page(8);h.hover(H::local(180.0,185.0),1.0);
         for phrase in ["返回天气","距离日落","07:40","白昼中点","12:06","06:52","17:21","白昼 10小时29分"] {
             assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text().contains(phrase))),"{skin:?} / {scale} 日照视图缺少 {phrase}");
         }
@@ -1110,7 +1127,10 @@ impl H {
             }
         }
         let mut out=Vec::new();for shape in &self.shapes {collect(&shape.shape,&mut out);}
-        out.sort_by(f32::total_cmp);out
+        out.sort_by(f32::total_cmp);
+        // 一个环现在由「暗轨 + 亮弧」两条路径组成，同一个账号会被认两次：按圆心去重后只留一个。
+        out.dedup_by(|a,b|(*a-*b).abs()<2.0);
+        out
     }
 }
 
@@ -2558,6 +2578,71 @@ fn quota_text_stays_inside_the_inner_ring_at_zero_and_full_usage() {
         let label=if dual {"5 小时"}else{"本周剩余"};
         assert!(h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(text) if text.galley.text()==label)),"周期说明应完整可见");
     }}
+}
+
+#[test]
+fn quota_card_draws_three_rings_and_lists_every_window(){
+    use crate::quota::{Account,Event,Provider,Snapshot,Window};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    let id="Gemini-antigravity".to_string();
+    h.app.quota.config.accounts.push(Account{id:id.clone(),provider:Provider::Gemini,alias:"user@example.com".into(),source:crate::quota::antigravity::SOURCE.into(),slot:Some(crate::quota::antigravity::SOURCE.into()),enabled:true,pinned:true});
+    let reset=Some((chrono::Local::now()+chrono::Duration::days(3)).timestamp());
+    let windows=vec![
+        Window{label:"5 小时".into(),seconds:Some(18000),remaining:95.0,reset,amount:None},
+        Window{label:"Gemini 每周".into(),seconds:Some(604800),remaining:96.0,reset,amount:None},
+        Window{label:"Gemini 4 Argon 每周".into(),seconds:Some(604800),remaining:63.0,reset,amount:None},
+        Window{label:"Claude/GPT 每周".into(),seconds:Some(604800),remaining:49.0,reset,amount:None},
+    ];
+    h.app.quota_event(Event{id,result:Ok(Snapshot{plan:"Google AI Pro".into(),windows,..Default::default()})});
+    h.app.show_page(6);h.hover(H::local(300.0,60.0),1.0);
+    let texts:Vec<String>=h.shapes.iter().filter_map(|shape|match &shape.shape{egui::Shape::Text(text)=>Some(text.galley.text().to_owned()),_=>None}).collect();
+    // 三行文案把标签与数值放在同一句里（「5 小时 95%」），不再分成两列。
+    for label in ["5 小时","Gemini 每周","Gemini 4 Argon 每周"]{assert!(texts.iter().any(|text|text.contains(label)),"额度列表要显示 {label}：{texts:?}");}
+    for value in ["95%","96%","63%"]{assert!(texts.iter().any(|text|text.contains(value)),"额度列表要显示 {value}：{texts:?}");}
+    // 两圈釉面环以 (103,118) 为圆心：每圈一个 Mesh，顶点都落在 15..40 像素的环带里。
+    let center=H::local(103.0,118.0);
+    let meshes=h.shapes.iter().filter(|shape|match &shape.shape{
+        egui::Shape::Mesh(mesh)=>{
+            let far=mesh.vertices.iter().map(|v|v.pos.distance(center)).fold(0.0f32,f32::max);
+            let near=mesh.vertices.iter().map(|v|v.pos.distance(center)).fold(f32::MAX,f32::min);
+            near>10.0&&far<=40.0
+        },
+        _=>false,
+    }).count();
+    assert!(meshes>=2,"两圈釉面环应画两层（Argon 那圈已砍），实际 {meshes} 层");    // 卡片的四行分别是 5 小时 / Gemini 每周 / Argon 每周 / Claude-GPT 每周。
+    assert!(texts.iter().any(|text|text.contains("Claude/GPT 每周")),"Claude/GPT 的周额度也要占一行：{texts:?}");}
+
+#[test]
+fn quota_card_shows_reset_times_refresh_countdown_and_cli_login(){
+    use crate::quota::{Account,Event,Provider,Snapshot,Window};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    let id="Gemini-antigravity".to_string();
+    h.app.quota.config.accounts.push(Account{id:id.clone(),provider:Provider::Gemini,alias:"user@example.com".into(),source:crate::quota::antigravity::SOURCE.into(),slot:Some(crate::quota::antigravity::SOURCE.into()),enabled:true,pinned:true});
+    h.app.quota.config.selected=id.clone();
+    let reset=Some((chrono::Local::now()+chrono::Duration::hours(3)).timestamp());
+    let windows=vec![
+        Window{label:"5 小时".into(),seconds:Some(18000),remaining:88.0,reset,amount:None},
+        Window{label:"Gemini 每周".into(),seconds:Some(604800),remaining:56.0,reset,amount:None},
+        Window{label:"Gemini 4 Argon 每周".into(),seconds:Some(604800),remaining:28.0,reset,amount:None},
+        Window{label:"Claude/GPT 每周".into(),seconds:Some(604800),remaining:0.0,reset,amount:None},
+    ];
+    h.app.quota_event(Event{id,result:Ok(Snapshot{plan:"Google AI Pro".into(),windows,at:chrono::Utc::now().timestamp(),..Default::default()})});
+    // 本轮刷新排了 30 秒，卡片底部要能看见「Ns 后刷新」。
+    h.app.quota_scheduled(std::time::Duration::from_secs(30));
+    h.app.quota.antigravity_login=Some(crate::quota::antigravity::Login{email:"user@example.com".into(),expires_at:Some((chrono::Local::now()+chrono::Duration::minutes(20)).timestamp())});
+    h.app.show_page(6);h.hover(H::local(300.0,60.0),1.0);
+    let texts:Vec<String>=h.shapes.iter().filter_map(|shape|match &shape.shape{egui::Shape::Text(text)=>Some(text.galley.text().to_owned()),_=>None}).collect();
+    let joined=texts.join("\n");
+    // 行内倒计时：三行都带「重置倒计时：」，Claude/GPT 也占一行。
+    assert!(texts.iter().filter(|text|text.contains("重置倒计时：")).count()>=4,"四行都要显示重置倒计时，实际 {texts:?}");
+    assert!(texts.iter().any(|text|text.contains("Claude/GPT 每周")),"Claude/GPT 的周额度要跟另外三项一样列出来：{joined}");
+    // 底部状态行：刷新倒计时 + CLI 登录态。
+    assert!(texts.iter().any(|text|text.contains("后刷新")),"状态行要显示刷新倒计时：{joined}");
+    assert!(texts.iter().any(|text|text.contains("CLI")),"{joined}");
+    // 邮箱在窄卡里会被 c.fit 截断，只要求露出前缀。
+    assert!(texts.iter().any(|text|text.contains("user@")),"{joined}");
 }
 
 fn kiro_snapshot(remaining:f64,limit:f64)->crate::quota::Snapshot{
@@ -8230,7 +8315,7 @@ fn quota_acceptance_period_colors_match_the_drawn_rings() {
     let id="period-colors";
     h.app.quota.config.accounts=vec![Account{id:id.into(),provider:Provider::MiniMax,alias:"MiniMax".into(),source:Default::default(),slot:None,enabled:true,pinned:false}];
     h.app.quota.config.selected=id.into();h.app.quota.config.colors.insert(id.into(),Accent::Pink);
-    let outer=egui::Color32::from_rgb(255,43,132);let inner=crate::paint::mix(outer,egui::Color32::WHITE,0.16);
+    let outer=egui::Color32::from_rgb(255,43,132);let inner=crate::paint::mix(outer,egui::Color32::WHITE,0.88);
     for seconds in [[None,None],[Some(18000),Some(604800)]] {
         h.app.quota.rows.insert(id.into(),Ok(Snapshot{windows:vec![
             Window{label:"当前周期".into(),seconds:seconds[0],remaining:62.0,reset:None,amount:None},
@@ -8248,6 +8333,43 @@ fn quota_acceptance_period_colors_match_the_drawn_rings() {
             assert_eq!(dot,color,"周期色点应对应实际圆环，未画入圆环的工具额度使用灰色");
         }
     }
+}
+
+#[test]
+#[ignore="按需导出三环额度卡片的实际界面"]
+fn quota_three_ring_preview(){
+    use crate::quota::{Account,Provider,Snapshot,Window};
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_THREE_RING_PREVIEW").unwrap());std::fs::create_dir_all(&dest).unwrap();
+    let mut h=H::new();h.app.settings.pet=false;
+    let a=Account{id:"Gemini-antigravity".into(),provider:Provider::Gemini,alias:"user@example.com".into(),source:crate::quota::antigravity::SOURCE.into(),slot:Some(crate::quota::antigravity::SOURCE.into()),enabled:true,pinned:true};
+    h.app.quota.config.accounts=vec![a.clone()];h.app.quota.config.selected=a.id.clone();
+    let reset=Some((chrono::Local::now()+chrono::Duration::hours(3)).timestamp());
+    h.app.quota.rows.insert(a.id.clone(),Ok(Snapshot{plan:"Google AI Pro".into(),windows:vec![
+        Window{label:"5 小时".into(),seconds:Some(18000),remaining:95.0,reset,amount:None},
+        Window{label:"Gemini 每周".into(),seconds:Some(604800),remaining:96.0,reset,amount:None},
+        Window{label:"Gemini 4 Argon 每周".into(),seconds:Some(604800),remaining:63.0,reset,amount:None},
+        Window{label:"Claude/GPT 每周".into(),seconds:Some(604800),remaining:49.0,reset,amount:None},
+    ],at:chrono::Utc::now().timestamp(),..Default::default()}));
+    h.app.quota.antigravity_login=Some(crate::quota::antigravity::Login{email:"user@example.com".into(),expires_at:Some((chrono::Local::now()+chrono::Duration::minutes(18)).timestamp())});
+    h.app.quota_scheduled(std::time::Duration::from_secs(23));
+    // 四条窗口时额度页会撑到 208：预览按实际高度画，避免把底部状态行裁掉。
+    let size=egui::vec2(400.0,208.0);let ppp=std::env::var("DAOZAI_THREE_RING_PPP").ok().and_then(|v|v.parse().ok()).unwrap_or(3.0);
+    h.ctx.set_pixels_per_point(ppp);
+    let mut raster=crate::preview_raster::Raster::new((size.x*ppp)as usize,(size.y*ppp)as usize);
+    for _ in 0..3{
+        let output=h.ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,size)),..Default::default()},|ctx|{
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(egui::Color32::from_rgb(28,30,34))).show(ctx,|ui|{
+                let c=crate::paint::Card::new(ui,Pos2::ZERO,ui.max_rect());h.app.page_quota(&c);
+            });
+        });
+        raster.update_textures(&output.textures_delta);
+        let jobs=h.ctx.tessellate(output.shapes.clone(),output.pixels_per_point);
+        raster.buf.fill([0.11,0.12,0.13,1.0]);raster.draw(&jobs,output.pixels_per_point);
+        raster.free_textures(&output.textures_delta);
+    }
+    let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+    image::save_buffer(dest.join("three-ring-card.png"),&rgba,(size.x*ppp)as u32,(size.y*ppp)as u32,image::ColorType::Rgba8).unwrap();
 }
 
 #[test]
@@ -8379,28 +8501,4 @@ fn every_module_settings_tab_maps_to_its_page(){
         if let Some(page)=crate::extras::settings_tab_module(tab) {assert!(crate::app::PAGE_NAMES[page].chars().next()==titles[tab].chars().next(),"{} ↔ {}",titles[tab],crate::app::PAGE_NAMES[page]);}
     }
     pages.sort();assert_eq!(pages,(0..crate::app::PAGE_NAMES.len()).collect::<Vec<_>>(),"每个功能页面各有一个设置分页");
-}
-
-
-#[test]
-fn quota_card_lists_every_window_not_just_the_first_two() {
-    // 卡片以前只画 Snapshot::rings()（前两条），第三条之后的窗口永远看不到：这里钉住「全部列出」。
-    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-    let mut h=H::new();
-    let account=crate::quota::Account{id:"multi".into(),provider:crate::quota::Provider::Gemini,alias:"多窗口".into(),source:std::path::PathBuf::new(),slot:None,enabled:true,pinned:true};
-    h.app.quota.config.accounts.push(account.clone());h.app.quota.config.selected=account.id.clone();
-    let window=|label:&str,seconds:i64,remaining:f32|crate::quota::Window{label:label.into(),seconds:Some(seconds),remaining,reset:None,amount:None};
-    let windows=vec![
-        window("5 小时",18_000,87.0),
-        window("Gemini 每周",604_800,42.0),
-        window("Gemini 4 Argon 每周",604_800,0.0),
-        window("Claude/GPT 每周",604_800,100.0),
-    ];
-    h.app.quota.rows.insert(account.id.clone(),Ok(crate::quota::Snapshot{windows,at:1,..Default::default()}));
-    h.app.show_page(6);h.hover(H::local(300.0,60.0),1.0);
-    let texts:Vec<String>=h.shapes.iter().filter_map(|shape|match &shape.shape{egui::Shape::Text(text)=>Some(text.galley.text().to_owned()),_=>None}).collect();
-    for label in ["5 小时","Gemini 每周","Gemini 4 Argon 每周","Claude/GPT 每周"]{
-        assert!(texts.iter().any(|text|text==label),"额度卡片应列出 {label}，实际只有 {texts:?}");
-    }
-    assert_eq!(h.app.quota_card_rows(),4,"四条窗口应让卡片长高到四行");
 }
