@@ -71,8 +71,6 @@ pub(crate) const PAGE_SETTINGS_TABS: [usize; 9] = [1,2,3,5,4,7,11,8,12];
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
 const HOVER_INTENT: f64 = 0.20;
 const MINIMAL_HOVER_INTENT: f64 = 0.40;
-/// 移开后等待多久开始收起；这段时间内回来不会收。
-const LEAVE_DELAY: f64 = 0.12;
 const SWELL: (f32, f32) = (1.075, 1.13);
 // 展开：欠阻尼，末段约 5% 过冲后回落；高度略软于宽度，像「垂落」下来。
 const OPEN_W: (f32, f32) = (330.0, 0.70);
@@ -2525,7 +2523,7 @@ impl App {
             self.hover_since = None;
             if self.open {
                 let since = *self.leave_since.get_or_insert(t);
-                if t - since >= LEAVE_DELAY {
+                if t - since >= self.settings.collapse_delay_ms as f64 / 1000.0 {
                     self.open = false;
                     self.music_volume_open=false;
                     self.leave_since = None;

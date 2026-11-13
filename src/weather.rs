@@ -1,4 +1,5 @@
-//! 天气：按城市（留空时按网络出口定位）读取 Open-Meteo 的实况与七日预报。
+//! 天气：按城市读取 Open-Meteo 的实况与七日预报；自动定位优先使用 Windows
+//! 系统定位，系统定位不可用时才回退到网络出口。
 //! 只保留最近一次结果用于离线展示，不读取、也不上传任何账号信息。
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -190,10 +191,137 @@ pub fn locate(agent: &ureq::Agent) -> Result<Position, String> {
         .or_else(|| value["region"].as_str().filter(|s| !s.trim().is_empty()))
         .or_else(|| value["country"].as_str().filter(|s| !s.trim().is_empty()))
         .unwrap_or("当地").trim().to_string();
-    let region=value["region"].as_str().unwrap_or_default().to_string();
+    let region=value["region"].as_str().unwrap_or_default().trim();
+    let region=if region.is_empty() {"网络出口".into()} else {format!("{region} · 网络出口")};
     let position=Position { lat, lon, label, region };
     if !position.valid() {return Err("定位结果坐标无效".into());}
     Ok(position)
+}
+
+/// Windows 系统定位：优先使用 Wi-Fi/GPS 等系统位置，避免公共网络出口把城市判错。
+/// 用户未授权、系统定位关闭或超时时返回错误，由调用方回退到网络出口。
+#[cfg(windows)]
+fn system_position() -> Result<Position, String> {
+    use windows::Devices::Geolocation::{Geolocator, GeolocationAccessStatus};
+    use windows::Foundation::{AsyncStatus, IAsyncOperation, TimeSpan};
+    use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
+
+    fn wait<T: windows::core::RuntimeType + 'static>(operation: &IAsyncOperation<T>, timeout: Duration) -> Result<T, String> {
+        let started = std::time::Instant::now();
+        loop {
+            match operation.Status() {
+                Ok(AsyncStatus::Started) => {
+                    if started.elapsed() >= timeout {
+                        let _ = operation.Cancel();
+                        return Err("系统定位等待超时".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Ok(_) => return operation.GetResults().map_err(|error| format!("系统定位失败：{error}")),
+                Err(error) => return Err(format!("系统定位状态读取失败：{error}")),
+            }
+        }
+    }
+
+    struct Apartment(bool);
+    impl Drop for Apartment {
+        fn drop(&mut self) {
+            if self.0 {
+                unsafe { RoUninitialize(); }
+            }
+        }
+    }
+
+    let initialized = unsafe { RoInitialize(RO_INIT_MULTITHREADED).is_ok() };
+    let _apartment = Apartment(initialized);
+    let access = wait(
+        &Geolocator::RequestAccessAsync().map_err(|error| format!("系统定位初始化失败：{error}"))?,
+        Duration::from_secs(10),
+    )?;
+    if access != GeolocationAccessStatus::Allowed {
+        return Err("系统定位未授权".into());
+    }
+
+    let locator = Geolocator::new().map_err(|error| format!("系统定位初始化失败：{error}"))?;
+    let position = wait(
+        &locator.GetGeopositionAsyncWithAgeAndTimeout(
+            TimeSpan { Duration: 0 },
+            TimeSpan { Duration: 100_000_000 },
+        )
+        .map_err(|error| format!("系统定位请求失败：{error}"))?,
+        Duration::from_secs(12),
+    )?;
+    let point = position
+        .Coordinate()
+        .map_err(|error| format!("系统定位坐标无效：{error}"))?
+        .Point()
+        .map_err(|error| format!("系统定位坐标无效：{error}"))?
+        .Position()
+        .map_err(|error| format!("系统定位坐标无效：{error}"))?;
+    let civic = position.CivicAddress().ok();
+    let city = civic.as_ref()
+        .and_then(|address| address.City().ok())
+        .map(|city| city.to_string_lossy())
+        .unwrap_or_default();
+    let state = civic.as_ref()
+        .and_then(|address| address.State().ok())
+        .map(|state| state.to_string_lossy())
+        .unwrap_or_default();
+    let label = if city.trim().is_empty() { "当前位置".into() } else { city.trim().to_string() };
+    let region = if state.trim().is_empty() {
+        "Windows 系统定位".into()
+    } else {
+        format!("{} · Windows 系统定位", state.trim())
+    };
+    let position = Position { lat: point.Latitude, lon: point.Longitude, label, region };
+    if !position.valid() {
+        return Err("系统定位坐标无效".into());
+    }
+    Ok(position)
+}
+
+/// BigDataCloud 反向地理编码：只把刚从系统定位取得的坐标换成城市名，失败时保留「当前位置」。
+fn reverse_geocode(agent: &ureq::Agent, position: Position) -> Result<Position, String> {
+    let mut url = url::Url::parse("https://api.bigdatacloud.net/data/reverse-geocode-client")
+        .map_err(|_| "反向地理编码地址无效")?;
+    url.query_pairs_mut()
+        .append_pair("latitude", &format!("{:.5}", position.lat))
+        .append_pair("longitude", &format!("{:.5}", position.lon))
+        .append_pair("localityLanguage", "zh-CN");
+    let value = get(agent, &url)?;
+    reverse_position(position, &value).ok_or_else(|| "反向地理编码没有返回城市名".into())
+}
+
+fn reverse_position(base: Position, value: &Value) -> Option<Position> {
+    let text = |key: &str| value[key].as_str().map(str::trim).filter(|text| !text.is_empty());
+    let label = text("city")
+        .or_else(|| text("locality"))
+        .or_else(|| text("principalSubdivision"))?
+        .to_string();
+    let mut region = Vec::new();
+    if let Some(subdivision) = text("principalSubdivision") {
+        region.push(subdivision.to_string());
+    }
+    if let Some(country) = text("countryName") {
+        if country != "中华人民共和国" && country != "中国" {
+            region.push(country.to_string());
+        }
+    }
+    let region = if region.is_empty() {
+        "Windows 系统定位".into()
+    } else {
+        format!("{} · Windows 系统定位", region.join(" · "))
+    };
+    Some(Position { label, region, ..base })
+}
+
+/// 自动定位：先尝试 Windows 系统定位，再回退到网络出口。
+fn auto_position(agent: &ureq::Agent) -> Result<Position, String> {
+    #[cfg(windows)]
+    if let Ok(position) = system_position() {
+        return Ok(reverse_geocode(agent, position.clone()).unwrap_or(position));
+    }
+    locate(agent)
 }
 
 /// 中文行政区后缀：输入「广州市」时还要查「广州」，地理库里很多城市只收录了不带后缀的名字。
@@ -315,7 +443,7 @@ pub fn fetch(agent: &ureq::Agent, city: &str) -> Result<Snapshot, String> {
 
 fn fetch_at(agent: &ureq::Agent, city: &str, selected: Option<&Position>) -> Result<Snapshot, String> {
     let city = city.trim();
-    let position = if city.is_empty() { locate(agent)? }
+    let position = if city.is_empty() { auto_position(agent)? }
         else if let Some(position)=selected.filter(|p|p.valid() && p.label==city) {position.clone()}
         else { geocode(agent, city)? };
     fetch_forecast(agent, position)
@@ -956,13 +1084,44 @@ mod tests {
 
 
     #[test]
+    #[cfg(windows)]
+    #[ignore="按需联网核验系统定位与反向地理编码"]
+    fn weather_reverse_probe(){
+        let agent=http_agent();
+        let position=system_position().expect("Windows 系统定位失败");
+        let position=reverse_geocode(&agent,position).expect("反向地理编码失败");
+        eprintln!("reverse_place={} region={} lat={:.4} lon={:.4}",position.label,position.region,position.lat,position.lon);
+    }
+
+    #[test]
+    fn reverse_geocode_prefers_city_and_keeps_coordinates(){
+        let base=Position{lat:29.6767,lon:116.0095,label:"当前位置".into(),region:"Windows 系统定位".into()};
+        let value=json!({"city":"九江市","locality":"濂溪區","principalSubdivision":"江西省","countryName":"中华人民共和国"});
+        let position=reverse_position(base,&value).expect("应解析出城市名");
+        assert_eq!(position.label,"九江市");
+        assert_eq!(position.lat,29.6767);
+        assert!(position.region.contains("江西省"));
+        assert!(position.region.contains("Windows 系统定位"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    #[ignore="按需核验 Windows 系统定位"]
+    fn weather_system_location_probe(){
+        let position=system_position().expect("Windows 系统定位失败");
+        eprintln!("system_place={} region={} lat={:.4} lon={:.4}",position.label,position.region,position.lat,position.lon);
+    }
+
+    #[test]
     #[ignore="按需联网核验本机定位与天气"]
     fn weather_local_probe(){
         let agent = http_agent();
         let auto = fetch(&agent, "").expect("自动定位失败");
         eprintln!("auto_place={} temp={:.1} code={} sunrise={:?} sunset={:?} days={:?}", auto.place, auto.temp, auto.code, auto.sunrise, auto.sunset,
             auto.days.iter().map(|d| (&d.label, d.high, d.low, d.rain)).collect::<Vec<_>>());
-        let named = fetch(&agent, "杭州").expect("按城市查询失败");
+        let candidates = search_cities(&agent, "杭州").expect("杭州搜索失败");
+        let city = candidates.iter().find(|p| p.label == "杭州市").or_else(|| candidates.first()).expect("杭州没有候选");
+        let named = fetch_at(&agent, &city.label, Some(city)).expect("按城市查询失败");
         println!("named_place={} temp={:.1}", named.place, named.temp);
     }
 

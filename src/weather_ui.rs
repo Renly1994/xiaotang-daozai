@@ -768,7 +768,7 @@ impl App {
         // 背景层：点面板外任何地方都收起。
         if c.live && self.weather.picker_open && c.hit(0.0,0.0,419.0,WEATHER_H,"weather-picker-backdrop").clicked() {pick=Some(Pick::Close);}
         let mut rows:Vec<(Option<weather::Position>,String,String)>=vec![(None,"自动定位".into(),
-            self.weather.cached_for("",None).map(|s|s.place.clone()).unwrap_or_else(||"按网络出口".into()))];
+            self.weather.cached_for("",None).map(|s|s.place.clone()).unwrap_or_else(||"Windows 定位优先".into()))];
         for p in &self.settings.weather_saved {rows.push((Some(p.clone()),p.label.clone(),p.region.split(" · ").next().unwrap_or_default().to_string()));}
         let row=27.0;
         let h=rows.len() as f32*row+row+10.0;
@@ -1075,7 +1075,10 @@ impl App {
                 let city=position.as_ref().map(|p|p.label.as_str()).unwrap_or("");
                 let cached=self.weather.cached_for(city,position.as_ref()).cloned();
                 let (title,detail)=match &position {
-                    None=>("自动定位".to_string(),cached.as_ref().map(|s|format!("按网络出口识别 · 当前为 {}",s.place)).unwrap_or_else(||"按网络出口识别所在城市；使用代理时可能是代理所在地".into())),
+                    None=>("自动定位".to_string(),cached.as_ref().map(|s|{
+                        let source=if s.position.as_ref().is_some_and(|p|p.region.contains("Windows 系统定位")){"Windows 系统定位"}else{"网络出口"};
+                        if s.place=="当前位置" {format!("{source} · 已获取当前位置")} else {format!("{source} · 当前为 {}",s.place)}
+                    }).unwrap_or_else(||"优先使用 Windows 系统定位；未授权时按网络出口识别".into())),
                     Some(p)=>(p.label.clone(),p.region.clone()),
                 };
                 let (click,remove)=city_row(ui,position==current,position.is_some(),&title,&detail,cached.as_ref(),accent);
@@ -1122,6 +1125,10 @@ impl App {
                 ui.hyperlink_to("CC BY 4.0","https://creativecommons.org/licenses/by/4.0/");
                 ui.label(egui::RichText::new("·").color(ui.visuals().weak_text_color()));
                 ui.hyperlink_to("Open-Meteo","https://open-meteo.com/");
+            });
+            ui.separator();
+            info_row(ui,"城市名",|ui|{
+                ui.hyperlink_to("BigDataCloud","https://www.bigdatacloud.com/");
             });
         });
     }

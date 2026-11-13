@@ -603,6 +603,7 @@ fn v0649_settings_and_mail_accounts_survive_upgrade(){
     assert!(upgraded.display_id.is_empty() && upgraded.avoid_apps.is_empty());
     assert!(upgraded.avoid_browsers && upgraded.bluetooth_notifications);
     assert!(!upgraded.clock_12h && !upgraded.notification_preview);
+    assert_eq!(upgraded.collapse_delay_ms,crate::model::COLLAPSE_DELAY_DEFAULT_MS,"旧配置应使用默认的移出收起延迟");
     assert_eq!(upgraded.clock_period,0);assert_eq!(upgraded.mail_code_hide_seconds,60);
     for _ in 0..2 {
         crate::model::Settings::load().save();
@@ -2153,6 +2154,17 @@ fn music_lyrics_respect_the_switch_and_do_not_show_stale_or_unsynced_lines() {
 }
 
 #[test]
+fn collapse_delay_setting_clamps_and_round_trips(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let _h=H::new();
+    let directory=crate::model::config_dir();
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("settings.txt"),"collapse_delay_ms=9999\n").unwrap();
+    assert_eq!(crate::model::Settings::load().collapse_delay_ms,crate::model::COLLAPSE_DELAY_MAX_MS);
+    let mut settings=crate::model::Settings::load();settings.collapse_delay_ms=350;settings.save();
+    assert_eq!(crate::model::Settings::load().collapse_delay_ms,350);
+}
+
+#[test]
 fn hover_expands_with_overshoot_and_leave_collapses() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut h = H::new();
@@ -2170,6 +2182,20 @@ fn hover_expands_with_overshoot_and_leave_collapses() {
         h.frame(vec![]);
     }
     assert!(h.app.progress() < 0.02, "移开后应收起");
+}
+
+#[test]
+fn leave_delay_setting_keeps_the_island_open_for_the_configured_time() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = H::new();
+    h.hover(Pos2::new(WIN_W / 2.0, 12.0), 1.0);
+    assert!(h.app.open, "悬停后应展开");
+    h.app.settings.collapse_delay_ms = 600;
+    h.cursor = Some(Pos2::new(WIN_W / 2.0, PH + 30.0));
+    for _ in 0..20 { h.frame(vec![]); }
+    assert!(h.app.open, "600ms 延迟内移开鼠标不应立即收起");
+    for _ in 0..20 { h.frame(vec![]); }
+    assert!(!h.app.open, "超过 600ms 后应开始收起");
 }
 
 #[test]

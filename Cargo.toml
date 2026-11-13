@@ -99,7 +99,7 @@ windows = { version = "0.58", features = [
   "Win32_Devices_DeviceAndDriverInstallation",
   "Win32_Devices_Properties",
   "Win32_Devices_Bluetooth",
-  "Devices_Bluetooth", "Devices_Enumeration",
+  "Devices_Bluetooth", "Devices_Enumeration", "Devices_Geolocation",
 ] }
 # v0.5.5 邮件：IMAP 走系统 TLS，凭据进 Windows 凭据管理器。
 imap = "2.4"
