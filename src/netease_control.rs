@@ -58,6 +58,179 @@ pub fn config()->Config{
     cfg
 }
 
+// ---------------------------------------------------------------
+// 快捷方式：把 --remote-debugging-port 写进客户端快捷方式
+// ---------------------------------------------------------------
+// CEF 的调试端口只能在进程启动时打开，所以必须改启动参数。手工改快捷方式对普通用户太麻烦，
+// 这里直接改写 .lnk 的参数字段（二进制格式，LinkFlags 置 HasArguments，其余字节原样保留），
+// 幂等且先备份；扫描范围是开始菜单与桌面，按内容识别是否指向 cloudmusic.exe，
+// 所以快捷方式被改名、换成英文名也能认出来，也不会误改别的程序。
+fn le16(b:&[u8],at:usize)->Option<u16>{Some(u16::from_le_bytes([*b.get(at)?,*b.get(at+1)?]))}
+fn le32(b:&[u8],at:usize)->Option<u32>{Some(u32::from_le_bytes([*b.get(at)?,*b.get(at+1)?,*b.get(at+2)?,*b.get(at+3)?]))}
+
+/// 幂等地把 .lnk 的命令行参数段设为指定值；其余段（IDList / LinkInfo / ExtraData）原样保留。
+/// 纯字节改写，不用 COM。返回是否成功。
+fn patch_shortcut(path:&std::path::Path,arg:&str)->bool{
+    let Ok(bytes)=std::fs::read(path) else{return false};
+    if bytes.len()<76{return false;}
+    let Some(flags)=le32(&bytes,0x14) else{return false};
+    let unicode=flags&0x80!=0;
+    let mut pos=76usize;
+    if flags&0x1!=0{
+        let Some(n)=le16(&bytes,pos) else{return false};
+        pos+=2+n as usize;
+    }
+    if flags&0x2!=0{
+        let Some(n)=le32(&bytes,pos) else{return false};
+        pos+=n as usize;
+    }
+    if pos>bytes.len(){return false;}
+    let fixed_end=pos;
+    let mut parts:Vec<(u32,Vec<u8>)>=Vec::new();
+    let mut q=pos;
+    for bit in [0x4u32,0x8,0x10,0x20,0x40]{
+        if flags&bit==0{continue;}
+        let Some(count)=le16(&bytes,q) else{return false};
+        let width=if unicode{2}else{1};
+        let n=2+count as usize*width;
+        if q+n>bytes.len(){return false;}
+        parts.push((bit,bytes[q..q+n].to_vec()));
+        q+=n;
+    }
+    let extra=&bytes[q..];
+    let text:Vec<u8>=if unicode{arg.encode_utf16().flat_map(|c|c.to_le_bytes()).collect()}else{arg.as_bytes().to_vec()};
+    let count=(text.len()/if unicode{2}else{1}) as u16;
+    let mut newarg=count.to_le_bytes().to_vec();
+    newarg.extend_from_slice(&text);
+    let mut stringdata=Vec::new();
+    for bit in [0x4u32,0x8,0x10,0x20,0x40]{
+        if bit==0x20{stringdata.extend_from_slice(&newarg);continue;}
+        if let Some((_,data))=parts.iter().find(|(b,_)|*b==bit){stringdata.extend_from_slice(data);}
+    }
+    let mut out=bytes[..0x14].to_vec();
+    out.extend_from_slice(&(flags|0x20).to_le_bytes());
+    out.extend_from_slice(&bytes[0x18..fixed_end]);
+    out.extend_from_slice(&stringdata);
+    out.extend_from_slice(extra);
+    if out==bytes{return true;}
+    let backup=path.with_extension("lnk.bak-cdp");
+    if !backup.exists(){let _=std::fs::copy(path,&backup);}
+    std::fs::write(path,&out).is_ok()
+}
+
+/// 快捷方式可能所在的目录：开始菜单（用户级/全局）与桌面（用户/公共）。
+fn shortcut_dirs()->Vec<std::path::PathBuf>{
+    let mut dirs=Vec::new();
+    if let Some(appdata)=std::env::var_os("APPDATA"){
+        dirs.push(std::path::PathBuf::from(appdata).join("Microsoft/Windows/Start Menu/Programs"));
+    }
+    dirs.push(std::path::PathBuf::from("C:/ProgramData/Microsoft/Windows/Start Menu/Programs"));
+    if let Some(home)=std::env::var_os("USERPROFILE"){
+        dirs.push(std::path::PathBuf::from(home).join("Desktop"));
+    }
+    if let Some(public)=std::env::var_os("PUBLIC"){
+        dirs.push(std::path::PathBuf::from(public).join("Desktop"));
+    }
+    dirs
+}
+
+/// `.lnk` 的内容里是否指向网易云客户端。桌面的快捷方式名字不固定（可能被改名或英文名），
+/// 只按文件名会把它们漏掉；按内容匹配才不会误改别的快捷方式。LinkInfo 里的路径通常是 ASCII，
+/// 另外补 UTF-16 形态（EnvironmentVariableDataBlock）。
+fn points_to_cloudmusic(bytes:&[u8])->bool{
+    let ascii=b"cloudmusic.exe";
+    if bytes.windows(ascii.len()).any(|window|window.eq_ignore_ascii_case(ascii)){return true;}
+    for text in ["cloudmusic.exe","CloudMusic.exe"]{
+        let wide:Vec<u8>=text.encode_utf16().flat_map(|unit|unit.to_le_bytes()).collect();
+        if bytes.windows(wide.len()).any(|window|window==wide){return true;}
+    }
+    false
+}
+
+/// 所有指向网易云的快捷方式：开始菜单、用户桌面、公共桌面。
+fn shortcut_paths()->Vec<std::path::PathBuf>{
+    let mut found=Vec::new();
+    for dir in shortcut_dirs(){
+        let Ok(entries)=std::fs::read_dir(&dir) else{continue;};
+        for entry in entries.flatten(){
+            let path=entry.path();
+            if !path.extension().and_then(|ext|ext.to_str()).is_some_and(|ext|ext.eq_ignore_ascii_case("lnk")){continue;}
+            if std::fs::read(&path).is_ok_and(|bytes|points_to_cloudmusic(&bytes)){found.push(path);}
+        }
+        // 兜底：万一某个 .lnk 用了读不到内容的格式，按标准文件名仍然修它。
+        let named=dir.join("网易云音乐.lnk");
+        if named.is_file() && !found.contains(&named){found.push(named);}
+    }
+    found
+}
+
+fn invalidate_shortcut_cache(){
+    if let Ok(mut guard)=FIXED_CACHE.lock(){*guard=None;}
+}
+
+/// 把已存在的快捷方式都补上调试端口参数：开始菜单与桌面一起修。
+/// 完全没有快捷方式时返回 false，由自动托管兜底。
+fn ensure_shortcut(port:u16)->bool{
+    let arg=format!("--remote-debugging-port={}",port);
+    let mut ok=false;
+    for path in shortcut_paths(){
+        if patch_shortcut(&path,&arg){ok=true;}
+    }
+    if ok{invalidate_shortcut_cache();}
+    ok
+}
+
+/// 用户手动指定的快捷方式：检查扩展名后幂等写入调试端口参数。
+pub fn fix_shortcut(path:&std::path::Path)->Result<String,String>{
+    if path.extension().and_then(|e|e.to_str()).map_or(true,|e|!e.eq_ignore_ascii_case("lnk")){
+        return Err("请选择 .lnk 快捷方式".to_string());
+    }
+    // 只接受指向网易云的快捷方式：否则会把调试参数写到别的程序上。
+    let bytes=std::fs::read(path).map_err(|error|format!("读取失败：{error}"))?;
+    if !points_to_cloudmusic(&bytes){
+        return Err("这不是网易云的快捷方式，请重新选择".to_string());
+    }
+    let arg=format!("--remote-debugging-port={}",config().port);
+    if patch_shortcut(path,&arg){
+        invalidate_shortcut_cache();
+        Ok("已修改网易云快捷方式".to_string())
+    }
+    else{Err("修改失败，请检查快捷方式文件".to_string())}
+}
+
+/// 设置页状态：各处的快捷方式是否都带了调试端口参数。
+/// 要遍历桌面文件，结果缓存 2 秒——否则每帧调用都会把整张桌面读一遍。
+pub fn shortcut_fixed()->bool{
+    if let Ok(guard)=FIXED_CACHE.lock(){
+        if let Some((at,value))=*guard{
+            if at.elapsed()<Duration::from_secs(2){return value;}
+        }
+    }
+    let needle_u16:Vec<u8>="--remote-debugging-port".encode_utf16().flat_map(|c|c.to_le_bytes()).collect();
+    let needle_ascii=b"--remote-debugging-port".to_vec();
+    let paths=shortcut_paths();
+    let value=!paths.is_empty() && paths.iter().all(|path|std::fs::read(path).is_ok_and(|bytes|{
+        bytes.windows(needle_u16.len()).any(|w|w==needle_u16.as_slice())
+            || bytes.windows(needle_ascii.len()).any(|w|w==needle_ascii.as_slice())
+    }));
+    if let Ok(mut guard)=FIXED_CACHE.lock(){*guard=Some((Instant::now(),value));}
+    value
+}
+
+static FIXED_CACHE:Mutex<Option<(Instant,bool)>>=Mutex::new(None);
+
+/// 一键修复：扫描开始菜单与桌面，给所有指向网易云的快捷方式补上调试端口参数。
+/// 返回修好的数量；0 表示没找到快捷方式，交给调用方提示手动选择。
+pub fn fix_all()->Result<usize,String>{
+    let arg=format!("--remote-debugging-port={}",config().port);
+    let mut count=0;
+    for path in shortcut_paths(){
+        if patch_shortcut(&path,&arg){count+=1;}
+    }
+    if count>0{invalidate_shortcut_cache();}
+    Ok(count)
+}
+
 fn valid(seconds:f64)->bool{seconds.is_finite() && (0.0..86400.0).contains(&seconds)}
 
 static UNAVAILABLE_UNTIL:Mutex<Option<Instant>>=Mutex::new(None);
@@ -347,6 +520,18 @@ impl Ws{
 #[cfg(test)]
 mod tests{
     use super::*;
+
+    /// 桌面快捷方式名字不固定，只能按内容判断；这里锁住三种常见存储形态和误判。
+    #[test]
+    fn cloudmusic_shortcut_target_detection(){
+        assert!(points_to_cloudmusic(b"\x1c\x00\x00\x00cloudmusic.exe\x00"));
+        assert!(points_to_cloudmusic(r"D:\software\CloudMusic\cloudmusic.exe".as_bytes()));
+        assert!(points_to_cloudmusic(r"C:\X\CloudMusic.EXE".as_bytes()));
+        let wide:Vec<u8>=r"C:\Program Files\CloudMusic.exe".encode_utf16().flat_map(|unit|unit.to_le_bytes()).collect();
+        assert!(points_to_cloudmusic(&wide));
+        assert!(!points_to_cloudmusic(r"C:\Program Files\Other\player.exe".as_bytes()));
+        assert!(!points_to_cloudmusic(b""));
+    }
     use std::{net::TcpListener,sync::atomic::{AtomicUsize,Ordering},thread};
 
     fn server_frame(stream:&mut TcpStream)->Option<String>{

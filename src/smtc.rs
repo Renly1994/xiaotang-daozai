@@ -23,7 +23,7 @@ mod kugou_metadata;
 mod kugou_control;
 #[cfg(windows)]
 #[path="netease_control.rs"]
-mod netease_control;
+pub(crate) mod netease_control;
 #[cfg(windows)]
 #[path="player_seek.rs"]
 mod player_seek;
