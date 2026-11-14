@@ -506,7 +506,8 @@ pub fn pick_files_for(title:&str,multiple:bool) -> Result<Vec<std::path::PathBuf
     unsafe {
         use windows::Win32::UI::Shell::*;
         let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_ALL)?;
-        let mut options=FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST;
+        // 选 .lnk 时要拿快捷方式本身，不能让对话框把它解析成目标程序。
+        let mut options=FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_NODEREFERENCELINKS;
         if multiple{options|=FOS_ALLOWMULTISELECT;}
         dialog.SetOptions(options)?;
         dialog.SetTitle(&HSTRING::from(title))?;

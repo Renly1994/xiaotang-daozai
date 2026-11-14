@@ -1552,8 +1552,8 @@ impl App {
                                                 Ok(message)=>self.say(message),
                                                 Err(error)=>self.say(error),
                                             }
-                                        },
-                                        Err(_)=>self.say("未选择文件"),
+                                        }else{self.say("未选择文件");},
+                                        Err(error)=>self.say(format!("打开文件对话框失败：{}",error)),
                                     }
                                 }
                             });
