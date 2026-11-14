@@ -378,13 +378,19 @@ impl Window {
 
     /// 使用目标屏幕的物理坐标定位，并在缩放、岛体大小、水平位置或屏幕连接变化后重新校正。
     /// `scale` 是主窗口的实际像素比（系统 DPI × 岛体大小），画布按它同步调整物理尺寸。
-    pub fn place_on_display(&self, scale:f32, bounds:crate::display_layout::Bounds, offset:f32, dock:crate::model::Dock)->bool {
+    /// `shift` 是 OLED 像素偏移的位移（物理像素），按展开面板的屏幕余量收窄后叠加在不贴边的一轴上。
+    pub fn place_on_display(&self, scale:f32, bounds:crate::display_layout::Bounds, offset:f32, dock:crate::model::Dock, shift:(i32,i32))->bool {
         unsafe {
             // 顶部：水平居中 + 水平偏移；左右：贴边 + 竖直偏移，画布换成竖向的大小。
             let origin=if dock.is_side() {
                 crate::display_layout::side_origin(bounds,dock,(crate::side_dock::SIDE_W,crate::side_dock::SIDE_H),crate::side_dock::SIDE_HALF_EXTENT,scale,offset)
             } else {crate::display_layout::island_origin_offset(bounds,crate::app::WIN_W,scale,offset)};
             let Some((x,y))=origin else{return false;};
+            // OLED 像素偏移：只沿不贴边的一轴让开，并按展开面板的余量收窄——位置拉满或屏幕太窄时少挪、不挪，
+            // 贴边的一侧也保持严丝合缝，刘海不会和屏幕边缘裂开。
+            let (back,forth)=crate::display_layout::shift_slack(bounds,scale,if dock.is_side() {crate::side_dock::SIDE_HALF_EXTENT} else {crate::display_layout::ISLAND_HALF_EXTENT},offset,dock);
+            let (dx,dy)=(shift.0.clamp(-back,forth),shift.1.clamp(-back,forth));
+            let (x,y)=if dock.is_side() {(x,y+dy)} else {(x+dx,y)};
             let (canvas_w,canvas_h)=if dock.is_side() {(crate::side_dock::SIDE_W,crate::side_dock::SIDE_H)} else {(crate::app::CANVAS_W,crate::app::WIN_H)};
             let (w,h)=((canvas_w*scale).round() as i32,(canvas_h*scale).round() as i32);
             let mut current=RECT::default();

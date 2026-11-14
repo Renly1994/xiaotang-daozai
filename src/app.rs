@@ -1492,6 +1492,16 @@ impl App {
         }
     }
 
+    /// OLED 像素偏移只在收起动画完成、没有鼠标交互、不在编辑时移动；
+    /// 展开、点击、拖拽时保持当前位置，避免面板内容和位移一起跳。
+    pub fn oled_shift_idle(&self,ctx:&egui::Context) -> bool {
+        crate::oled_shift::should_move(self.open, self.position_drag.is_some() || self.drag_glide.is_some(), self.is_editing())
+            && self.hover_since.is_none() && !self.drag_hot
+            && self.w.settled(PW) && self.h.settled(self.expanded_height())
+            && self.drag_lift.settled(1.0) && self.drag_stretch.settled(1.0)
+            && ctx.input(|i|!i.pointer.any_down() && !i.pointer.any_pressed() && i.raw.hovered_files.is_empty())
+    }
+
     pub fn is_editing(&self) -> bool {
         self.adding || self.editing.is_some() || self.todo_choosing || self.task_dialog.is_some() || self.calendar.draft.is_some() || self.focus_editing
     }
