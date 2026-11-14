@@ -1,6 +1,6 @@
 //! 网易云原生播放事件：只读增量日志，不依赖 SMTC 或特定 DLL 版本。
 use super::{MediaKind,NowPlaying};
-use std::{fs::File,io::{Read,Seek,SeekFrom},path::Path,sync::{mpsc,Arc},time::{Duration,Instant}};
+use std::{fs::File,io::{Read,Seek,SeekFrom},path::Path,sync::{mpsc,Arc,Mutex},time::{Duration,Instant}};
 
 const MAX_READ:u64=4*1024*1024;
 const MAX_LINE:usize=256*1024;
@@ -10,6 +10,32 @@ fn monotonic_millis()->u64 {
     let (start,epoch)=CLOCK.get_or_init(||(Instant::now(),std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64));
     epoch.saturating_add(start.elapsed().as_millis() as u64)
+}
+
+// CDP 跳转不会写 elog 的 setPlayingPosition，日志基准会一直停在旧位置，
+// 岛上的进度条和歌词因此不跟着跳。跳转成功后记一个临时基准，由 poll() 覆盖
+// 并从该时刻继续外推；换歌或客户端自己同步位置时自动让位。
+struct SeekSync{position:f64,at_ms:u64,song_id:Option<u64>}
+static SEEK_SYNC:Mutex<Option<SeekSync>>=Mutex::new(None);
+
+/// 由 `netease_control::seek()` 在原生 Seek 回执确认成功后调用。
+pub(super) fn note_seek(seconds:f64){
+    if !seconds.is_finite() || !(0.0..86400.0).contains(&seconds){return;}
+    if let Ok(mut guard)=SEEK_SYNC.lock(){*guard=Some(SeekSync{position:seconds,at_ms:monotonic_millis(),song_id:None});}
+}
+fn note_seek_at(seconds:f64,at_ms:u64){
+    if let Ok(mut guard)=SEEK_SYNC.lock(){*guard=Some(SeekSync{position:seconds,at_ms,song_id:None});}
+}
+fn clear_seek_sync(){if let Ok(mut guard)=SEEK_SYNC.lock(){*guard=None;}}
+
+fn apply_seek_sync(media:&mut NowPlaying,now:u64){
+    let Ok(mut guard)=SEEK_SYNC.lock()else{return;};
+    let Some(sync)=guard.as_mut()else{return;};
+    if sync.song_id.is_none(){sync.song_id=media.song_id;}
+    if sync.song_id!=media.song_id{*guard=None;return;} // 换歌：让位给 elog 的新基准
+    let mut position=sync.position+now.saturating_sub(sync.at_ms)as f64/1000.0;
+    if media.duration>0.0{position=position.min(media.duration);}
+    media.position=position;
 }
 
 // 初次读取历史记录时，使用可读的本地日期恢复进度；实时推进只依赖 Instant。
@@ -97,6 +123,7 @@ impl Playback {
         }else if event=="setPlayingPosition" && self.media.song_id.is_some(){
             let Some(position)=args.split(',').next().and_then(|s|s.trim().parse::<f64>().ok()).filter(|p|p.is_finite() && (0.0..86400.0).contains(p))else{return;};
             self.media.position=position;self.at=at;self.observed_at=now;self.ready=true;
+            clear_seek_sync(); // 客户端自己同步了位置，临时基准让位
         }else if event.starts_with("native") && event.ends_with("state") && self.media.song_id.is_some(){
             let Some(status)=args.split(',').next().and_then(|s|s.trim().parse::<u8>().ok()).filter(|s|matches!(s,1|2))else{return;};
             self.media.position=self.position(now);self.media.playing=status==1;self.at=at;self.observed_at=now;self.ready=true;
@@ -264,9 +291,12 @@ impl Reader {
     pub(super) fn poll(&mut self)->Option<NowPlaying>{
         let path=std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("NetEase/CloudMusic/cloudmusic.elog");
         let sampled=std::time::Instant::now();
-        let mut media=self.read(&path,process_id(),monotonic_millis())?;
+        let now=monotonic_millis();
+        let mut media=self.read(&path,process_id(),now)?;
         if self.cover.url==self.playback.artwork_url{media.artwork=self.cover.image.clone();}
-        media.sampled_at=Some(sampled);Some(media)
+        media.sampled_at=Some(sampled);
+        apply_seek_sync(&mut media,now);
+        Some(media)
     }
     pub(super) fn fill_artwork(&mut self,media:&mut NowPlaying){
         if media.source.eq_ignore_ascii_case("cloudmusic.exe") && media.song_id==self.playback.media.song_id && media.artwork.is_none(){
@@ -321,6 +351,31 @@ pub(super) fn control(command:super::Transport){
 #[cfg(test)]
 mod tests{
     use super::*;
+    // 全局只有一个跳转基准槽位，断言集中在一个测试里，避免并行测试互相踩。
+    #[test]
+    fn seek_sync_drives_position_and_yields_to_real_events(){
+        clear_seek_sync();
+        let mut media=NowPlaying{source:"cloudmusic.exe".into(),song_id:Some(123),duration:240.0,position:10.0,..Default::default()};
+        note_seek_at(30.0,1_000);
+        apply_seek_sync(&mut media,3_000);
+        assert!((media.position-32.0).abs()<0.01,"跳转后应从 30 秒起继续外推");
+        // 换歌后不再覆盖，让位给 elog 的新基准。
+        media.song_id=Some(456);media.position=5.0;
+        apply_seek_sync(&mut media,4_000);
+        assert!((media.position-5.0).abs()<0.01);
+        // 不能越过总时长。
+        clear_seek_sync();note_seek_at(238.0,1_000);
+        let mut tail=NowPlaying{song_id:Some(123),duration:240.0,position:10.0,..Default::default()};
+        apply_seek_sync(&mut tail,5_000);
+        assert!((tail.position-240.0).abs()<0.01);
+        // 客户端自己写了 setPlayingPosition：临时基准必须清除。
+        note_seek_at(80.0,1_000);
+        let mut state=Playback::default();
+        state.media.song_id=Some(123);
+        state.line(&event(7,2_000,"\"setPlayingPosition\",45"),7,9_000_000);
+        assert!(SEEK_SYNC.lock().unwrap().is_none());
+        clear_seek_sync();
+    }
     #[test]
     fn log_clock_origin_does_not_change_playback_position(){
         for origin in [0,9_000_000_000] {
