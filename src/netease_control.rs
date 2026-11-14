@@ -177,19 +177,42 @@ fn invalidate_shortcut_cache(){
     if let Ok(mut guard)=FIXED_CACHE.lock(){*guard=None;}
 }
 
+static SHORTCUT_LOCK:Mutex<()>=Mutex::new(());
+
 /// 把已存在的快捷方式都补上调试端口参数：开始菜单与桌面一起修。
-/// 完全没有快捷方式时返回 false，由自动托管兜底。
-fn ensure_shortcut(port:u16)->bool{
+fn ensure_shortcut(port:u16)->bool{ensure_shortcut_with(port,None)}
+
+/// `extra` 是用户手动选的那条：即使它不在常规目录里也一起修。
+/// 启动扫描、设置页「修复快捷方式」、手动选择可能同时写同一批 .lnk，用一把锁串行化。
+fn ensure_shortcut_with(port:u16,extra:Option<&std::path::Path>)->bool{
+    let Ok(_guard)=SHORTCUT_LOCK.lock() else{return false};
     let arg=format!("--remote-debugging-port={}",port);
+    let mut paths=shortcut_paths();
+    if let Some(path)=extra{
+        if !paths.iter().any(|found|found==path){paths.push(path.to_path_buf());}
+    }
     let mut ok=false;
-    for path in shortcut_paths(){
-        if patch_shortcut(&path,&arg){ok=true;}
+    for path in &paths{
+        if patch_shortcut(path,&arg){ok=true;}
     }
     if ok{invalidate_shortcut_cache();}
     ok
 }
 
-/// 用户手动指定的快捷方式：检查扩展名后幂等写入调试端口参数。
+/// 打开岛仔时自动修一遍，不用用户点任何按钮。
+/// 扫描放后台线程、进程内只跑一次；patch_shortcut 幂等，重复执行不会改文件。
+pub fn boot_scan_shortcuts(){
+    // 测试里 tick() 也会跑：不能让像素基准测试去改本机的真实快捷方式。
+    if cfg!(test){return;}
+    static BOOT_SCAN:std::sync::Once=std::sync::Once::new();
+    BOOT_SCAN.call_once(||{
+        let port=config().port;
+        std::thread::spawn(move||{ensure_shortcut(port);});
+    });
+}
+
+/// 用户手动选一条网易云快捷方式：确认它确实指向客户端后，把这条和扫描到的其它快捷方式
+/// 一起修。只修所选那条时，用户从开始菜单子文件夹点开的往往是另一条，看起来就像没生效。
 pub fn fix_shortcut(path:&std::path::Path)->Result<String,String>{
     if path.extension().and_then(|e|e.to_str()).map_or(true,|e|!e.eq_ignore_ascii_case("lnk")){
         return Err("请选择 .lnk 快捷方式".to_string());
@@ -199,10 +222,8 @@ pub fn fix_shortcut(path:&std::path::Path)->Result<String,String>{
     if !points_to_cloudmusic(&bytes){
         return Err("这不是网易云的快捷方式，请重新选择".to_string());
     }
-    let arg=format!("--remote-debugging-port={}",config().port);
-    if patch_shortcut(path,&arg){
-        invalidate_shortcut_cache();
-        Ok("已修改网易云快捷方式".to_string())
+    if ensure_shortcut_with(config().port,Some(path)){
+        Ok("已修好所有网易云快捷方式，重启客户端后生效".to_string())
     }
     else{Err("修改失败，请检查快捷方式文件".to_string())}
 }
@@ -231,6 +252,7 @@ static FIXED_CACHE:Mutex<Option<(Instant,bool)>>=Mutex::new(None);
 /// 一键修复：扫描开始菜单与桌面，给所有指向网易云的快捷方式补上调试端口参数。
 /// 返回修好的数量；0 表示没找到快捷方式，交给调用方提示手动选择。
 pub fn fix_all()->Result<usize,String>{
+    let Ok(_guard)=SHORTCUT_LOCK.lock() else{return Ok(0)};
     let arg=format!("--remote-debugging-port={}",config().port);
     let mut count=0;
     for path in shortcut_paths(){

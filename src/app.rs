@@ -2883,6 +2883,7 @@ impl App {
     // 每帧推进：番茄钟、饮水提醒、跨天
     // ---------------------------------------------------------------
     fn tick(&mut self, env: &Env, dt: f32, elapsed: f32) {
+        #[cfg(windows)] crate::smtc::netease_control::boot_scan_shortcuts();
         if self.toast.as_ref().is_some_and(|(_,at)|self.t-at>2.4){self.toast=None;}
         if env.today != self.today {
             self.today = env.today.clone();

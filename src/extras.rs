@@ -1534,7 +1534,7 @@ impl App {
                         settings_card(ui,|ui|{
                             let fixed=crate::smtc::netease_control::shortcut_fixed();
                             ui.add(egui::Label::new(egui::RichText::new(if fixed{"快捷方式已带调试端口"}else{"快捷方式还没有调试端口"}).size(12.5).strong()).wrap());
-                            ui.small("拖动进度条需要客户端带调试端口启动；改快捷方式只是补一个启动参数，不动客户端本身。");
+                            ui.small("启动岛仔时会自动修复所有网易云快捷方式；改的只是启动参数，不动客户端本身，重启客户端后生效。");
                             ui.separator();
                             if ui.button("修复快捷方式").clicked(){
                                 match crate::smtc::netease_control::fix_all(){
