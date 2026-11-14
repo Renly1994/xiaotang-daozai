@@ -23,6 +23,7 @@ pub(super) fn note_seek(seconds:f64){
     if !seconds.is_finite() || !(0.0..86400.0).contains(&seconds){return;}
     if let Ok(mut guard)=SEEK_SYNC.lock(){*guard=Some(SeekSync{position:seconds,at_ms:monotonic_millis(),song_id:None});}
 }
+#[cfg(test)]
 fn note_seek_at(seconds:f64,at_ms:u64){
     if let Ok(mut guard)=SEEK_SYNC.lock(){*guard=Some(SeekSync{position:seconds,at_ms,song_id:None});}
 }

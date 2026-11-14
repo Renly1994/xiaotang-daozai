@@ -22,6 +22,9 @@ mod kugou_metadata;
 #[path="kugou_control.rs"]
 mod kugou_control;
 #[cfg(windows)]
+#[path="netease_control.rs"]
+mod netease_control;
+#[cfg(windows)]
 #[path="player_seek.rs"]
 mod player_seek;
 #[cfg(windows)]
@@ -482,6 +485,9 @@ pub fn seek(seconds:f64,source:&str)->bool {
     let Ok(_lock)=LOCK.lock()else{return false;};
     if source.eq_ignore_ascii_case("kwmusic.exe"){return kuwo::seek(seconds);}
     if matches!(source.to_ascii_lowercase().as_str(),"kugou"|"kugou.exe") && kugou_control::seek(seconds){return true;}
+    // 网易云不注册系统媒体会话，系统跳转必然失败；客户端开了 CDP 调试端口时接管，
+    // 端口没开则立刻返回 false，不空等超时。
+    if source.eq_ignore_ascii_case("cloudmusic.exe") && netease_control::seek(seconds){return true;}
     let _apartment=init_winrt();
     use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager as Manager;
     let session=media_result(Manager::RequestAsync).and_then(|mgr|mgr.GetSessions().ok())
