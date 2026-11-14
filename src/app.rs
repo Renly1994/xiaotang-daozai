@@ -1492,6 +1492,12 @@ impl App {
         }
     }
 
+    /// OLED 像素偏移只在收起、没有拖拽、不在编辑时移动；
+    /// 展开、点击、拖拽时保持当前位置，避免面板内容和位移一起跳。
+    pub fn oled_shift_idle(&self) -> bool {
+        crate::oled_shift::should_move(self.open, self.position_drag.is_some() || self.drag_glide.is_some(), self.is_editing())
+    }
+
     pub fn is_editing(&self) -> bool {
         self.adding || self.editing.is_some() || self.todo_choosing || self.task_dialog.is_some() || self.calendar.draft.is_some() || self.focus_editing
     }
