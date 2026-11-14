@@ -227,12 +227,11 @@ fn ensure_shortcut_with(port:u16,extra:Option<&std::path::Path>)->bool{
 pub fn boot_scan_shortcuts(){
     // 测试里 tick() 也会跑：不能让像素基准测试去改本机的真实快捷方式。
     if cfg!(test){return;}
-    static SCAN_AT:Mutex<Option<Instant>>=Mutex::new(None);
-    let Ok(mut guard)=SCAN_AT.lock() else{return};
-    if guard.is_some_and(|at|at.elapsed()<Duration::from_secs(60)){return;}
-    *guard=Some(Instant::now());
-    let port=config().port;
-    std::thread::spawn(move||{ensure_shortcut(port);});
+    static BOOT_SCAN:std::sync::Once=std::sync::Once::new();
+    BOOT_SCAN.call_once(||{
+        let port=config().port;
+        std::thread::spawn(move||{ensure_shortcut(port);});
+    });
 }
 
 /// 用户手动选一条网易云快捷方式：确认它确实指向客户端后，把这条和扫描到的其它快捷方式
