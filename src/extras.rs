@@ -1530,6 +1530,34 @@ impl App {
                             ui.add_space(3.0);
                             ui.small("正数提前，负数延后；默认提前 0.35 秒。");
                         });
+                        settings_label(ui,"网易云播放进度条");
+                        settings_card(ui,|ui|{
+                            let fixed=crate::smtc::netease_control::shortcut_fixed();
+                            ui.add(egui::Label::new(egui::RichText::new(if fixed{"快捷方式已带调试端口"}else{"快捷方式还没有调试端口"}).size(12.5).strong()).wrap());
+                            ui.small("启动岛仔时会自动修复所有网易云快捷方式；改的只是启动参数，不动客户端本身，重启客户端后生效。");
+                            ui.separator();
+                            if ui.button("修复快捷方式").clicked(){
+                                match crate::smtc::netease_control::fix_all(){
+                                    Ok(0)=>self.say("没找到网易云快捷方式，可以手动选择"),
+                                    Ok(count)=>self.say(format!("已修复 {count} 个快捷方式，重启网易云后生效")),
+                                    Err(error)=>self.say(error),
+                                }
+                            }
+                            ui.horizontal(|ui|{
+                                ui.add(egui::Label::new(egui::RichText::new("找不到快捷方式时手动指定").size(11.0).color(ui.visuals().weak_text_color())).wrap());
+                                if ui.button("选择文件").clicked(){
+                                    match crate::system::pick_files_for("选择网易云快捷方式",false){
+                                        Ok(files)=>if let Some(path)=files.first(){
+                                            match crate::smtc::netease_control::fix_shortcut(path){
+                                                Ok(message)=>self.say(message),
+                                                Err(error)=>self.say(error),
+                                            }
+                                        }else{self.say("未选择文件");},
+                                        Err(error)=>self.say(format!("打开文件对话框失败：{}",error)),
+                                    }
+                                }
+                            });
+                        });
                     }
                     2=>{
                         settings_label(ui,"计时时长");
