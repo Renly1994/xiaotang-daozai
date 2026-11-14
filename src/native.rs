@@ -318,14 +318,19 @@ unsafe fn apply_style(hwnd: HWND, editing: bool, raise: bool) {
     }
 }
 
-fn surface_needs_outline_clip(backend:Option<eframe::wgpu::Backend>,vendor:&str,renderer:&str)->bool {
+/// 是否需要 GDI 轮廓硬裁剪。
+///
+/// 判定依据是运行时能力，而不是显卡厂商：
+/// - wgpu 的 Direct3D 12 / Vulkan 后端在透明窗口上无法稳定输出逐像素 alpha，圆角会留黑块；
+/// - 逐像素 alpha 合成（DWM）启用失败时，也只能退回二值区域裁剪。
+///
+/// 两者都不成立时（例如本机 AMD 卡上的 OpenGL 3.3），保持矩形窗口 + 逐像素 alpha，
+/// 由 egui 绘制带 feathering 的圆角，边缘才会平滑。
+/// 注意：GDI 区域（HRGN / SetWindowRgn）是二值硬边，一旦走到裁剪分支，圆角必然是像素台阶，
+/// 因此这里宁可少裁剪，也不按厂商字符串一刀切。
+fn surface_needs_outline_clip(backend:Option<eframe::wgpu::Backend>,alpha_composition:bool)->bool {
     use eframe::wgpu::Backend;
-    if matches!(backend,Some(Backend::Dx12|Backend::Vulkan)){return true;}
-    if renderer.to_ascii_lowercase().contains("radeon"){return true;}
-    [vendor,renderer].into_iter().any(|name|{
-        let name=name.to_ascii_lowercase();
-        name.contains("advanced micro devices") || name.split(|c:char|!c.is_ascii_alphanumeric()).any(|word|matches!(word,"amd"|"ati"))
-    })
+    matches!(backend,Some(Backend::Dx12|Backend::Vulkan)) || !alpha_composition
 }
 
 pub struct Window {
@@ -349,11 +354,12 @@ impl Window {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Option<Self> {
         let RawWindowHandle::Win32(handle) = cc.window_handle().ok()?.as_raw() else { return None };
         let hwnd = HWND(handle.hwnd.get() as *mut _);
-        let hook = unsafe {
+        // 逐像素 alpha 合成能否启用，是运行时真实能力，用来替代按显卡厂商一刀切。
+        let (hook,alpha_composition) = unsafe {
             apply_style(hwnd, false, false);
-            let _=enable_alpha_composition(hwnd);
+            let alpha_composition=enable_alpha_composition(hwnd).is_ok();
             let _ = SetWindowSubclass(hwnd, Some(subclass), SUBCLASS_ID, 0);
-            SetWinEventHook(
+            let hook=SetWinEventHook(
                 EVENT_SYSTEM_FOREGROUND,
                 EVENT_SYSTEM_FOREGROUND,
                 None,
@@ -361,16 +367,13 @@ impl Window {
                 0,
                 0,
                 WINEVENT_OUTOFCONTEXT,
-            )
+            );
+            (hook,alpha_composition)
         };
         // 区域用哨兵值：首帧（包括启动即隐藏的空区域）也必须真正调用 SetWindowRgn，
         // 否则整块透明画布会挡住下层程序的点击。
         let backend=cc.wgpu_render_state.as_ref().map(|state|state.adapter.get_info().backend);
-        let (vendor,renderer)=cc.gl.as_ref().map(|gl|{
-            use eframe::glow::HasContext;
-            unsafe{(gl.get_parameter_string(eframe::glow::VENDOR),gl.get_parameter_string(eframe::glow::RENDERER))}
-        }).unwrap_or_default();
-        let opaque_surface=surface_needs_outline_clip(backend,&vendor,&renderer);
+        let opaque_surface=surface_needs_outline_clip(backend,alpha_composition);
         if opaque_surface{glass_diagnostic("渲染兼容：已启用岛体轮廓裁剪，避免透明画布出现黑块");}
         watch_drag(hwnd,cc.egui_ctx.clone());
         Some(Self { hwnd, region: (i32::MIN, 0, 0, 0), expanded: false, hook, browser_state:(None,PollClock::default()), drag_capture:DragCapture::default(), glass:None, backdrop:None, blur:false, blur_unavailable:false, opaque_surface })
@@ -536,23 +539,21 @@ mod tests {
     fn opaque_surface_clips_black_background_even_without_system_blur(){
         let _guard=NATIVE_STATE_LOCK.lock().unwrap_or_else(|e|e.into_inner());
         use windows::Win32::Graphics::Gdi::{GetWindowRgn,PtInRegion};
-        for (backend,vendor,renderer) in [
-            (Some(eframe::wgpu::Backend::Dx12),"",""),
-            (Some(eframe::wgpu::Backend::Vulkan),"",""),
-            (None,"ATI Technologies Inc.","AMD Radeon RX 6750 GRE 12GB"),
-            (None,"Advanced Micro Devices, Inc.","Radeon RX 7900 XT"),
+        for backend in [
+            Some(eframe::wgpu::Backend::Dx12),
+            Some(eframe::wgpu::Backend::Vulkan),
         ] {for blur_unavailable in [true,false] {for ppp in [1.0,1.25,1.5,2.0] {unsafe {
             let px=|v:f32|(v*ppp).round() as i32;
             let hwnd=CreateWindowExW(WS_EX_TOOLWINDOW,windows::core::w!("STATIC"),windows::core::w!(""),WS_POPUP,-10000,-10000,px(400.0),px(200.0),None,None,None,None).unwrap();
             let saved=hit().lock().unwrap_or_else(|e|e.into_inner()).clone();
             {
-                let mut native=Window{hwnd,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default(),glass:None,backdrop:None,blur:false,blur_unavailable,opaque_surface:surface_needs_outline_clip(backend,vendor,renderer)};
+                let mut native=Window{hwnd,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default(),glass:None,backdrop:None,blur:false,blur_unavailable,opaque_surface:surface_needs_outline_clip(backend,false)};
                 let shapes=[crate::app::GlassShape::Round(eframe::egui::Rect::from_min_max(eframe::egui::pos2(80.0,60.0),eframe::egui::pos2(320.0,160.0)),25.0)];
                 native.update((0.0,0.0,400.0,200.0),(80.0,60.0,240.0,100.0),None,None,Some(&shapes),ppp,false,false);
                 let region=CreateRectRgn(0,0,0,0);
                 GetWindowRgn(hwnd,region);
                 assert!(PtInRegion(region,px(200.0),px(100.0)).as_bool());
-                assert!(!PtInRegion(region,px(10.0),px(10.0)).as_bool(),"兼容后端不能保留画布上的黑色背景：{backend:?} / {vendor} / {renderer}");
+                assert!(!PtInRegion(region,px(10.0),px(10.0)).as_bool(),"兼容后端不能保留画布上的黑色背景：{backend:?}");
                 assert!(!PtInRegion(region,px(81.0),px(61.0)).as_bool(),"圆角外侧必须透出桌面");
                 assert!(!native.blur);
                 assert!(native.backdrop.is_none(),"轮廓兼容模式不能再启用独立模糊底板");
@@ -567,13 +568,17 @@ mod tests {
     }
 
     #[test]
-    fn outline_clip_preserves_other_opengl_drivers_and_recognizes_amd_variants(){
-        for (vendor,renderer) in [("NVIDIA Corporation","NVIDIA GeForce RTX 4060"),("Intel","Intel(R) UHD Graphics"),("Mesa","llvmpipe (LLVM 20.1.1, 256 bits)"),("Microsoft Corporation","GDI Generic")]{
-            assert!(!surface_needs_outline_clip(None,vendor,renderer),"正常驱动不能被错误识别为 AMD：{vendor}");
-        }
-        for (vendor,renderer) in [("AMD","Radeon RX 6750 GRE"),("ati technologies inc.","Radeon"),("Mesa","AMD Radeon RX 6800 (radeonsi)"),("Mesa","Radeon RX 6750 GRE (radeonsi)")]{
-            assert!(surface_needs_outline_clip(None,vendor,renderer),"需要识别 AMD 厂商与渲染器：{vendor} / {renderer}");
-        }
+    fn outline_clip_depends_on_runtime_capability_instead_of_gpu_vendor(){
+        // 逐像素 alpha 合成可用，且不是 Dx12/Vulkan：保持平滑圆角，不裁剪。
+        // 这在 AMD/ATI 显卡的 OpenGL 路径上同样成立，不再按厂商字符串一刀切。
+        assert!(!surface_needs_outline_clip(None,true),"OpenGL + alpha 可用不应被硬裁剪");
+        assert!(!surface_needs_outline_clip(Some(eframe::wgpu::Backend::Gl),true));
+        // 无法启用逐像素 alpha 时，才退回二值区域裁剪。
+        assert!(surface_needs_outline_clip(None,false),"alpha 合成失败必须回退到轮廓裁剪");
+        // 只有无法稳定输出逐像素 alpha 的后端，无论探测结果如何都要裁剪。
+        assert!(surface_needs_outline_clip(Some(eframe::wgpu::Backend::Dx12),true));
+        assert!(surface_needs_outline_clip(Some(eframe::wgpu::Backend::Vulkan),true));
+        assert!(surface_needs_outline_clip(Some(eframe::wgpu::Backend::Dx12),false));
     }
 
     #[test]
