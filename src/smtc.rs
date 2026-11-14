@@ -474,6 +474,27 @@ pub fn control(cmd: Transport,source:&str) {
 #[cfg(not(windows))]
 pub fn control(_cmd: Transport,_source:&str) {}
 
+/// QQ 音乐在不同入口下会给出不同的来源标识：进程名 `QQMusic.exe`，系统会话里则是
+/// AUMID `Tencent.QQMusic`。两者都要认，否则跳转会被当成普通播放器而走错分支。
+#[cfg(windows)]
+pub(crate) fn qq_music(source:&str)->bool{
+    let lower=source.to_ascii_lowercase();
+    lower=="qqmusic" || lower=="qqmusic.exe" || (lower.contains("tencent") && lower.contains("qqmusic"))
+}
+
+/// QQ 音乐提供 `/seekto <秒>` 命令行命令，由单实例 IPC 转交给正在运行的客户端。
+/// 它不依赖窗口和界面结构，最小化时同样有效，所以优先于点击进度条。
+#[cfg(windows)]
+fn qq_seek_command(seconds:f64)->bool{
+    let target=seconds.max(0.0).round() as u64;
+    let Some(path)=player_process::pids_named("qqmusic.exe").into_iter().find_map(player_process::image_path)else{return false;};
+    std::process::Command::new(path)
+        .arg("/seekto")
+        .arg(target.to_string())
+        .spawn()
+        .is_ok()
+}
+
 /// 跳转在工作线程执行；专用回退必须回读实际位置，避免播放器接口假成功。
 #[cfg(windows)]
 pub fn seek(seconds:f64,source:&str)->bool {
@@ -487,7 +508,7 @@ pub fn seek(seconds:f64,source:&str)->bool {
     let session=media_result(Manager::RequestAsync).and_then(|mgr|mgr.GetSessions().ok())
         .and_then(|sessions|sessions.into_iter().find(|s|s.SourceAppUserModelId().ok().is_some_and(|id|id.to_string().eq_ignore_ascii_case(source))));
     if apple_music::is_source(source){return session.as_ref().is_some_and(|session|seek_apple(session,source,seconds));}
-    let native=source.eq_ignore_ascii_case("qqmusic.exe");
+    let native=qq_music(source);
     let timeline=||->Option<(f64,f64)>{
         let tl=session.as_ref()?.GetTimelineProperties().ok()?;
         Some((tl.Position().ok()?.Duration as f64/10_000_000.0,tl.EndTime().ok()?.Duration as f64/10_000_000.0))
@@ -496,16 +517,19 @@ pub fn seek(seconds:f64,source:&str)->bool {
     let target=if duration>0.0{seconds.min(duration)}else{seconds};
     let enabled=session.as_ref().and_then(|s|s.GetPlaybackInfo().ok()).and_then(|i|i.Controls().ok())
         .and_then(|c|c.IsPlaybackPositionEnabled().ok()).unwrap_or(false);
-    let paused_qq=source.eq_ignore_ascii_case("qqmusic.exe") && session.as_ref().and_then(|s|s.GetPlaybackInfo().ok())
+    let paused_qq=qq_music(source) && session.as_ref().and_then(|s|s.GetPlaybackInfo().ok())
         .and_then(|info|info.PlaybackStatus().ok()).is_some_and(|status|status!=windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing);
     let accepted=(!native || enabled) && session.as_ref().and_then(|s|media_result(||s.TryChangePlaybackPositionAsync((target*10_000_000.0)as i64)))==Some(true);
     if !native{return accepted;}
-    for system in [true,false] {
-        if system {if !accepted{continue;}}else {
-            if !player_seek::seek(source,target,duration){return false;}
+    // 依次尝试：系统接口 → 客户端自带的 /seekto 命令 → 点击界面进度条。
+    for stage in 0..3 {
+        let timeout=match stage {0=>Duration::from_millis(600),1=>Duration::from_secs(3),_=>Duration::from_secs(2)};
+        match stage {
+            0=>{if !accepted{continue;}}
+            1=>{if !qq_seek_command(target){continue;}}
+            _=>{if !player_seek::seek(source,target,duration){return false;}}
         }
         let start=std::time::Instant::now();
-        let timeout=if system{Duration::from_millis(600)}else{Duration::from_secs(2)};
         let mut pause_requested=false;
         while start.elapsed()<timeout {
             std::thread::sleep(Duration::from_millis(100));
