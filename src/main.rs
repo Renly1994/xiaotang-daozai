@@ -365,20 +365,8 @@ impl eframe::App for Shell {
         }
         #[cfg(windows)]
         let offset=self.app.placement_offset();
-        // OLED 像素偏移：只在收起、可见且没有交互时移动；展开、拖拽、全屏时保持当前位置，
-        // 关闭后回到刚好贴边的位置。位移只影响窗口摆放，不改动用户保存的岛体位置。
         #[cfg(windows)]
-        let shift=if self.app.settings.oled_shift && !self.hidden && self.app.oled_shift_idle() {
-            let target=daozai::oled_shift::shift(true,self.app.settings.dock,self.t0.elapsed());
-            // 长时间展开或拖拽后再恢复，逐像素走回去，避免整块面板一次跳好几个像素。
-            self.oled_shift=daozai::oled_shift::toward(self.oled_shift,target);
-            // 复用现有重绘调度：到下一步的时刻叫醒一次，不额外起线程、不做高频轮询。
-            ctx.request_repaint_after(daozai::oled_shift::until_next_step(self.t0.elapsed()));
-            self.oled_shift
-        } else {
-            if !self.app.settings.oled_shift {self.oled_shift=(0,0);}
-            self.oled_shift
-        };
+        let shift=self.oled_shift;
         // 拖动时位置不取整，按万分之一比例比较，窗口逐帧平滑跟随。
         #[cfg(windows)]
         let placement_key=(self.app.settings.display_id.clone(),(offset*10000.0).round() as i32,self.app.settings.dock,self.app.settings.avoid_top_bar,shift);
@@ -579,6 +567,26 @@ impl eframe::App for Shell {
                 out = Some(self.app.frame(ui, win, &env));
             });
         let Some(out) = out else { return };
+
+        #[cfg(windows)]
+        {
+            // 先处理本帧输入和动画，再决定是否移动，避免悬停或按下的首帧仍使用旧状态。
+            let hovering=env.cursor.is_some_and(|p|out.hit.contains(p)||out.notice_hit.is_some_and(|r|r.contains(p)));
+            let shift=if !self.app.settings.oled_shift {(0,0)}
+                else if !self.hidden && !hovering && self.app.oled_shift_idle(ctx) {
+                    ctx.request_repaint_after(daozai::oled_shift::until_next_step(self.t0.elapsed()));
+                    let target=daozai::oled_shift::shift(true,self.app.settings.dock,self.t0.elapsed());
+                    daozai::oled_shift::toward(self.oled_shift,target)
+                } else {self.oled_shift};
+            if shift!=self.oled_shift {
+                self.oled_shift=shift;
+                let display=daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id);
+                if display.is_some_and(|d|self.native.as_ref().is_some_and(|w|w.place_on_display(ctx.pixels_per_point(),daozai::display_layout::placement_bounds(d,self.app.settings.avoid_top_bar),self.app.placement_offset(),self.app.settings.dock,shift))) {
+                    self.placement_key.4=shift;
+                }
+                ctx.request_repaint();
+            }
+        }
 
         #[cfg(windows)]
         if let Some(native) = &mut self.native {

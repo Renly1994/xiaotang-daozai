@@ -976,6 +976,67 @@ fn glass_pill_rim_stays_on_outline_while_collapsing() {
     }
 }
 
+#[test]
+fn oled_shift_waits_for_the_panel_to_finish_closing() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.oled_shift=true;
+    h.app.show_page(0);
+    h.hover(H::local(200.0,60.0),5.0);
+    assert!(h.app.open);
+    h.cursor=Some(Pos2::new(600.0,180.0));
+    for _ in 0..120 {
+        h.frame(vec![]);
+        if !h.app.open {break;}
+    }
+    assert!(!h.app.open);
+    assert!(h.app.progress()>0.1,"测试应停在收起动画尚未完成时");
+    assert!(!h.app.oled_shift_idle(&h.ctx),"收起动画仍有 {:.1}% 展开程度时不能恢复位移",h.app.progress()*100.0);
+    h.hover(Pos2::new(600.0,180.0),1.0);
+    assert!(h.app.oled_shift_idle(&h.ctx),"动画完成后应恢复位移");
+}
+
+#[test]
+fn oled_shift_pauses_during_hover_intent() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.oled_shift=true;
+    h.hover(Pos2::new(600.0,180.0),1.0);
+    assert!(h.app.oled_shift_idle(&h.ctx));
+    h.hover(Pos2::new(WIN_W/2.0,12.0),0.05);
+    assert!(!h.app.open,"悬停意图缓冲期间尚未展开");
+    assert!(h.hit.contains(Pos2::new(WIN_W/2.0,12.0)),"鼠标已进入岛体交互区域");
+    assert!(!h.app.oled_shift_idle(&h.ctx),"悬停交互期间不能移动岛体");
+}
+
+#[test]
+fn oled_shift_pauses_on_the_first_pointer_press_frame() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();let away=Pos2::new(600.0,180.0);
+    h.hover(away,1.0);assert!(h.app.oled_shift_idle(&h.ctx));
+    h.frame(vec![egui::Event::PointerButton{pos:away,button:egui::PointerButton::Primary,pressed:true,modifiers:Default::default()}]);
+    assert!(!h.app.oled_shift_idle(&h.ctx),"按下的首帧必须暂停位移");
+    h.frame(vec![]);assert!(!h.app.oled_shift_idle(&h.ctx),"按住期间必须暂停位移");
+    h.frame(vec![egui::Event::PointerButton{pos:away,button:egui::PointerButton::Primary,pressed:false,modifiers:Default::default()}]);
+    assert!(h.app.oled_shift_idle(&h.ctx),"松开且没有交互后应恢复位移");
+}
+
+#[test]
+fn oled_shift_waits_for_side_panels_to_finish_closing() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for dock in [crate::model::Dock::Left,crate::model::Dock::Right] {
+        let mut h=H::new();h.app.settings.dock=dock;h.app.show_page(0);
+        let inside=Some(Pos2::new(if dock==crate::model::Dock::Left {100.0}else{400.0},300.0));
+        for _ in 0..300 {side_frame(&mut h,inside);}
+        assert!(h.app.open);
+        for _ in 0..120 {side_frame(&mut h,None);if !h.app.open {break;}}
+        assert!(!h.app.open && h.app.progress()>0.1);
+        assert!(!h.app.oled_shift_idle(&h.ctx),"{dock:?} 收起动画期间不能移动");
+        for _ in 0..120 {side_frame(&mut h,None);}
+        assert!(h.app.oled_shift_idle(&h.ctx),"{dock:?} 动画完成后应恢复位移");
+    }
+}
+
 struct H {
     ctx: egui::Context,
     app: App,
@@ -5722,7 +5783,7 @@ fn settings_theme_follows_system_and_preserves_island_style() {
     let mut h=H::new();h.app.open_settings();h.ctx.set_embed_viewports(false);
     assert_eq!(h.app.settings.settings_theme,SettingsTheme::System);
     assert_eq!(SettingsTheme::parse("unknown"),SettingsTheme::System);
-    let mut raster=crate::preview_raster::Raster::new(690,1100);
+    let mut raster=crate::preview_raster::Raster::new(690,1240);
     for (mode,system,dark) in [(SettingsTheme::System,false,false),(SettingsTheme::System,true,true),
         (SettingsTheme::System,false,false),(SettingsTheme::Dark,false,true),(SettingsTheme::Light,true,false)] {
         h.app.settings.settings_theme=mode;
@@ -5731,7 +5792,7 @@ fn settings_theme_follows_system_and_preserves_island_style() {
         let output=std::sync::Arc::new(std::sync::Mutex::new(None));let capture=output.clone();
         egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
             let id=viewport.ids.this;
-            let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(690.0,1100.0))),
+            let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(690.0,1240.0))),
                 viewports:std::iter::once((id,egui::ViewportInfo{native_pixels_per_point:Some(1.0),..Default::default()})).collect(),..Default::default()};
             *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
         });
@@ -5778,7 +5839,7 @@ fn settings_theme_follows_system_and_preserves_island_style() {
                         let dest=std::path::PathBuf::from(dest);std::fs::create_dir_all(&dest).unwrap();
                         raster.buf.fill([0.0,0.0,0.0,1.0]);raster.draw(&h.ctx.tessellate(child.shapes,child.pixels_per_point),child.pixels_per_point);
                         let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
-                        image::save_buffer(dest.join(format!("settings-{}-{tab}.png",if dark{"dark"}else{"light"})),&rgba,690,1100,image::ColorType::Rgba8).unwrap();
+                        image::save_buffer(dest.join(format!("settings-{}-{tab}.png",if dark{"dark"}else{"light"})),&rgba,690,1240,image::ColorType::Rgba8).unwrap();
                     }
                 }
                 raster.free_textures(&root.textures_delta);raster.free_textures(&child.textures_delta);
