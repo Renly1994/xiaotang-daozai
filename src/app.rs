@@ -781,6 +781,12 @@ pub struct App {
     pub(crate) music_volume_ui: Option<(u32,bool)>,
     pub(crate) music_volume_quiet_until: f64,
     pub(crate) music_volume_open: bool,
+    /// 拖动进度条松手后先用本地目标值显示：播放器的会话位置回报有延迟，
+    /// 等它的新位置追上（或超时、换歌）再交还，避免滑块先弹回旧位置。
+    pub(crate) music_seek_ui: Option<(f64,String)>,
+    pub(crate) music_seek_quiet_until: f64,
+    /// 点了上一首/下一首的时刻：先本地把进度归零，等播放器报回新歌位置再交还。
+    pub(crate) music_restart_at: Option<f64>,
     /// 上一次看到的蓝牙设备，用来只在连接/断开时提示一次。
     pub(crate) bt_shown: Vec<crate::bt::Device>,
     bt_initialized: bool,
@@ -907,6 +913,9 @@ impl App {
             music_volume_ui: None,
             music_volume_quiet_until: 0.0,
             music_volume_open: false,
+            music_seek_ui: None,
+            music_seek_quiet_until: 0.0,
+            music_restart_at: None,
             bt_shown: Vec::new(),
             bt_initialized: false,
             mail: MailState { accounts: mail::load_accounts(), ..Default::default() },
@@ -2884,6 +2893,13 @@ impl App {
     // ---------------------------------------------------------------
     fn tick(&mut self, env: &Env, dt: f32, elapsed: f32) {
         if self.toast.as_ref().is_some_and(|(_,at)|self.t-at>2.4){self.toast=None;}
+        // 跳转后先用本地目标位置显示；播放器回报追上了、换歌了或超时就交还真实位置。
+        let seek_done=self.music_seek_ui.as_ref().is_some_and(|(target,title)|{
+            (self.media.duration>0.0 && (self.media.position-*target).abs()<1.5)
+                || self.t>=self.music_seek_quiet_until || &self.media.title!=title
+        });
+        if seek_done {self.music_seek_ui=None;}
+        if self.music_restart_at.is_some_and(|at|self.t>=at+1.5){self.music_restart_at=None;}
         if env.today != self.today {
             self.today = env.today.clone();
             self.water = model::Water::load(&env.today);

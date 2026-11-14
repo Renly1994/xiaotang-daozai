@@ -39,6 +39,19 @@ pub fn image_is(pid:u32,exe:&str)->bool {
     }
 }
 
+/// 取进程映像的完整路径；只申请有限查询权限，不读取进程内存。
+pub fn image_path(pid:u32)->Option<String> {
+    if pid==0 {return None;}
+    unsafe {
+        let process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,false,pid).ok()?;
+        let mut path=[0u16;1024];let mut length=path.len() as u32;
+        let result=QueryFullProcessImageNameW(process,PROCESS_NAME_WIN32,windows::core::PWSTR(path.as_mut_ptr()),&mut length);
+        let _=CloseHandle(process);
+        result.ok()?;
+        Some(String::from_utf16_lossy(&path[..length as usize]))
+    }
+}
+
 #[test]
 fn exe_name_takes_file_part(){
     assert_eq!(exe_name(r"C:\Program Files\KuGou\KuGou.exe"),"KuGou.exe");
@@ -53,4 +66,5 @@ fn snapshot_finds_own_process(){
     assert!(pids_named(exe).contains(&pid));
     assert!(image_is(pid,exe));
     assert!(!image_is(pid,"KuGou.exe"));
+    assert!(image_path(pid).is_some_and(|path|path.ends_with(exe)),"映像路径应指向自身可执行文件");
 }

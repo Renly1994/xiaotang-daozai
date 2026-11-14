@@ -78,7 +78,17 @@ impl App {
             bar.interact_pointer_pos().or_else(||ctx.input(|i|i.pointer.interact_pos()))
                 .map(|pointer|((c.to_local(pointer).x-bx)/bw).clamp(0.0,1.0) as f64*np.duration)
         }else{None};
-        let position=seek_position.unwrap_or(np.position);
+        // 松手后播放器的新位置要等下一轮采样才回来（QQ 音乐尤其慢），先用目标值顶着，
+        // 否则滑块会先弹回旧位置再跳过去。
+        let pending_position=self.music_seek_ui.as_ref()
+            .filter(|(_,title)|*title==np.title).map(|(target,_)|*target);
+        // 切换上一首/下一首后先本地归零：新歌的位置要等下一轮采样才回来（QQ 音乐尤其慢），
+        // 否则会拿旧歌的进度配新歌名停一下；播放器报回比本地计时更小的值时立即采用。
+        let restart=self.music_restart_at.filter(|at|self.t<at+1.5).map(|at|(self.t-at).max(0.0));
+        let position=seek_position.or(pending_position).unwrap_or_else(|| match restart {
+            Some(fresh) if np.position>fresh+1.0 => fresh,
+            _ => np.position,
+        });
         let frac=if np.duration>0.0 {(position/np.duration).clamp(0.0,1.0) as f32}else{0.0};
         let (time_y,time_size,right)=if with_lyrics {(100.0,10.0,220.0)}else{(97.0,15.0,375.0)};
         c.text(44.0,time_y,&mmss(position),time_size,W::Regular,tc,H::Left);
@@ -104,7 +114,11 @@ impl App {
         if bh>0.01 {c.faded(bh).circle(bx+bw*frac,by,4.5,theme::WHITE);}
         }
         if bar.clicked() || bar.drag_stopped() {
-            if let Some(position)=seek_position {cmds.push(Cmd::Media(Transport::Seek(position)));}
+            if let Some(position)=seek_position {
+                self.music_seek_ui=Some((position,np.title.clone()));
+                self.music_seek_quiet_until=self.t+2.5;
+                cmds.push(Cmd::Media(Transport::Seek(position)));
+            }
         }
 
         let y=118.0;
@@ -138,9 +152,9 @@ impl App {
             }
         }
         if has {
-            if previous.clicked() {cmds.push(Cmd::Media(Transport::Prev));}
+            if previous.clicked() {self.music_restart_at=Some(self.t);self.music_seek_ui=None;cmds.push(Cmd::Media(Transport::Prev));}
             if play.clicked() {cmds.push(Cmd::Media(Transport::Toggle));}
-            if next.clicked() {cmds.push(Cmd::Media(Transport::Next));}
+            if next.clicked() {self.music_restart_at=Some(self.t);self.music_seek_ui=None;cmds.push(Cmd::Media(Transport::Next));}
         }
         if lyrics_button.on_hover_text(if self.show_lyrics {"隐藏歌词"}else{"显示歌词"}).clicked() {
             if !has {self.say("先放一首歌吧");}
