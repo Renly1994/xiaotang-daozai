@@ -150,18 +150,27 @@ fn points_to_cloudmusic(bytes:&[u8])->bool{
 /// 所有指向网易云的快捷方式：开始菜单、用户桌面、公共桌面。
 fn shortcut_paths()->Vec<std::path::PathBuf>{
     let mut found=Vec::new();
-    for dir in shortcut_dirs(){
-        let Ok(entries)=std::fs::read_dir(&dir) else{continue;};
-        for entry in entries.flatten(){
-            let path=entry.path();
-            if !path.extension().and_then(|ext|ext.to_str()).is_some_and(|ext|ext.eq_ignore_ascii_case("lnk")){continue;}
-            if std::fs::read(&path).is_ok_and(|bytes|points_to_cloudmusic(&bytes)){found.push(path);}
-        }
-        // 兜底：万一某个 .lnk 用了读不到内容的格式，按标准文件名仍然修它。
-        let named=dir.join("网易云音乐.lnk");
-        if named.is_file() && !found.contains(&named){found.push(named);}
-    }
+    for dir in shortcut_dirs(){collect_shortcuts(&dir,2,&mut found);}
     found
+}
+
+/// 安装器经常把快捷方式放进开始菜单的同名子文件夹（`Programs\网易云音乐\网易云音乐.lnk`），
+/// 只扫第一层会漏掉它，而用户从「所有应用」点开的恰恰是这一条，所以往下递归两层。
+fn collect_shortcuts(dir:&std::path::Path,depth:usize,found:&mut Vec<std::path::PathBuf>){
+    let Ok(entries)=std::fs::read_dir(dir) else{return;};
+    for entry in entries.flatten(){
+        let path=entry.path();
+        let Ok(kind)=entry.file_type() else{continue;};
+        if kind.is_dir(){
+            if depth>1{collect_shortcuts(&path,depth-1,found);}
+            continue;
+        }
+        if !path.extension().and_then(|ext|ext.to_str()).is_some_and(|ext|ext.eq_ignore_ascii_case("lnk")){continue;}
+        // 按内容识别；个别 .lnk 读不到内容时按标准文件名兜底。
+        let named=path.file_name().and_then(|name|name.to_str())
+            .is_some_and(|name|name.eq_ignore_ascii_case("网易云音乐.lnk"));
+        if named || std::fs::read(&path).is_ok_and(|bytes|points_to_cloudmusic(&bytes)){found.push(path);}
+    }
 }
 
 fn invalidate_shortcut_cache(){
