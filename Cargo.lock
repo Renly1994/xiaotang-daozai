@@ -533,6 +533,7 @@ dependencies = [
  "url",
  "wgpu",
  "windows",
+ "windows-core",
  "zstd",
 ]
 

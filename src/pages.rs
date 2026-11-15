@@ -682,14 +682,14 @@ impl App {
                 ec.text(209.5, 108.0, "只记位置，不复制文件 · 点一下打开", size::TINY, W::Regular, theme::GRAY, H::Center);
             }
         } else {
-            self.shelf_row(&body, cmds);
+            self.shelf_row(&body, env, cmds);
         }
         if drag > 0.002 {
             self.drag_overlay(&c.faded(drag));
         }
     }
 
-    fn shelf_row(&mut self, c: &Card, cmds: &mut Vec<Cmd>) {
+    fn shelf_row(&mut self, c: &Card, env: &Env, cmds: &mut Vec<Cmd>) {
         let n = self.shelf.items.len();
         let slot = 68.0;
         let center = 209.5;
@@ -697,6 +697,43 @@ impl App {
         let scroll = self.shelf_scroll.pos;
         let row = c.clipped(36.0, 28.0, 347.0, 100.0);
         let dt = self.dt;
+        self.shelf_drag_bounds = Some(c.rect(36.0, 28.0, 347.0, 100.0));
+        let pointer = env.cursor.or_else(|| c.ui.input(|i| i.pointer.interact_pos())).map(|p| c.to_local(p));
+        let down = c.ui.input(|i| i.pointer.primary_down());
+        #[cfg(windows)]
+        let down = if self.shelf_reorder.is_some() { crate::system::primary_button_down() } else { down };
+        let sorting = self.shelf_reorder.is_some();
+        if let Some(path) = self.shelf_reorder.clone() {
+            let escape = c.ui.input(|i| i.key_pressed(egui::Key::Escape));
+            match crate::shelf_drag::action(pointer.map(|p| (p.x, p.y)), down, escape) {
+                crate::shelf_drag::Action::Finish => {
+                    self.shelf.save();
+                    self.shelf_reorder = None;
+                    self.shelf_hold = None;
+                    c.ui.ctx().stop_dragging();
+                }
+                crate::shelf_drag::Action::External => {
+                    self.shelf.save();
+                    self.shelf_reorder = None;
+                    self.shelf_hold = None;
+                    c.ui.ctx().stop_dragging();
+                    if path.exists() { cmds.push(Cmd::DragFile(path)); }
+                }
+                crate::shelf_drag::Action::Inside { x, edge } => {
+                    if edge != 0 && self.t >= self.shelf_edge_at {
+                        self.shelf_first = if edge < 0 { self.shelf_first.saturating_sub(1) }
+                            else { (self.shelf_first + 1).min(n.saturating_sub(5)) };
+                        self.shelf_edge_at = self.t + 0.16;
+                    } else if edge == 0 { self.shelf_edge_at = self.t + 0.20; }
+                    let target = ((x - center) / slot + self.shelf_scroll.pos + (visible - 1.0) / 2.0).round().clamp(0.0, (n - 1) as f32) as usize;
+                    if let Some(from) = self.shelf.items.iter().position(|p| p == &path) {
+                        crate::shelf_drag::insert(&mut self.shelf.items, from, target);
+                    }
+                }
+                crate::shelf_drag::Action::Wait => {}
+            }
+            c.ui.ctx().request_repaint();
+        } else if !down { self.shelf_hold = None; }
         let items = self.shelf.items.clone();
         self.icons.retain(&items);
         self.shelf_x.retain(|p, _| items.contains(p));
@@ -721,7 +758,7 @@ impl App {
                 continue;
             }
             let r = row.hit_drag(x - 31.0, 30.0, 62.0, 78.0, ("shelf", p));
-            let show_hint=self.shelf_menu_rect.is_none() && !r.context_menu_opened() && !r.secondary_clicked();
+            let show_hint=self.shelf_reorder.is_none() && self.shelf_hold.is_none() && self.shelf_menu_rect.is_none() && !r.context_menu_opened() && !r.secondary_clicked();
             if show_hint {r.clone().on_hover_text(p.display().to_string());}
             let (h, pr) = row.hover_t(&r);
             let cc = row.faded(a).scaled(x, 66.0, 1.0 - 0.04 * pr);
@@ -735,12 +772,24 @@ impl App {
             cc.text(x, 86.0, &name, size::SMALL, W::Semibold, theme::WHITE, H::Center);
             let meta=self.icons.get(c.ui.ctx(),p).map(|preview|preview.metadata).unwrap_or_default();
             cc.text(x, 99.0, &meta, size::TINY, W::Regular, theme::GRAY, H::Center);
-            if r.drag_started() && p.exists() {cmds.push(Cmd::DragFile(p.clone()));}
+            if r.is_pointer_button_down_on() && self.shelf_hold.is_none() && self.shelf_reorder.is_none() {
+                self.shelf_hold = Some((p.clone(), self.t));
+            }
+            // 与原生拖出沿用相同的拖动阈值，不再额外等待长按计时。
+            if r.drag_started_by(egui::PointerButton::Primary) && down && !sorting && self.shelf_reorder.is_none() {
+                self.shelf_reorder = Some(p.clone());
+                self.shelf_edge_at = self.t + 0.20;
+            }
+            if self.shelf_hold.is_some() { c.ui.ctx().request_repaint(); }
+            if self.shelf_reorder.as_ref() == Some(p) {
+                row.fill(x - 31.0, 30.0, 62.0, 78.0, 10.0, Color32::from_white_alpha(35));
+
+            }
             let remove=row.hit(x+15.0,30.0,17.0,18.0,("shelf-remove",p));
             let remove_card=row.faded(a);
             remove_card.circle(x+23.5,39.0,7.5,Color32::from_rgb(55,40,46));
             paint::close(&remove_card,x+23.5,39.0,2.4,theme::WHITE);
-            let mut delete=remove.clicked();
+            let mut delete=remove.clicked() && !sorting;
             if show_hint {remove.on_hover_text("从置物架移除，保留原文件");}
             r.context_menu(|ui|{
                 if ui.button("打开").clicked(){if p.exists(){cmds.push(Cmd::Open(p.clone()));}ui.close_menu();}
@@ -750,7 +799,11 @@ impl App {
                 self.shelf_menu_rect=Some(egui::Frame::menu(ui.style()).widget_rect(ui.min_rect()));
             });
             if delete { self.shelf.remove(p); self.icons.remove(p); self.shelf_x.remove(p); self.shelf_born.remove(p); self.shelf_first=self.shelf_first.min(self.shelf.items.len().saturating_sub(5)); }
-            else if r.clicked() { if p.exists(){cmds.push(Cmd::Open(p.clone()));} else {self.say("文件已移动或删除，可从置物架移除");} }
+            else if r.clicked() && !sorting { if p.exists(){cmds.push(Cmd::Open(p.clone()));} else {self.say("文件已移动或删除，可从置物架移除");} }
+        }
+        // 拖动预览独立于原图标的可见性，自动滚动到屏外后仍跟随指针。
+        if let (Some(path), Some(pos)) = (self.shelf_reorder.clone(), pointer) {
+            self.file_icon_at(c, &path, pos.x.clamp(18.0, 401.0), pos.y.clamp(30.0, 130.0) - 15.0, 36.0);
         }
     }
 

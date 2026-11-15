@@ -56,6 +56,7 @@ rrule = "0.14.0"
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "x11"] }
 
 [target.'cfg(windows)'.dependencies]
+windows-core = "0.58"
 tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 clipboard-win = "5.4.3"
 wgpu = { version = "24", default-features = false, features = ["dx12"] }
@@ -95,7 +96,7 @@ windows = { version = "0.58", features = [
   "Win32_System_WinRT_Composition", "UI_Composition", "UI_Composition_Desktop", "System", "Foundation_Numerics",
   "UI_Notifications_Management",
   "UI_Notifications", "ApplicationModel",
-  "Win32_System_Ole", "Win32_UI_Shell_Common", "Networking_Connectivity",
+  "implement", "Win32_System_SystemServices", "Win32_System_Ole", "Win32_UI_Shell_Common", "Networking_Connectivity",
   "Win32_Devices_DeviceAndDriverInstallation",
   "Win32_Devices_Properties",
   "Win32_Devices_Bluetooth",
