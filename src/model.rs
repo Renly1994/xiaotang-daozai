@@ -251,6 +251,8 @@ pub struct Settings {
     /// 用户点开设置或关掉后置 false，不再弹。
     pub calendar_prompt: bool,
     pub calendar_auto_sync: bool,
+    /// 只读同步本机 vivo 办公套件的日历缓存；默认关闭，由用户主动开启。
+    pub vivo_calendar: bool,
     /// 记录最近复制的文字（最近记录与固定条目均在本机保存）。
     pub clipboard_history: bool,
     /// 天气页要看的城市；留空表示按网络出口自动定位。
@@ -267,7 +269,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, oled_shift: false, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 9], page_order: [0,1,2,3,4,5,6,7,8], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wecom_notifications:false, feishu_notifications:false, dingtalk_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, avoid_top_bar: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, sit_remind: true, sit_minutes: 60, lunch_rest: true, lunch_start: 720, lunch_end: 810, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, weather_city: String::new(), weather_position: None, weather_saved: Vec::new(), render_compat: false, render_compat_reason: String::new() }
+        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, oled_shift: false, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 9], page_order: [0,1,2,3,4,5,6,7,8], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wecom_notifications:false, feishu_notifications:false, dingtalk_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, avoid_top_bar: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, sit_remind: true, sit_minutes: 60, lunch_rest: true, lunch_start: 720, lunch_end: 810, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, vivo_calendar: false, clipboard_history: true, weather_city: String::new(), weather_position: None, weather_saved: Vec::new(), render_compat: false, render_compat_reason: String::new() }
     }
 }
 
@@ -376,6 +378,7 @@ impl Settings {
                 "mail_ics" => s.mail_ics = match v.parse::<u32>().unwrap_or(15) { 5 => 5, 30 => 30, _ => 15 },
                 "calendar_prompt" => s.calendar_prompt = v != "0",
                 "calendar_auto_sync" => s.calendar_auto_sync = v != "0",
+                "vivo_calendar" => s.vivo_calendar = v == "1",
                 "clipboard_history" => s.clipboard_history = v != "0",
                 "weather_city" => s.weather_city = v.trim().to_string(),
                 "weather_position" => s.weather_position=serde_json::from_str::<Option<crate::weather::Position>>(&v).ok().flatten().filter(|p|p.valid()),
@@ -455,6 +458,7 @@ impl Settings {
                 ("ignored_mail_events".into(), serde_json::to_string(&self.ignored_mail_events).unwrap()),
                 ("calendar_prompt".into(), (self.calendar_prompt as u8).to_string()),
                 ("calendar_auto_sync".into(), (self.calendar_auto_sync as u8).to_string()),
+                ("vivo_calendar".into(), (self.vivo_calendar as u8).to_string()),
                 ("clipboard_history".into(), (self.clipboard_history as u8).to_string()),
                 ("weather_city".into(), self.weather_city.clone()),
                 ("weather_position".into(), serde_json::to_string(&self.weather_position).unwrap()),

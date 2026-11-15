@@ -40,13 +40,13 @@ fn occurs_on(event:&mail::Meeting,day:NaiveDate)->bool {
 }
 
 #[derive(Clone,Copy,PartialEq,Eq)]
-pub(crate) enum Source<'a> { Calendar(Option<calendar::Provider>), Mail(&'a str), Local }
+pub(crate) enum Source<'a> { Calendar(Option<calendar::Provider>), Mail(&'a str), Local, Vivo }
 impl Source<'_> {
     fn icon_key(self)->&'static str {
-        match self {Self::Calendar(Some(provider))=>provider.key(),Self::Calendar(None)=>"calendar",Self::Mail(_)=>"mail",Self::Local=>"local"}
+        match self {Self::Calendar(Some(provider))=>provider.key(),Self::Calendar(None)=>"calendar",Self::Mail(_)=>"mail",Self::Local=>"local",Self::Vivo=>"calendar"}
     }
     fn label(self)->String {
-        match self {Self::Calendar(provider)=>provider.map(|p|p.label()).unwrap_or("工作日历").to_string(),Self::Mail(account)=>format!("邮件 · {account}"),Self::Local=>"本机日程".into()}
+        match self {Self::Calendar(provider)=>provider.map(|p|p.label()).unwrap_or("工作日历").to_string(),Self::Mail(account)=>format!("邮件 · {account}"),Self::Local=>"本机日程".into(),Self::Vivo=>"vivo 日历".into()}
     }
     fn color(self)->Color32 {
         match self {
@@ -56,6 +56,7 @@ impl Source<'_> {
             Self::Calendar(_)=>Color32::from_rgb(112,162,255),
             Self::Mail(_)=>Color32::from_rgb(199,168,255),
             Self::Local=>Color32::from_rgb(105,208,157),
+            Self::Vivo=>Color32::from_rgb(160,140,235),
         }
     }
 }
@@ -119,7 +120,7 @@ pub(crate) fn source_icon(c:&Card,source:Source<'_>,x:f32,y:f32,size:f32) {
     let pixels=(rect.width()*c.ui.ctx().pixels_per_point()).ceil() as u32;
     let icon=egui::Image::from_bytes(format!("{uri}/{pixels}.svg"),bytes);
     if let Ok(egui::load::TexturePoll::Ready{texture})=icon.fit_to_exact_size(rect.size()).load_for_size(c.ui.ctx(),rect.size()) {
-        let tint=if matches!(source,Source::Calendar(None|Some(calendar::Provider::ICloud|calendar::Provider::Custom|calendar::Provider::Exchange))|Source::Local){source.color()}else{Color32::WHITE};
+        let tint=if matches!(source,Source::Calendar(None|Some(calendar::Provider::ICloud|calendar::Provider::Custom|calendar::Provider::Exchange))|Source::Local|Source::Vivo){source.color()}else{Color32::WHITE};
         c.painter.image(texture.id,rect,egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)),tint);
     }
 }
@@ -250,7 +251,8 @@ impl App {
         let mut events:Vec<Entry<'_>>=vec![];
         let mut seen=std::collections::HashMap::<String,usize>::new();
         let local=self.calendar.local.iter().map(|entry|(&entry.event,Source::Local));
-        for (event,source) in work.chain(mail).chain(local).filter(|(event,_)|occurs_on(event,day)) {
+        let vivo=self.calendar.vivo.iter().map(|entry|(&entry.event,Source::Vivo));
+        for (event,source) in work.chain(mail).chain(local).chain(vivo).filter(|(event,_)|occurs_on(event,day)) {
             let key=entry_key(event);
             if let Some(&index)=seen.get(&key) {
                 let entry=&mut events[index];
@@ -294,7 +296,8 @@ impl App {
         let grid=calendar::month_grid(self.calendar.view.month);
         let mut dots:std::collections::HashMap<NaiveDate,Vec<Source<'_>>>=std::collections::HashMap::new();
         let local=self.calendar.local.iter().map(|entry|(&entry.event,Source::Local));
-        for (event,source) in work.chain(mail).chain(local) {
+        let vivo=self.calendar.vivo.iter().map(|entry|(&entry.event,Source::Vivo));
+        for (event,source) in work.chain(mail).chain(local).chain(vivo) {
             let Some((start,last))=event_days(event) else{continue;};
             if last<grid[0] || start>grid[41]{continue;}
             for date in grid.iter().filter(|date|start<=**date && **date<=last) {

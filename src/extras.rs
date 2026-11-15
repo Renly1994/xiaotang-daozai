@@ -123,7 +123,7 @@ fn notice_icon(c:&Card,x:f32,y:f32,a:&Alert) {
         "待办到时间了"=>crate::paint::checklist(c,x,y,23.0,Color32::from_rgb(190,180,255),Color32::from_rgb(43,35,66)),
         "会议提醒"=>{
             let label=a.meeting.as_ref().map(|(_,source)|source.as_str()).unwrap_or("");
-            let source=if label=="本机日程"{crate::calendar_ui::Source::Local}else if label.starts_with("邮件"){crate::calendar_ui::Source::Mail("")}
+            let source=if label=="本机日程"{crate::calendar_ui::Source::Local}else if label=="vivo 日历"{crate::calendar_ui::Source::Vivo}else if label.starts_with("邮件"){crate::calendar_ui::Source::Mail("")}
                 else{crate::calendar_ui::Source::Calendar(crate::calendar::Provider::ALL.into_iter().find(|provider|provider.label()==label))};
             crate::calendar_ui::source_icon(c,source,x-14.0,y-14.0,28.0);
         },
@@ -1820,6 +1820,19 @@ impl App {
                     }
                     8=>{
                         ui.spacing_mut().item_spacing.y=4.0;
+                        // vivo 办公套件：只读本机同步缓存，不联网、不写入办公套件数据库。
+                        settings_card(ui,|ui|{
+                            setting_row(ui,"同步 vivo 办公套件日程","只读本机日历缓存，不上传、不写入；需已登录办公套件并开启日程同步",&mut self.settings.vivo_calendar);
+                            let status=if !self.settings.vivo_calendar{"已关闭".to_string()}
+                                else if !self.calendar.vivo_error.is_empty(){format!("读取失败：{}",self.calendar.vivo_error)}
+                                else{format!("● 已读取 {} 个日程",self.calendar.vivo.len())};
+                            ui.add(egui::Label::new(egui::RichText::new(status).size(11.0).color(settings_color(ctx,Color32::from_gray(150),Color32::from_gray(105)))).wrap());
+                            if self.settings.vivo_calendar && self.calendar.vivo_last_sync_ms>0 {
+                                let at=chrono::DateTime::from_timestamp(self.calendar.vivo_last_sync_ms/1000,0)
+                                    .map(|dt|dt.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string()).unwrap_or_default();
+                                if !at.is_empty(){ui.add(egui::Label::new(egui::RichText::new(format!("办公套件最后云同步 {at}")).size(11.0).color(settings_color(ctx,Color32::from_gray(150),Color32::from_gray(105)))).wrap());}
+                            }
+                        });
                         // v0.5.6 日程：状态在最上面，后面才是平台、账号和提醒。
                         // 只读；服务器地址由平台决定，用户不用抄。
                         if let Some(cfg)=self.calendar.config.clone(){
