@@ -186,16 +186,15 @@ fn ring(c:&Card,a:&Account,snapshot:Option<&Snapshot>,x:f32,y:f32,size:f32,color
     let radius=size/2.0-stroke/2.0-1.0;
     let gap=if size<35.0{1.5}else{3.0};
     let start=-std::f32::consts::FRAC_PI_2;
-    for i in 0..if dual{2}else{1}{
+    // 双窗口时内圈比外圈缩进一档；take(2) 已经限住了圈数，不用再判越界。
+    for (i,w) in windows.iter().take(if dual{2}else{1}).enumerate(){
         let r=radius-i as f32*(stroke+gap);
-        if let Some(w)=windows.get(i){
-            let col=colors[i];let dark=crate::paint::mix(col,Color32::BLACK,0.8);
-            if w.remaining>=100.0{c.ring(x,y,r,stroke,col);}else if w.remaining<=0.0{c.ring(x,y,r,stroke,dark);}else{
-                let end=start+std::f32::consts::TAU*w.remaining/100.0;
-                c.arc(x,y,r,end,start+std::f32::consts::TAU,stroke,dark);
-                c.arc(x,y,r,start,end,stroke,col);
-                for angle in [start,end]{c.circle(x+r*angle.cos(),y+r*angle.sin(),stroke/2.0,col);}
-            }
+        let col=colors[i];let dark=crate::paint::mix(col,Color32::BLACK,0.8);
+        if w.remaining>=100.0{c.ring(x,y,r,stroke,col);}else if w.remaining<=0.0{c.ring(x,y,r,stroke,dark);}else{
+            let end=start+std::f32::consts::TAU*w.remaining/100.0;
+            c.arc(x,y,r,end,start+std::f32::consts::TAU,stroke,dark);
+            c.arc(x,y,r,start,end,stroke,col);
+            for angle in [start,end]{c.circle(x+r*angle.cos(),y+r*angle.sin(),stroke/2.0,col);}
         }
     }
     if a.provider==Provider::Kiro{logo(c,a.provider,x,y,if size<35.0{if dual{10.0}else{12.0}}else if dual{24.0}else{34.0});}

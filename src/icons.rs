@@ -131,9 +131,11 @@ fn thumbnail(path: &Path, size: i32, flags: windows::Win32::UI::Shell::SIIGBF) -
         if lines == 0 {
             return None;
         }
-        // BGRA（预乘）→ RGBA；JPEG 之类的缩略图 alpha 全 0，当作不透明
-        let opaque = px.chunks_exact(4).all(|p| p[3] == 0);
-        for p in px.chunks_exact_mut(4) {
+        // BGRA（预乘）→ RGBA；JPEG 之类的缩略图 alpha 全 0，当作不透明。
+        // as_chunks 一次切好定长数组，省掉每个像素的边界检查。
+        let (pixels, _) = px.as_chunks_mut::<4>();
+        let opaque = pixels.iter().all(|p| p[3] == 0);
+        for p in pixels {
             p.swap(0, 2);
             if opaque {
                 p[3] = 255;
@@ -210,7 +212,8 @@ fn shell_icon(path: &Path) -> Option<ColorImage> {
     };
     let mut src = rgba?;
     // BGRA -> RGBA
-    for px in src.chunks_exact_mut(4) {
+    let (pixels, _) = src.as_chunks_mut::<4>();
+    for px in pixels {
         px.swap(0, 2);
     }
     let img = ColorImage::from_rgba_unmultiplied([SIZE as usize, SIZE as usize], &src);

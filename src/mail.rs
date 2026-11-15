@@ -17,8 +17,9 @@ pub const MICROSOFT_UNSUPPORTED: &str = "Outlook、Hotmail、Live 和 Microsoft 
 
 // ---------------------------------------------------------------- 邮箱类型
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Provider {
+    #[default]
     Qq,
     Mail163,
     Mail126,
@@ -27,12 +28,6 @@ pub enum Provider {
     Gmail,
     Microsoft,
     Custom,
-}
-
-impl Default for Provider {
-    fn default() -> Self {
-        Provider::Qq
-    }
 }
 
 impl Provider {
@@ -144,6 +139,8 @@ pub struct Account {
     pub custom: Option<CustomImap>,
     /// 是否监控这个账号（设置里可逐个开关）。
     pub enabled: bool,
+    /// 邮箱备注：用来在灵动岛区分多个邮箱，最多 8 个字符，可空。
+    pub note: String,
 }
 
 #[derive(Clone,Debug,PartialEq,Eq)]
@@ -211,6 +208,7 @@ pub fn decode_accounts(raw: &[u8]) -> Vec<Account> {
                 custom:a.get("custom").and_then(|c|Some(CustomImap{host:c.get("host")?.as_str()?.into(),port:u16::try_from(c.get("port")?.as_u64()?).ok()?,username:c.get("username").and_then(|u|u.as_str()).unwrap_or("").into()})),
                 provider: Provider::parse(a.get("provider").and_then(|p| p.as_str()).unwrap_or("qq")),
                 enabled: a.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true),
+                note: a.get("note").and_then(|n| n.as_str()).unwrap_or("").trim().chars().take(8).collect(),
                 email,
             })
         })
@@ -220,7 +218,7 @@ pub fn decode_accounts(raw: &[u8]) -> Vec<Account> {
 pub fn encode_accounts(items: &[Account]) -> Vec<u8> {
     let list: Vec<_> = items
         .iter()
-        .map(|a| serde_json::json!({"email": a.email, "provider": a.provider.key(), "enabled": a.enabled,"custom":a.custom.as_ref().map(|c|serde_json::json!({"host":c.host,"port":c.port,"username":c.username}))}))
+        .map(|a| serde_json::json!({"email": a.email, "provider": a.provider.key(), "enabled": a.enabled, "note": a.note, "custom":a.custom.as_ref().map(|c|serde_json::json!({"host":c.host,"port":c.port,"username":c.username}))}))
         .collect();
     serde_json::to_vec(&list).unwrap_or_default()
 }
@@ -277,6 +275,12 @@ pub struct Item {
     /// HTML 原文（无 HTML 版本时为空）。排版层据此还原标题、列表、引用等结构；
     /// `summary` 只作为纯文本邮件的兜底，两者都只在内存中保存。
     pub html: std::sync::Arc<str>,
+    /// 内嵌图片：Content-ID → 原始字节。只在内存里，不落盘。
+    pub images: std::sync::Arc<std::collections::HashMap<String, std::sync::Arc<Vec<u8>>>>,
+    /// 原邮件的 Message-ID；回复时填进 In-Reply-To，让客户端把邮件串起来。
+    pub message_id: String,
+    /// 发件人邮箱地址（`from` 是显示名，回复要用地址）。
+    pub from_addr: String,
     pub links: Vec<Link>,
     /// 会议邀请（来自 .ics / text/calendar），没有就是 `None`。
     pub meeting: Option<Meeting>,
@@ -361,6 +365,12 @@ pub struct Parsed {
     /// text/calendar 正文（.ics 原文，没有则空）。
     pub calendar: String,
     pub emphasized: Vec<String>,
+    /// 内嵌图片：Content-ID → 原始字节（只收 `cid:` 引用的图，不收普通附件）。
+    pub images: std::collections::HashMap<String, Vec<u8>>,
+    /// 原邮件的 Message-ID，回复时用作 In-Reply-To。
+    pub message_id: String,
+    /// 发件人邮箱地址（`from` 只是显示名）。
+    pub from_addr: String,
 }
 
 fn header(mail: &mailparse::ParsedMail, name: &str) -> String {
@@ -369,6 +379,19 @@ fn header(mail: &mailparse::ParsedMail, name: &str) -> String {
         .find(|h| h.get_key().eq_ignore_ascii_case(name))
         .map(|h| h.get_value().trim().to_string())
         .unwrap_or_default()
+}
+
+/// 从 `名字 <地址>` 里取出地址本身。
+fn addr_of(raw: &str) -> String {
+    mailparse::addrparse(raw)
+        .ok()
+        .and_then(|list| {
+            list.iter().find_map(|a| match a {
+                mailparse::MailAddr::Single(s) => Some(s.addr.clone()),
+                mailparse::MailAddr::Group(g) => g.addrs.first().map(|s| s.addr.clone()),
+            })
+        })
+        .unwrap_or_else(|| raw.trim().trim_matches(['<', '>', '"']).to_string())
 }
 
 fn display_addr(raw: &str) -> String {
@@ -383,7 +406,13 @@ fn display_addr(raw: &str) -> String {
         .unwrap_or_else(|| raw.trim().trim_matches('"').to_string())
 }
 
-fn collect(mail: &mailparse::ParsedMail, plain: &mut String, html: &mut String, calendar: &mut String) {
+fn collect(
+    mail: &mailparse::ParsedMail,
+    plain: &mut String,
+    html: &mut String,
+    calendar: &mut String,
+    images: &mut std::collections::HashMap<String, Vec<u8>>,
+) {
     if mail.subparts.is_empty() {
         let ct = mail.ctype.mimetype.to_ascii_lowercase();
         if ct == "text/plain" {
@@ -401,10 +430,19 @@ fn collect(mail: &mailparse::ParsedMail, plain: &mut String, html: &mut String, 
                 calendar.push_str(&body);
                 calendar.push('\n');
             }
+        } else if ct.starts_with("image/") {
+            // 只收被 `cid:` 引用的内嵌图；没有 Content-ID 的是普通图片附件。
+            let id = header(mail, "Content-ID").trim().trim_start_matches('<').trim_end_matches('>').to_string();
+            let budget: usize = images.values().map(Vec::len).sum();
+            if let Ok(bytes) = mail.get_body_raw() {
+                if !id.is_empty() && bytes.len() <= 1024 * 1024 && budget + bytes.len() <= 4 * 1024 * 1024 {
+                    images.insert(id, bytes);
+                }
+            }
         }
     } else {
         for part in &mail.subparts {
-            collect(part, plain, html, calendar);
+            collect(part, plain, html, calendar, images);
         }
     }
 }
@@ -419,18 +457,24 @@ pub fn parse_message(raw: &[u8]) -> Parsed {
             html: String::new(),
             calendar: String::new(),
             emphasized: Vec::new(),
+            images: std::collections::HashMap::new(),
+            message_id: String::new(),
+            from_addr: String::new(),
         };
     };
     let subject = header(&mail, "Subject");
     let from = display_addr(&header(&mail, "From"));
+    let from_addr = addr_of(&header(&mail, "From"));
     let (mut plain, mut html, mut calendar) = (String::new(), String::new(), String::new());
-    collect(&mail, &mut plain, &mut html, &mut calendar);
+    let mut images = std::collections::HashMap::new();
+    collect(&mail, &mut plain, &mut html, &mut calendar, &mut images);
     let emphasized = if plain.trim().is_empty() {
         otp::emphasized(&html)
     } else {
         Vec::new()
     };
-    Parsed { from, subject, text: plain, html, calendar, emphasized }
+    let message_id = header(&mail, "Message-ID");
+    Parsed { from, subject, text: plain, html, calendar, emphasized, images, message_id, from_addr }
 }
 
 /// 优先纯文本；HTML 原文另外保留给阅读界面排版。
@@ -438,7 +482,7 @@ pub fn body_of(parsed:&Parsed)->String {
     let body = if !parsed.text.trim().is_empty() {
         parsed.text.clone()
     } else if !parsed.html.trim().is_empty() {
-        otp::html_to_text(&parsed.html)
+        otp::html_to_rich_text(&parsed.html)
     } else {
         String::new()
     };
@@ -1164,7 +1208,7 @@ mod service {
             (client.login("synthetic","synthetic").unwrap(),stop,server)
         }
 
-        fn account()->Account {Account{provider:Provider::Mail163,email:"test@163.com".into(),enabled:true,custom:None}}
+        fn account()->Account {Account{provider:Provider::Mail163,email:"test@163.com".into(),enabled:true,custom:None,note:String::new()}}
 
         #[test]
         fn polling_keepalives_do_not_fetch_until_the_configured_deadline(){
@@ -1500,6 +1544,10 @@ Content-Type: multipart/alternative; boundary=\"b\"\r\n\r\n\
         let parsed=super::parse_message(raw);
         assert!(!parsed.text.trim().is_empty(),"text/plain 仍要保留作摘要与兜底");
         assert!(parsed.html.contains("<h1>"),"HTML 原文必须保留");
+        let doc=crate::mail_doc::render(&parsed.html,&parsed.text);
+        let first=doc.blocks.first().expect("应有正文");
+        assert!(matches!(first,crate::mail_doc::Block::Paragraph(p) if p.runs.iter().any(|r|r.bold)),"h1 应以加粗段落呈现: {first:?}");
+        assert!(doc.blocks.iter().any(|b|matches!(b,crate::mail_doc::Block::ListItem(_))),"li 应还原成列表项");
         let lines=crate::mail_format::lines(&parsed.html,&parsed.text);
         assert_eq!(lines[0].kind,crate::mail_format::Kind::Title,"真实邮件应走 HTML 排版");
         assert!(lines.iter().any(|l|l.kind==crate::mail_format::Kind::Bullet));
@@ -1563,8 +1611,8 @@ Content-Type: multipart/alternative; boundary=\"b\"\r\n\r\n\
     #[test]
     fn accounts_roundtrip_without_secrets() {
         let items = vec![
-            Account { custom: None, email: "a@qq.com".into(), provider: Provider::Qq, enabled: true },
-            Account { custom: None, email: "b@163.com".into(), provider: Provider::Mail163, enabled: false },
+            Account { custom: None, email: "a@qq.com".into(), provider: Provider::Qq, enabled: true , note: String::new() },
+            Account { custom: None, email: "b@163.com".into(), provider: Provider::Mail163, enabled: false , note: String::new() },
         ];
         let bytes = encode_accounts(&items);
         assert_eq!(decode_accounts(&bytes), items);
@@ -1579,7 +1627,7 @@ Content-Type: multipart/alternative; boundary=\"b\"\r\n\r\n\
         assert_eq!(Provider::parse("gmail"), Provider::Gmail);
         assert_eq!(Provider::Gmail.host(), "imap.gmail.com");
         assert_eq!(Provider::Gmail.port(), 993);
-        let gmail=Account {custom: None, email:"demo@gmail.com".into(),provider:Provider::Gmail,enabled:true};
+        let gmail=Account {custom: None, email:"demo@gmail.com".into(),provider:Provider::Gmail,enabled:true, note: String::new() };
         assert_eq!(decode_accounts(&encode_accounts(&[gmail.clone()])),vec![gmail]);
         assert!(Provider::Mail163.needs_id() && Provider::Mail126.needs_id());
         assert!(!Provider::Qq.needs_id());
@@ -1605,7 +1653,7 @@ Content-Type: multipart/alternative; boundary=\"b\"\r\n\r\n\
         let parsed=parse_message(&raw("长邮件",&text));
         assert_eq!(body_of(&parsed),text);
         let html=parse_message(b"Content-Type: text/html; charset=utf-8\r\n\r\n<p>First paragraph</p><p>Last paragraph</p>");
-        assert_eq!(body_of(&html),"First paragraph\nLast paragraph");
+        assert_eq!(body_of(&html),"First paragraph\n\nLast paragraph");
     }
 
     const ICS: &str = "BEGIN:VCALENDAR\r\n\
@@ -1698,9 +1746,24 @@ END:VCALENDAR\r\n";
 }
 
 #[cfg(test)]
+mod account_note_tests {
+ use super::*;
+ #[test]
+ fn note_roundtrips_and_legacy_files_default_empty(){
+  let account=Account{email:"a@qq.com".into(),provider:Provider::Qq,enabled:true,note:"工作".into(),custom:None};
+  let raw=encode_accounts(&[account.clone()]);
+  assert_eq!(decode_accounts(&raw),vec![account]);
+  let legacy=r#"[{"email":"a@qq.com","provider":"qq","enabled":true}]"#;
+  assert_eq!(decode_accounts(legacy.as_bytes())[0].note,"");
+  let long=r#"[{"email":"a@qq.com","provider":"qq","enabled":true,"note":"一二三四五六七八九十"}]"#;
+  assert_eq!(decode_accounts(long.as_bytes())[0].note,"一二三四五六七八");
+ }
+}
+
+#[cfg(test)]
 mod custom_endpoint_tests {
  #[test] fn microsoft_cloud_accounts_report_unsupported_before_connecting(){
-  let a=Account{email:"test@hotmail.com".into(),provider:Provider::Microsoft,custom:None,enabled:true};
+  let a=Account{email:"test@hotmail.com".into(),provider:Provider::Microsoft,custom:None,enabled:true,note:String::new()};
   let error=a.endpoint().expect_err("尚未支持的微软邮箱不能发起连接");
   assert!(error.contains("OAuth")&&error.contains("暂不支持"));
   assert!(Provider::Microsoft.label().contains("暂不支持"));
@@ -1709,12 +1772,12 @@ mod custom_endpoint_tests {
    assert_eq!(b.endpoint().unwrap_err(),error,"微软云主机应显示同一提示");
   }
   for email in ["user@outlook.com","user@hotmail.com","user@live.com"," USER@OUTLOOK.COM "]{
-   let b=Account{email:email.into(),provider:Provider::Qq,custom:None,enabled:true};
+   let b=Account{email:email.into(),provider:Provider::Qq,custom:None,enabled:true,note:String::new()};
    assert_eq!(b.endpoint().unwrap_err(),error,"误选服务商也不能引导用户尝试密码");
   }
  }
  use super::*;
- fn account()->Account{Account{email:"student@example.edu".into(),provider:Provider::Custom,enabled:true,custom:Some(CustomImap{host:"imap.example.edu".into(),port:993,username:"student-id".into()})}}
+ fn account()->Account{Account{email:"student@example.edu".into(),provider:Provider::Custom,enabled:true,custom:Some(CustomImap{host:"imap.example.edu".into(),port:993,username:"student-id".into()}), note: String::new()} }
  #[test] fn custom_requires_tls_hostname_and_clean_identity(){
   let a=account();assert_eq!(a.endpoint().unwrap(),("imap.example.edu".into(),993,"student-id".into()));
   for host in ["https://imap.example.edu","a/b","a:993","user@host","bad\\host","-bad.example",""]{let mut b=a.clone();b.custom.as_mut().unwrap().host=host.into();assert!(b.endpoint().is_err());}
@@ -1733,4 +1796,31 @@ mod custom_endpoint_tests {
   let a=account();let raw=encode_accounts(&[a.clone()]);assert_eq!(decode_accounts(&raw),vec![a]);
   let text=String::from_utf8(raw).unwrap();assert!(!text.contains("password"));assert!(!text.contains("secret"));
  }
+}
+
+#[cfg(test)]
+mod diagnostic_tmp {
+    #[test]
+    #[ignore = "本地诊断：用真实 HTML 跑排版"]
+    fn render_dumped_html() {
+        for name in ["mail-qq-iCloud.html", "mail-163-iCloud.html", "mail-qq-WorkBuddy.html"] {
+            let path = format!(".tmpwork/{name}");
+            let Ok(html) = std::fs::read_to_string(&path) else { continue };
+            let _ = html;
+            let doc = crate::mail_doc::render(&html, "");
+            println!("=== {name} blocks={} ===", doc.blocks.len());
+            for block in doc.blocks.iter().take(60) {
+                let text = match block {
+                    crate::mail_doc::Block::Paragraph(p) => p.runs.iter().map(|r| r.text.as_str()).collect::<String>(),
+                    crate::mail_doc::Block::ListItem(i) => format!("· {}", i.para.runs.iter().map(|r| r.text.as_str()).collect::<String>()),
+                    crate::mail_doc::Block::Table(t) => format!("<table {}x{}>", t.rows.len(), t.rows.first().map(|r| r.cells.len()).unwrap_or(0)),
+                    crate::mail_doc::Block::Image(i) => format!("<img {}>", i.src.chars().take(40).collect::<String>()),
+                    crate::mail_doc::Block::Divider => "<hr>".into(),
+                    crate::mail_doc::Block::Space(h) => format!("<space {h}>"),
+                };
+                let text = text.replace('\n', " / ");
+                println!("  {}", text.chars().take(120).collect::<String>());
+            }
+        }
+    }
 }

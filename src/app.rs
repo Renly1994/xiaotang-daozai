@@ -505,6 +505,8 @@ pub(crate) struct MailState {
     pub reader_focus: bool,
     /// 已经提醒过的会议，键是 `UID + DTSTART`（邮件和日历两条来源共用）。
     pub fired: std::collections::HashSet<String>,
+    /// 正文图片的纹理缓存：内嵌图与远程图共用，跨邮件复用。
+    pub images: std::sync::Arc<crate::mail_image::ImageCache>,
 }
 
 #[derive(Default)]
@@ -512,6 +514,8 @@ pub(crate) struct MailForm {
     pub provider: mail::Provider,
     pub custom: mail::CustomImap,
     pub email: String,
+    /// 邮箱备注：用于在灵动岛区分多个邮箱。
+    pub note: String,
     pub password: String,
     pub show: bool,
 }
@@ -786,8 +790,12 @@ pub struct App {
     bt_initialized: bool,
     /// v0.5.5：邮件账号、最近邮件与设置表单。
     pub(crate) mail: MailState,
-    /// 岛内详情与独立阅读窗口各保留一份排版缓存。
+    /// 上游的排版行缓存：岛内详情与独立阅读窗口各保留一份。
     mail_lines_cache: Vec<(std::sync::Arc<str>, std::sync::Arc<str>, u32, std::sync::Arc<Vec<crate::mail_format::Line>>)>,
+    /// 我们的块排版缓存：岛内详情卡用，同一封邮件只解析一次。
+    mail_doc_cache: Option<(std::sync::Arc<str>, std::sync::Arc<str>, u32, std::sync::Arc<crate::mail_doc::Doc>)>,
+    /// 面板上次下发的外壳主题：深浅切换时要把正在读的正文按新主题重推一次。
+    pub(crate) mail_panel_dark: Option<bool>,
     /// v0.5.6：日历（CalDAV）配置、未来 24 小时事件与设置表单。
     pub(crate) calendar: CalendarState,
     pub(crate) quota: crate::quota_ui::State,
@@ -911,6 +919,8 @@ impl App {
             bt_initialized: false,
             mail: MailState { accounts: mail::load_accounts(), ..Default::default() },
             mail_lines_cache: Vec::new(),
+            mail_doc_cache: None,
+            mail_panel_dark: None,
             calendar: CalendarState::load(),
             quota: crate::quota_ui::State::load(),
             weather,
@@ -938,6 +948,19 @@ impl App {
         self.mail.privacy.hidden(item,self.t,self.settings.mail_code_hide_seconds)
     }
     pub(crate) fn reveal_mail_code(&mut self,item:&mail::Item){self.mail.privacy.reveal(item,self.t);}
+    /// 同一封邮件、同一段正文只解析一次块排版，避免每帧重复解析整棵 HTML。
+    pub(crate) fn mail_body_doc(&mut self, item: &mail::Item) -> std::sync::Arc<crate::mail_doc::Doc> {
+        let hit = self.mail_doc_cache.as_ref().is_some_and(|(summary, html, uid, _)|
+            *uid == item.uid
+            && std::sync::Arc::ptr_eq(summary, &item.summary)
+            && std::sync::Arc::ptr_eq(html, &item.html));
+        if !hit {
+            self.mail_doc_cache = Some((item.summary.clone(), item.html.clone(), item.uid,
+                std::sync::Arc::new(crate::mail_doc::render_item(item))));
+        }
+        self.mail_doc_cache.as_ref().unwrap().3.clone()
+    }
+
     /// 同一封邮件、同一段正文只解析一次排版，避免每帧重复切分几百个段落。
     pub(crate) fn mail_body_lines(&mut self, item: &mail::Item) -> std::sync::Arc<Vec<crate::mail_format::Line>> {
         // display_mail 每帧只 clone Arc：正文与 HTML 原文的指针都不变就说明是同一封邮件，
@@ -1237,14 +1260,14 @@ impl App {
             self.mail.form.password = "invalid-auth-code".into();
             self.mail.note = "test@qq.com：正在测试连接…".into();
             self.pending.push(Cmd::MailTest(
-                Account { custom: None, email: "test@qq.com".into(), provider: Provider::Qq, enabled: true },
+                Account { custom: None, email: "test@qq.com".into(), provider: Provider::Qq, enabled: true , note: String::new() },
                 "invalid-auth-code".into(),
             ));
             return;
         }
         self.mail.accounts = vec![
-            Account { custom: None, email: "demo@qq.com".into(), provider: Provider::Qq, enabled: false },
-            Account { custom: None, email: "demo@icloud.com".into(), provider: Provider::ICloud, enabled: false },
+            Account { custom: None, email: "demo@qq.com".into(), provider: Provider::Qq, enabled: false , note: String::new() },
+            Account { custom: None, email: "demo@icloud.com".into(), provider: Provider::ICloud, enabled: false , note: String::new() },
         ];
         for a in &self.mail.accounts {
             self.mail.status.insert(a.email.clone(), Status::Ready);
@@ -1301,6 +1324,9 @@ impl App {
                 code: if with_code { (*code).map(str::to_string) } else { None },
                 summary: (*summary).into(),
                 html: String::new().into(),
+                images: Default::default(),
+                message_id: String::new(),
+                from_addr: "demo@qq.com".into(),
                 links: Vec::new(),
                 meeting: meeting.as_ref().map(|(start, at)| mail::Meeting { all_day:false, end:None, title: "周五方案评审".into(), start: *start, at: at.clone(), uid: "demo-ics-1".into() }),
                 uid: 900 - i as u32,
@@ -1956,7 +1982,7 @@ impl App {
                     c.circle(22.0,10.5,2.0,Color32::from_rgb(255,72,72));
                 }else{crate::extras::notice_badge(&c,18.0,15.0,&a);}
                 let button=crate::quota_ui::bar_tooltip(c.hit(0.0,0.0,36.0,BAR_H,"notice-badge"),format!("{}\n{}",a.title,a.body));
-                if button.clicked(){self.notice_details=!self.notice_details;}
+                if button.clicked(){self.notice_details= !self.notice_details;}
             }else if self.t<self.notification_bell_until {
                 paint::bell(&c.scaled(20.0,14.0,1.2),20.0,14.0,theme::WHITE,paint::bell_swing(self.t-self.notification_bell_at));
                 c.circle(24.0,9.5,2.0,Color32::from_rgb(255,72,72));
@@ -1995,6 +2021,11 @@ impl App {
             // 吉祥物跟随皮肤换色：浅色底上变成深色版本，保持清晰。
             let fit=if self.island_lyrics_active()||self.notice.is_some(){1.0}else{((WIN_W-32.0)/self.resident.target.width).min(1.0)};
             self.pet.draw(&base.scaled(cx-origin.x,15.0,fit).shifted(0.0,y).faded(pet_alpha),cx-origin.x+self.resident.position(bar::PET),self.t,self.skin_palette());
+        }
+        // 邮件面板是独立子窗口，画不了淡出和位移：岛收起 / 切页 / 进设置二级页时先藏起来，
+        // 否则它会浮在新界面上面。opacity 过渡由 page_mail 自己判断。
+        if self.page != 5 || self.subpage.is_some() || reveal <= 0.004 {
+            crate::mail_panel::hide();
         }
         if reveal > 0.004 && !banner && !restoring_lyrics {
             let c = base.shifted(0.0, (1.0 - reveal) * -5.0).faded(reveal);
@@ -2261,10 +2292,10 @@ impl App {
         let icons=sources.len();
         let step=unread_step(horizontal);
         let at=|k:usize|if horizontal {(16.0+step*k as f32,14.0)}else{(16.0,14.0+step*k as f32)};
-        for k in 0..icons {
+        for (k,source) in sources.iter().enumerate() {
             let (x,y)=at(k);
-            let scale=sources[k].adapter().collapsed_icon_scale;
-            crate::extras::messenger_icon(&c.scaled(x,y,scale),x,y,sources[k]);
+            let scale=source.adapter().collapsed_icon_scale;
+            crate::extras::messenger_icon(&c.scaled(x,y,scale),x,y,*source);
         }
         // 每个来源图标右上角一个小红点，不显示数字。
         for k in 0..icons {let (x,y)=at(k);c.circle(x+8.0,y-7.0,2.6,Color32::from_rgb(255,59,48));}
@@ -2436,7 +2467,7 @@ impl App {
                     else {drag.offset+(position-start)/travel*limit};
                 let raw=raw.clamp(-limit,limit);
                 // 居中和拖动前的位置有轻微吸附，窗口弹簧会把这一下「吸过去」。
-                let original=Some(drag.original.1 as f32).filter(|_|self.dock()==drag.original.0);
+                let original=(self.dock()==drag.original.0).then_some(drag.original.1 as f32);
                 let target=[Some(0.0),original].into_iter().flatten().find(|p|(raw-p).abs()<=DRAG_MAGNET).unwrap_or(raw);
                 self.settings.island_offset=target.round() as i32;
                 let glide=self.drag_glide.get_or_insert_with(||anim::Spring::new(drag.offset,GLIDE_FOLLOW.0,GLIDE_FOLLOW.1));
@@ -2877,7 +2908,7 @@ impl App {
     }
 
     fn toast_layer(&mut self, c: &Card, base_y:f32)->Option<Rect> {
-        let Some((msg, at)) = self.toast.clone() else { return None };
+        let (msg, at) = self.toast.clone()?;
         let e = (self.t - at) as f32;
         if e > 2.4 {
             self.toast = None;

@@ -439,6 +439,8 @@ impl ControlWorker {
         })?;
         Some(Self{requests})
     }
+    /// `Err(())` 表示请求队列满（丢一次控制不致命），调用方只关心成败。
+    #[allow(clippy::result_unit_err)]
     pub fn submit(&self,command:Transport,source:String)->Result<Option<std::sync::mpsc::Receiver<bool>>,()>{
         let (result,receiver)=if matches!(command,Transport::Seek(_)|Transport::SetVolume(_)|Transport::SetMute(_)){let (tx,rx)=std::sync::mpsc::sync_channel(1);(Some(tx),Some(rx))}else{(None,None)};
         self.requests.try_send((command,source,std::time::Instant::now(),result)).map_err(|_|{crate::resources::CONTROL_DROPPED.fetch_add(1,std::sync::atomic::Ordering::Relaxed);})?;
@@ -457,7 +459,7 @@ pub fn control(cmd: Transport,source:&str) {
     use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
     let _apartment=init_winrt();
     let session=media_result(GlobalSystemMediaTransportControlsSessionManager::RequestAsync)
-        .and_then(|mgr|mgr.GetSessions().ok()).and_then(|sessions|sessions.into_iter().find(|session|session.SourceAppUserModelId().ok().is_some_and(|id|id.to_string()==source)));
+        .and_then(|mgr|mgr.GetSessions().ok()).and_then(|sessions|sessions.into_iter().find(|session|session.SourceAppUserModelId().ok().is_some_and(|id|id.to_string().eq(&source))));
     let Some(session)=session else{
         if source.eq_ignore_ascii_case("cloudmusic.exe"){netease_playback::control(cmd);}
         return;

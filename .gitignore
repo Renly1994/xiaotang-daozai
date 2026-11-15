@@ -13,3 +13,13 @@
 *.key
 .DS_Store
 Thumbs.db
+
+# 语料渲染的中间产物（Edge profile 与临时 HTML），用 render_baseline.py 可重建
+tests/fixtures/mail/.render-tmp/
+
+# 语料渲染的中间产物（Edge profile 与临时 HTML），用 render_baseline.py 可重建
+tests/fixtures/mail/.render-tmp/
+.tmpwork/
+
+# Python 字节码缓存（语料脚本运行产生）
+__pycache__/

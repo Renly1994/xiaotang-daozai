@@ -106,6 +106,8 @@ impl Target {
         media(&rid,&title,&artist,duration,bytes,rate,offset,paused)
     }
 }
+/// 酷我的 `media` 字段是位置参数串，逐个解包后拼成 `NowPlaying`，参数就是协议字段。
+#[allow(clippy::too_many_arguments)]
 fn media(rid:&str,title:&str,artist:&str,duration:f64,bytes:u32,rate:u32,offset:i32,paused:u8)->Option<NowPlaying>{
     let id=rid.strip_prefix("MUSIC_")?.parse::<u64>().ok().filter(|id|*id>0)?;
     if title.trim().is_empty() || title.len()>4096 || artist.len()>4096 || rate==0 || rate>4_000_000 || paused>1{return None;}

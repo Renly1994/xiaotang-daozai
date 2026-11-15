@@ -6,6 +6,10 @@
 //!
 //! 硬约束：只读；凭据只进 Windows 凭据管理器（`keyring`，和邮件同一套库），
 //! 配置文件里只有平台、用户名、日历地址；不落盘正文、不进日志。
+//!
+//! `Failure` 里带的是给用户看的整段说明与同步报告，天生比 clippy 的 128 字节线大。
+//! 这些函数都在同步（冷）路径上，为它把所有签名改成 `Box<Failure>` 只会让错误处理更绕。
+#![allow(clippy::result_large_err)]
 
 mod exchange;
 #[cfg(test)]
@@ -628,14 +632,14 @@ fn fetch_collection(agent:&ureq::Agent,cfg:&Config,password:&str,href:&str,lo:ch
     let href=href.to_owned();
     let start = lo.format("%Y%m%dT%H%M%SZ").to_string();
     let end = hi.format("%Y%m%dT%H%M%SZ").to_string();
-    let mut xml = dav(&agent, "REPORT", &href, "1", &report_body(cfg.provider, &start, &end), cfg, password)?;
+    let mut xml = dav(agent, "REPORT", &href, "1", &report_body(cfg.provider, &start, &end), cfg, password)?;
     let mut has_data=calendar_data(&xml).iter().any(|data|!data.trim().is_empty());
     if !has_data && (report_status_error(&xml).is_some() || !responses(&xml).is_empty()) {
         // 有的服务只列资源，或在查询结果中附带集合本身；集合不能当成日程读取。
         if let Some(code @ (401|403))=report_status_error(&xml){return Err(Failure::status(cfg.provider,code));}
         let mut refs=report_resource_refs(&xml,&href)?;
         if refs.is_empty() {
-            let listing=dav(&agent,"PROPFIND",&href,"1",PROPFIND_BODY,cfg,password)?;
+            let listing=dav(agent,"PROPFIND",&href,"1",PROPFIND_BODY,cfg,password)?;
             if let Some(code @ (401|403))=report_status_error(&listing){return Err(Failure::status(cfg.provider,code));}
             refs=report_resource_refs(&listing,&href)?;
             if refs.is_empty() {
@@ -645,7 +649,7 @@ fn fetch_collection(agent:&ureq::Agent,cfg:&Config,password:&str,href:&str,lo:ch
         }
         let data=calendar_data_request(cfg.provider,&start,&end);
         let body=format!(r#"<c:calendar-multiget xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><d:getetag/>{data}</d:prop>{refs}</c:calendar-multiget>"#);
-        xml=dav(&agent,"REPORT",&href,"1",&body,cfg,password)?;
+        xml=dav(agent,"REPORT",&href,"1",&body,cfg,password)?;
         has_data=calendar_data(&xml).iter().any(|data|!data.trim().is_empty());
         if !has_data && report_status_error(&xml).is_none() {
             return Err(Failure::text("服务器未返回日程内容，请检查日历读取权限"));
@@ -807,7 +811,7 @@ fn pick_calendar(xml: &str, base: &str) -> Option<String> {
             continue;
         }
         let score = if is_calendar { 3 } else if looks_like_uuid(path.rsplit('/').next().unwrap_or("")) { 2 } else { continue; };
-        if best.as_ref().map_or(true, |(s, _)| score > *s) {
+        if best.as_ref().is_none_or(|(s, _)| score > *s) {
             best = Some((score, url));
         }
     }
@@ -958,10 +962,10 @@ fn parse_events_in_range(xml:&str,lo:chrono::DateTime<chrono::Utc>,hi:chrono::Da
         let synthetic=format!("BEGIN:VEVENT\n{}\nEND:VEVENT",id.replacen("RECURRENCE-ID","DTSTART",1));
         let at=crate::mail::meetings_of(&synthetic).first().map(|m|m.start);
         let valid_start=cancelled(body)||!crate::mail::meetings_of(&format!("BEGIN:VEVENT\n{body}END:VEVENT")).is_empty();
-        if id.contains("RANGE=")||at.is_none()||!valid_start{
-            if let Some(uid)=field(body,"UID"){invalid_series.insert(uid);}
-            report.problem("部分重复日程的修改规则或时间暂无法解析");
-        }else{overrides.insert((field(body,"UID").unwrap_or_default(),at.unwrap()));}
+        match at.filter(|_|!id.contains("RANGE=")&&valid_start){
+            Some(at)=>{overrides.insert((field(body,"UID").unwrap_or_default(),at));}
+            None=>{if let Some(uid)=field(body,"UID"){invalid_series.insert(uid);}report.problem("部分重复日程的修改规则或时间暂无法解析");}
+        }
     }}
     let mut events=Vec::new();
     let mut seen=std::collections::HashSet::new();

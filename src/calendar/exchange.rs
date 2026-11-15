@@ -1,5 +1,9 @@
 //! Exchange ActiveSync 14.0（企业微信、自建或第三方 Exchange）：只读取日历，不发送日程修改命令。
 //! 服务器要求设备策略时只如实回报「部分执行」：岛仔不执行锁屏密码、远程擦除等管控。
+//!
+//! `Failure` 里有给用户看的整段说明和同步报告，比 clippy 的 128 字节线大；这里的函数
+//! 都在日历同步的冷路径上，为它把所有签名改成 `Box<Failure>` 不划算。
+#![allow(clippy::result_large_err)]
 use super::{Config, Failure, Fetched, Provider};
 use chrono::{DateTime, Utc};
 use std::io::Read;

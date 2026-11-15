@@ -99,7 +99,8 @@ pub(super) fn read(path:&Path,org:&str,at:i64,now:i64)->Option<Snapshot>{
     let table_len=match u32_at(&index,28)?{0=>65536,n=>n as usize};
     if !table_len.is_power_of_two()||table_len>(4*MAX_BODY-INDEX_HEADER)/4||index.len()!=INDEX_HEADER+4*table_len{return None;}
     let url=format!("https://claude.ai/api/organizations/{org}/usage");let mut seen=HashSet::new();let mut latest:Option<Snapshot>=None;
-    for (bucket,head) in index[INDEX_HEADER..].chunks_exact(4).enumerate(){
+    let (buckets,_)=index[INDEX_HEADER..].as_chunks::<4>();
+    for (bucket,head) in buckets.iter().enumerate(){
         let mut address=u32_at(head,0)?;
         while address!=0&&seen.len()<40000&&seen.insert(address){
             let Some(entry)=cache.stream(address,256)else{break;};let current=address;address=u32_at(&entry,4)?;

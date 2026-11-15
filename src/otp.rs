@@ -150,7 +150,7 @@ fn alphabetic_code_at(hay:&str,start:usize,end:usize,text:&str,emph:&[String])->
     if !terminal && !exact_emphasis{return false;}
     if raw_gap.contains('\n') {
         if !own_line && !exact_emphasis{return false;}
-    }else if !raw_gap.contains([':', '：', '=']) && !(gap!="" && core.bytes().filter(|b|b.is_ascii_uppercase()).count()>=2) && !exact_emphasis{return false;}
+    }else if !raw_gap.contains([':', '：', '=']) && !(!gap.is_empty() && core.bytes().filter(|b|b.is_ascii_uppercase()).count()>=2) && !exact_emphasis{return false;}
     !has(&around(hay,start,end,6),MONEY_WORDS)
         && !has(&before(hay,start,20),ORDER_WORDS)
         && !has(&after(hay,end,8),ORDER_WORDS)
@@ -206,7 +206,7 @@ pub fn extract(subject: &str, body: &str, emphasized: &[String]) -> Option<Code>
         }
     }
     best.map(|(_, _, _, code)| code).filter(|c| c.score >= THRESHOLD)
-        .or_else(||if alphabetic_ambiguous {None}else{alphabetic})
+        .or(if alphabetic_ambiguous {None}else{alphabetic})
 }
 
 fn score_at(hay: &str, start: usize, end: usize, text: &str, subject_end: usize, emph: &[String]) -> Option<(i32, bool)> {
@@ -371,6 +371,65 @@ pub fn html_to_text(html: &str) -> String {
             out.push_str(&t);
             out.push('\n');
         }
+    }
+    out
+}
+
+/// 和 `html_to_text` 一样去掉标签，但保留可读结构：行首 `## ` 是标题、`• ` 是列表、
+/// `> ` 是引用、`---` 是分隔线，段落之间留一个空行。给邮件阅读界面用。
+pub fn html_to_rich_text(html: &str) -> String {
+    static SCRIPT: OnceLock<Regex> = OnceLock::new();
+    static PRE: OnceLock<Regex> = OnceLock::new();
+    static PARA: OnceLock<Regex> = OnceLock::new();
+    static ITEM: OnceLock<Regex> = OnceLock::new();
+    static TAGS: OnceLock<Regex> = OnceLock::new();
+    let script = SCRIPT.get_or_init(|| Regex::new(r"(?is)<(?:script|style|head)[^>]*>.*?</(?:script|style|head)>").expect("script"));
+    let pre = PRE.get_or_init(|| {
+        Regex::new(r"(?i)<hr\s*/?>|<h[1-6][^>]*>|<li[^>]*>|<blockquote[^>]*>").expect("pre")
+    });
+    let para = PARA.get_or_init(|| {
+        Regex::new(r"(?i)<br\s*/?>|</p>|</div>|</table>|</tr>|</h[1-6]>|</blockquote>|</t[dh]>").expect("para")
+    });
+    let item = ITEM.get_or_init(|| Regex::new(r"(?i)</li>").expect("item"));
+    let tags = TAGS.get_or_init(|| Regex::new(r"(?s)<[^>]+>").expect("tag"));
+    let s = script.replace_all(html, " ");
+    let s = pre.replace_all(&s, |caps: &regex::Captures| {
+        let raw = caps.get(0).map(|m| m.as_str()).unwrap_or_default().to_ascii_lowercase();
+        if raw.starts_with("<hr") {
+            "\n\n---\n\n".to_string()
+        } else if raw.starts_with("<h") {
+            "\n\n## ".to_string()
+        } else if raw.starts_with("<li") {
+            "\n• ".to_string()
+        } else {
+            "\n> ".to_string()
+        }
+    });
+    let s = para.replace_all(&s, "\n\n");
+    let s = item.replace_all(&s, "\n");
+    let s = tags.replace_all(&s, "");
+    let s = s
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'");
+    let mut out = String::with_capacity(s.len());
+    let mut blank = false;
+    for line in s.lines() {
+        let t = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        let t = t.trim();
+        if t.is_empty() {
+            blank = true;
+            continue;
+        }
+        if blank && !out.is_empty() {
+            out.push('\n');
+        }
+        blank = false;
+        out.push_str(t);
+        out.push('\n');
     }
     out
 }

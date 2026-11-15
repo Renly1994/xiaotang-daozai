@@ -8,10 +8,16 @@ fn parts(body:&BodyStructure<'_>,path:&mut Vec<u32>,out:&mut Vec<Vec<u32>>){
         BodyStructure::Multipart{bodies,..}=>for (i,body) in bodies.iter().enumerate(){
             path.push(i as u32+1);parts(body,path,out);path.pop();
         },
-        BodyStructure::Text{common,..}|BodyStructure::Basic{common,..}=>{
+        BodyStructure::Text{common,other,..}|BodyStructure::Basic{common,other,..}=>{
             let ty=&common.ty;
-            if ty.ty.eq_ignore_ascii_case("text") && ["plain","html","calendar"].iter().any(|sub|ty.subtype.eq_ignore_ascii_case(sub))
-                || ty.ty.eq_ignore_ascii_case("application") && ty.subtype.eq_ignore_ascii_case("ics") {
+            let body=ty.ty.eq_ignore_ascii_case("text") && ["plain","html","calendar"].iter().any(|sub|ty.subtype.eq_ignore_ascii_case(sub))
+                || ty.ty.eq_ignore_ascii_case("application") && ty.subtype.eq_ignore_ascii_case("ics");
+            // 只取被 `cid:` 引用的内嵌图，普通图片附件不下载。
+            let inline_image=ty.ty.eq_ignore_ascii_case("image")
+                && other.id.is_some()
+                && other.octets<=1024*1024
+                && ["png","jpeg","jpg","gif","webp"].iter().any(|sub|ty.subtype.eq_ignore_ascii_case(sub));
+            if body||inline_image {
                 out.push(if path.is_empty(){vec![1]}else{path.clone()});
             }
         },
@@ -19,12 +25,17 @@ fn parts(body:&BodyStructure<'_>,path:&mut Vec<u32>,out:&mut Vec<Vec<u32>>){
     }
 }
 
-fn make_item(parsed:Parsed,fetch:&imap::types::Fetch,account:&Account)->Item{
+fn make_item(mut parsed:Parsed,fetch:&imap::types::Fetch,account:&Account)->Item{
+    // 先取出图片再构造结构体：其他字段要借用 parsed，不能在中途部分移动。
+    let images:std::sync::Arc<std::collections::HashMap<String,std::sync::Arc<Vec<u8>>>>=
+        std::mem::take(&mut parsed.images).into_iter().map(|(id,bytes)|(id,std::sync::Arc::new(bytes))).collect::<std::collections::HashMap<_,_>>().into();
     Item {received_unix: fetch.internal_date().map(|d|d.timestamp()), account:account.email.clone(),
         from:if parsed.from.is_empty(){account.email.clone()}else{parsed.from.clone()},
         subject:if parsed.subject.is_empty(){"（无主题）".into()}else{parsed.subject.clone()},
         time:fetch.internal_date().map(|d|d.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string()).unwrap_or_default(),
-        code:code_of(&parsed),summary:body_of(&parsed).into(),html:parsed.html.clone().into(),links:links_of(&parsed),meeting:meeting_of(&parsed.calendar),uid:fetch.uid.unwrap_or(0)}
+        code:code_of(&parsed),summary:body_of(&parsed).into(),html:parsed.html.clone().into(),
+        images,
+        links:links_of(&parsed),meeting:meeting_of(&parsed.calendar),message_id:parsed.message_id.clone(),from_addr:parsed.from_addr.clone(),uid:fetch.uid.unwrap_or(0)}
 }
 
 /// 服务器明确拒绝了这条命令（NO / BAD）：连接仍然同步，可以换一种方式读这封信。
@@ -68,6 +79,7 @@ pub(crate) fn item<S:Read+Write>(session:&mut imap::Session<S>,uid:u32,account:&
         let part=parse_message(&raw);
         parsed.text.push_str(&part.text);parsed.html.push_str(&part.html);parsed.calendar.push_str(&part.calendar);
         parsed.emphasized.extend(part.emphasized);
+        parsed.images.extend(part.images);
     }
     if !parsed.text.trim().is_empty(){parsed.emphasized.clear();}
     Ok(Some(make_item(parsed,fetch,account)))
@@ -88,7 +100,7 @@ mod tests {
         let output=Arc::new(Mutex::new(Vec::new()));
         let wire=Wire{input:Cursor::new(format!("a1 OK login\r\n{reply}").into_bytes()),output:output.clone()};
         let mut session=imap::Client::new(wire).login("test","test").unwrap();
-        let account=Account {custom: None, email:"test@example.com".into(),provider:super::super::Provider::Qq,enabled:true};
+        let account=Account {custom: None, email:"test@example.com".into(),provider:super::super::Provider::Qq,enabled:true, note: String::new() };
         let item=item(&mut session,42,&account).unwrap().unwrap();
         let commands=String::from_utf8(output.lock().unwrap().clone()).unwrap();(item,commands)
     }
@@ -98,7 +110,7 @@ mod tests {
         let wire=Wire{input:Cursor::new(format!("a1 OK login\r\n{input}").into_bytes()),output:output.clone()};
         (imap::Client::new(wire).login("test","test").unwrap(),output)
     }
-    fn account()->Account{Account {custom: None, email:"test@example.com".into(),provider:super::super::Provider::Qq,enabled:true}}
+    fn account()->Account{Account {custom: None, email:"test@example.com".into(),provider:super::super::Provider::Qq,enabled:true, note: String::new()} }
     #[test]
     fn out_of_sync_response_reports_an_error_instead_of_crashing(){
         // 用户崩溃日志：vendor\imap\src\client.rs:1369 的标签断言。a2 的位置收到上一条命令迟到的 a1 结束行。

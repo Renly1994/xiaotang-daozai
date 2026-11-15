@@ -1,0 +1,15 @@
+From: Example Test <notice@example.test>
+To: Recipient <reader@example.test>
+Subject: [A-10] 通栏轻 HTML / 纯文本 · 合成回归语料 a-10
+Date: Sat, 01 Nov 2025 22:26:40 GMT
+Message-ID: <a-10@example.test>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+<!DOCTYPE html><html><head><meta charset="utf-8"></head>
+<body style="margin:0;padding:16px;color:#24292f;font-family:Arial,sans-serif">
+<h2 style="font-size:18px">形态 A · 通栏通知 10</h2>
+<p>第 1 段说明文字，包含一条 <a href="https://example.test/doc/10/1">内联链接 1</a> 用于验证链接命中。</p><p>第 2 段说明文字，包含一条 <a href="https://example.test/doc/10/2">内联链接 2</a> 用于验证链接命中。</p><p>第 3 段说明文字，包含一条 <a href="https://example.test/doc/10/3">内联链接 3</a> 用于验证链接命中。</p><p>第 4 段说明文字，包含一条 <a href="https://example.test/doc/10/4">内联链接 4</a> 用于验证链接命中。</p><ul><li>项目一</li><li>项目二</li><li>项目三</li></ul>
+<hr><p style="font-size:12px;color:#57606a">本邮件为合成回归语料，不含真实数据。</p>
+</body></html>

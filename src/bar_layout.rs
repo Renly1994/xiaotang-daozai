@@ -126,7 +126,7 @@ impl Motion {
         self.positions.resize(target.x.len(),Spring::new(0.0,360.0,0.76));
         for (i,x) in target.x.iter().enumerate() {
             if let Some(x)=x {
-                let spring=&mut self.positions[i];spring.target=*x;
+                let spring=&mut self.positions[i];spring.target= *x;
                 if !self.initialized || self.target.x.get(i).copied().flatten().is_none() || !animate {spring.snap(*x);}else{spring.step(dt);}
             }
         }

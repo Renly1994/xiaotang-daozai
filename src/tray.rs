@@ -104,7 +104,8 @@ fn load_resource_icon() -> Option<HICON> {
     unsafe {
         let module = GetModuleHandleW(None).ok()?;
         let cx = GetSystemMetrics(SM_CXSMICON);
-        let handle = LoadImageW(module, PCWSTR(1 as *const u16), IMAGE_ICON, cx, cx, LR_DEFAULTCOLOR).ok()?;
+        // MAKEINTRESOURCE(1)：资源 id 编成一个不带来源的指针，不是真地址。
+        let handle = LoadImageW(module, PCWSTR(std::ptr::without_provenance(1)), IMAGE_ICON, cx, cx, LR_DEFAULTCOLOR).ok()?;
         (!handle.is_invalid()).then_some(HICON(handle.0))
     }
 }

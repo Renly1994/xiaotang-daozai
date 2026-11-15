@@ -84,7 +84,7 @@ impl Privacy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn item()->Item{Item{account:"test@example.com".into(),from:"Example".into(),subject:"验证码 123456 有效期为30秒".into(),time:String::new(),received_unix:Some(100),code:Some("123456".into()),html:String::new().into(),summary:"验证码 123456 有效期为30秒".into(),links:vec![],meeting:None,uid:1}}
+    fn item()->Item{Item{account:"test@example.com".into(),from:"Example".into(),subject:"验证码 123456 有效期为30秒".into(),time:String::new(),received_unix:Some(100),code:Some("123456".into()),html: String::new().into(),images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:"验证码 123456 有效期为30秒".into(),links:vec![],meeting:None,uid:1}}
     #[test] fn new_event_after_a_snapshot_reveals_the_code_once(){
         let item=item();let mut p=Privacy::default();
         p.observe(&item,false,0.0,100);assert!(p.hidden(&item,0.0,60));

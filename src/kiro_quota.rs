@@ -173,11 +173,12 @@ pub(super) fn parse(v:&Value)->Result<Snapshot,String>{
     let total=Amount::new(pools.iter().map(|p|p.amount.remaining).sum(),pools.iter().map(|p|p.amount.limit).sum());
     if !total.limit.is_finite()||!total.remaining.is_finite(){return Err("Kiro 额度总量无效".into());}
     snapshot.windows.push(Window{label:if pools.len()>1{"可用点数"}else{"月度额度"}.into(),seconds:None,remaining:if total.limit>0.0{(total.remaining/total.limit*100.0) as f32}else{0.0},reset:if pools.len()>1{None}else{reset},amount:Some(total)});
-    if v["overageConfiguration"]["overageStatus"].as_str().is_some_and(|s|s.eq_ignore_ascii_case("ENABLED")){
-        if !credit["overageCapWithPrecision"].is_null()||!credit["overageCap"].is_null(){
-            let cap=amount_field(credit,"overageCapWithPrecision","overageCap")?;
-            if cap>0.0{let left=(cap-overage).max(0.0);snapshot.windows.push(Window{label:"超额上限余量".into(),seconds:None,remaining:(left/cap*100.0).clamp(0.0,100.0) as f32,reset,amount:Some(Amount::new(left,cap))});}
-        }
+    // 只有「超额已开启」且服务端给了额度上限，才补一个超额窗口。
+    if v["overageConfiguration"]["overageStatus"].as_str().is_some_and(|s|s.eq_ignore_ascii_case("ENABLED"))
+        && (!credit["overageCapWithPrecision"].is_null()||!credit["overageCap"].is_null())
+    {
+        let cap=amount_field(credit,"overageCapWithPrecision","overageCap")?;
+        if cap>0.0{let left=(cap-overage).max(0.0);snapshot.windows.push(Window{label:"超额上限余量".into(),seconds:None,remaining:(left/cap*100.0).clamp(0.0,100.0) as f32,reset,amount:Some(Amount::new(left,cap))});}
     }
     snapshot.kiro=Some(Details{owner,pools});Ok(snapshot)
 }

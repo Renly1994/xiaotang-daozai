@@ -50,6 +50,9 @@ url = "2"
 chrono = "0.4"
 chrono-tz = "0.10"
 rrule = "0.14.0"
+html5ever = "0.40.1"
+markup5ever_rcdom = "0.40.1"
+ammonia = { version = "4.2.4", default-features = false }
 
 # Linux 下 winit 至少要一个后端才能编译（只用于开发/录制，正式目标是 Windows）。
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -106,10 +109,13 @@ imap = "2.4"
 imap-proto = "0.10.2"
 native-tls = "0.2"
 keyring = { version = "3", features = ["windows-native"] }
+webview2-com = "0.33"
 
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
-panic = "abort"
+# WebView2 的 COM 回调在本进程里执行，abort 会让一次 panic 带走整个岛仔。
+# 改成 unwind 后，回调外层可以 catch_unwind 兜住，只关掉那一个窗口。
+panic = "unwind"

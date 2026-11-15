@@ -122,9 +122,10 @@ fn checksum(machine:&str,millis:i64)->String{
     // 与客户端 JavaScript 的移位规则一致：移位数按 32 取模。
     let mut bytes=[(stamp>>8) as u8,stamp as u8,(stamp>>24) as u8,(stamp>>16) as u8,(stamp>>8) as u8,stamp as u8];
     let mut previous=165;
-    for (i,byte) in bytes.iter_mut().enumerate(){*byte=(*byte^previous).wrapping_add(i as u8);previous=*byte;}
+    for (i,byte) in bytes.iter_mut().enumerate(){*byte=(*byte^previous).wrapping_add(i as u8);previous= *byte;}
     format!("{}{machine}",URL_SAFE_NO_PAD.encode(bytes))
 }
+#[allow(clippy::result_large_err)]
 fn usage_request(agent:&ureq::Agent,url:&str,token:&str)->Result<ureq::Response,ureq::Error>{
     let request_id=uuid();
     agent.post(url).set("Authorization",&format!("Bearer {token}")).set("Content-Type","application/json").set("Accept","application/json")

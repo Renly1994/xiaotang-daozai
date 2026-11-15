@@ -1,0 +1,19 @@
+From: Example Test <notice@example.test>
+To: Recipient <reader@example.test>
+Subject: [D-10] 中文事务 / logo + 明细 · 合成回归语料 d-10
+Date: Sat, 01 Nov 2025 22:26:40 GMT
+Message-ID: <d-10@example.test>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+<!DOCTYPE html><html><head><meta charset="utf-8"></head>
+<body style="margin:0;padding:24px;background:#f7f5fb;font-family:'Microsoft YaHei',sans-serif">
+<table width="600" align="center" bgcolor="#ffffff" cellpadding="24"><tr><td>
+<img src="cid:logo-10" width="96" height="24" alt="Logo">
+<h3 style="font-size:17px;color:#1f2328">形态 D · 账户变动提醒 10</h3>
+<p style="font-size:13px;color:#57606a">你好，以下是本次变动的明细，请核对。</p>
+<table width="100%" cellpadding="0" cellspacing="0"><tr><td style='padding:6px;border-bottom:1px solid #eaeef2'>项目 1</td><td align='right' style='padding:6px'>¥ 20.00</td></tr><tr><td style='padding:6px;border-bottom:1px solid #eaeef2'>项目 2</td><td align='right' style='padding:6px'>¥ 30.00</td></tr><tr><td style='padding:6px;border-bottom:1px solid #eaeef2'>项目 3</td><td align='right' style='padding:6px'>¥ 40.00</td></tr></table>
+<p style="font-size:12px;color:#8c959f">如需帮助，请联系支持团队（本邮件为合成语料）。</p>
+<p><a href="https://example.test/help/10" style="color:#8250df">查看完整明细</a></p>
+</td></tr></table></body></html>

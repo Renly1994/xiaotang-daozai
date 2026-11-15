@@ -1,0 +1,33 @@
+From: Example Test <notice@example.test>
+To: Recipient <reader@example.test>
+Subject: [D-03] 中文事务 / logo + 明细 · 合成回归语料 d-03
+Date: Sat, 01 Nov 2025 15:26:40 GMT
+Message-ID: <d-03@example.test>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+<!DOCTYPE html><html><head><meta charset=3D"utf-8"></head>
+<body style=3D"margin:0;padding:24px;background:#eceff3;font-family:'Micros=
+oft YaHei',sans-serif">
+<table width=3D"680" align=3D"center" bgcolor=3D"#ffffff" cellpadding=3D"24=
+"><tr><td>
+<img src=3D"https://cdn.example.test/assets/hero-3.png" width=3D"96" height=
+=3D"24" alt=3D"Logo">
+<h3 style=3D"font-size:17px;color:#1f2328">=E5=BD=A2=E6=80=81 D =C2=B7 =E8=
+=B4=A6=E6=88=B7=E5=8F=98=E5=8A=A8=E6=8F=90=E9=86=92 03</h3>
+<p style=3D"font-size:13px;color:#57606a">=E4=BD=A0=E5=A5=BD=EF=BC=8C=E4=BB=
+=A5=E4=B8=8B=E6=98=AF=E6=9C=AC=E6=AC=A1=E5=8F=98=E5=8A=A8=E7=9A=84=E6=98=8E=
+=E7=BB=86=EF=BC=8C=E8=AF=B7=E6=A0=B8=E5=AF=B9=E3=80=82</p>
+<table width=3D"100%" cellpadding=3D"0" cellspacing=3D"0"><tr><td style=3D'=
+padding:6px;border-bottom:1px solid #eaeef2'>=E9=A1=B9=E7=9B=AE 1</td><td a=
+lign=3D'right' style=3D'padding:6px'>=C2=A5 13.00</td></tr><tr><td style=3D=
+'padding:6px;border-bottom:1px solid #eaeef2'>=E9=A1=B9=E7=9B=AE 2</td><td =
+align=3D'right' style=3D'padding:6px'>=C2=A5 23.00</td></tr></table>
+<p style=3D"font-size:12px;color:#8c959f">=E5=A6=82=E9=9C=80=E5=B8=AE=E5=8A=
+=A9=EF=BC=8C=E8=AF=B7=E8=81=94=E7=B3=BB=E6=94=AF=E6=8C=81=E5=9B=A2=E9=98=9F=
+=EF=BC=88=E6=9C=AC=E9=82=AE=E4=BB=B6=E4=B8=BA=E5=90=88=E6=88=90=E8=AF=AD=E6=
+=96=99=EF=BC=89=E3=80=82</p>
+<p><a href=3D"https://example.test/help/3" style=3D"color:#76b900">=E6=9F=
+=A5=E7=9C=8B=E5=AE=8C=E6=95=B4=E6=98=8E=E7=BB=86</a></p>
+</td></tr></table></body></html>

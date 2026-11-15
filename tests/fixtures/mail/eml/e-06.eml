@@ -1,0 +1,40 @@
+From: Example Test <notice@example.test>
+To: Recipient <reader@example.test>
+Subject: [E-06] 混排多栏 / 数据表 · 合成回归语料 e-06
+Date: Sat, 01 Nov 2025 18:26:40 GMT
+Message-ID: <e-06@example.test>
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary="fixture-related"
+
+--fixture-related
+Content-Type: multipart/alternative; boundary="fixture-alt"
+
+--fixture-alt
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+这是纯文本备选部分。
+--fixture-alt
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>body{margin:0} h1{font-size:22px} a{color:#e36209} td{font-size:13px}</style>
+</head><body style="background:#fff7f0;padding:20px">
+<table width="560" align="center" cellpadding="16" bgcolor="#ffffff"><tr><td>
+<h1>形态 E · 混排周报 06</h1><div style="position:absolute;top:0;left:0">角标</div>
+<table width="100%" cellpadding="0" cellspacing="0"><tr><td width='50%' valign='top' style='padding:12px;background:#ffffff'><strong>栏目 1</strong><p style='font-size:13px;color:#57606a'>第 1 栏的说明文字，用于验证布局表摊平。</p></td><td width='50%' valign='top' style='padding:12px;background:#ffffff'><strong>栏目 2</strong><p style='font-size:13px;color:#57606a'>第 2 栏的说明文字，用于验证布局表摊平。</p></td></tr></table>
+<table border="1" cellspacing="0" cellpadding="6" width="100%"><tr><td>数据 1-1</td><td>数据 1-2</td><td>数据 1-3</td></tr><tr><td>数据 2-1</td><td>数据 2-2</td><td>数据 2-3</td></tr></table>
+<p><a href="https://example.test/report/6">查看完整报告</a></p>
+</td></tr></table></body></html>
+--fixture-alt--
+--fixture-related
+Content-Type: image/png
+Content-Transfer-Encoding: base64
+Content-ID: <logo-6>
+Content-Disposition: inline
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGP4z8DwHwAFBQIApfZF
+ngAAAABJRU5ErkJggg==
+
+--fixture-related--

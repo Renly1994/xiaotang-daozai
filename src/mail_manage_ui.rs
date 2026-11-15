@@ -107,7 +107,7 @@ impl App{
             if !self.settings.mail_sync_operations&&self.mail.manage.trash_open{
                 let prefix=format!("{}:",identity(&account));
                 extra=self.mail.manage.local.iter().filter(|(_,f)|f.removed).filter_map(|(k,_)|{let(v,uid)=k.strip_prefix(&prefix)?.split_once(':')?;Some((v.parse().ok()?,uid.parse().ok()?))}).collect();
-                extra.sort_unstable_by(|a,b|b.1.cmp(&a.1));extra.truncate(60);
+                extra.sort_unstable_by_key(|item|std::cmp::Reverse(item.1));extra.truncate(60);
             }
             self.mail.manage.pending.insert(email);
             self.pending.push(Cmd::MailManage(Request{account,folder,validity,known,extra,action:action.clone()}));
@@ -193,13 +193,13 @@ impl App{
         self.mail.manage.auto_read=Some((item.account.clone(),item.uid));
     }
     pub(crate) fn mail_toggle_trash(&mut self){
-        self.mail.manage.trash_open=!self.mail.manage.trash_open;self.mail.open_uid=None;
+        self.mail.manage.trash_open= !self.mail.manage.trash_open;self.mail.open_uid=None;
         self.mail.manage.auto_read=None;self.mail.manage.next_refresh=0.0;self.mail.manage.message.clear();
     }
 }
 #[cfg(test)]mod tests{
     use super::*;
-    fn account()->Account{Account{email:"test@example.com".into(),provider:crate::mail::Provider::Qq,custom:None,enabled:true}}
+    fn account()->Account{Account{email:"test@example.com".into(),provider:crate::mail::Provider::Qq,custom:None,enabled:true,note:String::new()}}
     #[test]fn failed_server_operation_keeps_the_message_and_reports_error(){
         let ctx=eframe::egui::Context::default();let mut app=App::new(&ctx,Default::default());let a=account();app.mail.accounts=vec![a.clone()];
         app.mail_manage_request(None,Folder::Inbox,Action::Load);
@@ -211,13 +211,13 @@ impl App{
     #[test]fn local_trash_keeps_its_own_limit_when_inbox_also_has_recent_mail(){
         let ctx=eframe::egui::Context::default();let mut app=App::new(&ctx,Default::default());let a=account();app.mail.accounts=vec![a.clone()];app.settings.mail_sync_operations=false;app.mail.recent.clear();
         for uid in 1..=60{app.mail.manage.local.insert(format!("{}:7:{uid}",identity(&a)),LocalFlags{seen:Some(false),removed:true});}
-        let items=(1..=80).map(|uid|Item{html:String::new().into(),account:a.email.clone(),from:String::new(),subject:String::new(),time:String::new(),code:None,received_unix:None,summary:"".into(),links:vec![],meeting:None,uid}).collect();
+        let items=(1..=80).map(|uid|Item{account:a.email.clone(),from:String::new(),subject:String::new(),time:String::new(),code:None,received_unix:None,summary:"".into(),links:vec![],html:String::new().into(),images:Default::default(),message_id:String::new(),from_addr:String::new(),meeting:None,uid}).collect();
         app.mail_managed(Completed{request:Request{account:a,folder:Folder::Inbox,validity:None,known:vec![],extra:(1..=60).map(|uid|(7,uid)).collect(),action:Action::Load},result:Ok(Snapshot{validity:7,entries:(1..=80).map(|uid|(uid,false)).collect(),items})});
         assert_eq!(app.mail.recent.len(),20);assert_eq!(app.mail.manage.trash.len(),60,"本机回收站不能被收件箱的显示上限截断");
     }
     #[test]fn read_state_is_separate_for_each_folder_and_account(){
         let mut state=State::default();state.data.insert(("test@example.com".into(),Folder::Inbox),Snapshot{validity:1,entries:vec![(42,true)],items:vec![]});
-        let item=Item{html:String::new().into(),account:"test@example.com".into(),from:String::new(),subject:String::new(),time:String::new(),code:None,received_unix:None,summary:"".into(),links:vec![],meeting:None,uid:42};
+        let item=Item{account:"test@example.com".into(),from:String::new(),subject:String::new(),time:String::new(),code:None,received_unix:None,summary:"".into(),links:vec![],html:String::new().into(),images:Default::default(),message_id:String::new(),from_addr:String::new(),meeting:None,uid:42};
         assert_eq!(state.seen(&item,Folder::Inbox),Some(true));assert_eq!(state.seen(&item,Folder::Trash),None);
         let mut other=item;other.account="other@example.com".into();assert_eq!(state.seen(&other,Folder::Inbox),None);
     }

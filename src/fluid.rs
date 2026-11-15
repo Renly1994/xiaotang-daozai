@@ -68,6 +68,7 @@ impl Default for Fluid {
 }
 
 impl Fluid {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
     }
@@ -161,11 +162,7 @@ impl Fluid {
     pub fn tint_now(&self) -> [f32; 3] {
         let u = ((self.t - self.tint_at) / TINT_FADE).clamp(0.0, 1.0) as f32;
         let e = 1.0 - (1.0 - u).powi(3);
-        let mut out = [0.0; 3];
-        for i in 0..3 {
-            out[i] = self.tint_from[i] + (self.tint_to[i] - self.tint_from[i]) * e;
-        }
-        out
+        std::array::from_fn(|i| self.tint_from[i] + (self.tint_to[i] - self.tint_from[i]) * e)
     }
 
     // ---------- 底色 ----------

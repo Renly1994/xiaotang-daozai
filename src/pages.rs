@@ -129,7 +129,7 @@ impl App {
         let hint=if self.music_volume_ui.is_some(){format!("音乐应用音量 {volume}%{} · 点击展开 · 滚轮调节",if muted{"（已静音）"}else{""})}else{"暂无可调节的音乐音频会话".into()};
         let volume_button=volume_button.on_hover_text(hint);
         if c.live && has && self.music_volume_ui.is_some() {
-            if volume_button.clicked(){self.music_volume_open=!self.music_volume_open;}
+            if volume_button.clicked(){self.music_volume_open= !self.music_volume_open;}
             if volume_button.hovered(){
                     let delta=c.ui.ctx().input(|i|i.raw_scroll_delta.y);
                     if delta.abs()>0.5 {
@@ -145,7 +145,7 @@ impl App {
         if lyrics_button.on_hover_text(if self.show_lyrics {"隐藏歌词"}else{"显示歌词"}).clicked() {
             if !has {self.say("先放一首歌吧");}
             else {
-                self.show_lyrics=!self.show_lyrics;
+                self.show_lyrics= !self.show_lyrics;
                 self.settings.lyrics_enabled=self.show_lyrics;
                 self.settings.save();
             }
@@ -155,7 +155,7 @@ impl App {
             let (button,button_card)=capsule(c,279.0,108.0,68.0,20.0,"m-island-lyrics",if self.settings.island_lyrics {Color32::from_gray(39)}else{Color32::from_gray(22)},Color32::from_gray(47));
             button_card.text(313.0,122.0,"岛上歌词",10.0,W::Semibold,if self.settings.island_lyrics {theme::WHITE}else{theme::GRAY},H::Center);
             if button.on_hover_text(if self.settings.island_lyrics {"关闭收起时的歌词"}else{"收起时显示当前歌词"}).clicked() {
-                self.settings.island_lyrics=!self.settings.island_lyrics;
+                self.settings.island_lyrics= !self.settings.island_lyrics;
                 self.settings.save();
             }
         }
@@ -468,7 +468,7 @@ impl App {
         for i in 0..2 {
             let on = if i == 0 { 1.0 - vt.clamp(0.0, 1.0) } else { vt.clamp(0.0, 1.0) };
             let w = lerp(3.0, 7.0, on);
-            let x = 362.0 + i as f32 * 8.0 - w / 2.0 + if i == 0 { -1.0 * on } else { 1.0 * on };
+            let x = 362.0 + i as f32 * 8.0 - w / 2.0 + if i == 0 { -on } else { 1.0 * on };
             c.fill(x, 33.5, w, 3.0, 1.5, mix(Color32::from_gray(80), theme::WHITE, on));
         }
 
@@ -545,6 +545,8 @@ impl App {
     }
 
     /// 底部留缺口的进度环（约 276°），起点有圆头亮点。
+    /// 8 个参数都是环的几何与配色，没有可聚合的语义，拆结构体反而每个调用点多两行。
+    #[allow(clippy::too_many_arguments)]
     fn progress_ring(c: &Card, cx: f32, cy: f32, r: f32, thick: f32, frac: f32, track: Color32, color: Color32) {
         let start = 132.0f32.to_radians();
         let sweep = 276.0f32.to_radians();
@@ -593,7 +595,7 @@ impl App {
             } else if hr == hour {
                 c.circle(x + 2.8, bottom - 2.8, 2.8 * rise, theme::BLUE);
             }
-            if hr % 3 == 0 {
+            if hr.is_multiple_of(3) {
                 c.text(x + 2.8, 117.0, &format!("{hr:02}"), size::TINY, W::Regular, theme::GRAY, H::Center);
             }
         }
@@ -1023,7 +1025,7 @@ impl App {
                 self.adding = false;
                 self.buf = self.todos.items[i].text.clone();
                 self.todo_input_focused=false;
-            }else{self.todo_choosing=!self.todo_choosing;if self.todo_choosing{self.pending.push(Cmd::Focus);}}
+            }else{self.todo_choosing= !self.todo_choosing;if self.todo_choosing{self.pending.push(Cmd::Focus);}}
         }
     }
 
@@ -1084,6 +1086,29 @@ impl App {
         use crate::mail_manage::{Action,Folder};
         let folder=self.mail.manage.folder();let trash=folder==Folder::Trash;
         let list_bounds=self.mail_list_bounds();let list_x=list_bounds.left();let row_w=list_bounds.width()-12.0;
+        // WebView 面板试点（DAOZAI_MAIL_PANEL=webview）：整块列表交给 HTML 页面。
+        // 失败就返回 false，继续走下面的 egui 列表，功能不受影响。
+        if crate::mail_panel::enabled() {
+            // 子窗口跟不上淡入淡出和位移：过渡帧先收起，让 egui 列表顶一下。
+            let steady=c.live&&c.painter.opacity()>=0.99;
+            if steady {
+                let rect=c.rect(list_bounds.left(),list_bounds.top(),list_bounds.width(),list_bounds.height());
+                if crate::mail_panel::present([rect.left(),rect.top(),rect.width(),rect.height()],c.s){
+                    let dark=self.app_dark(c.ui.ctx());
+                    // 深浅切换时外壳靠 state 换肤，正在读的正文文档要按新主题重推一次。
+                    if self.mail_panel_dark!=Some(dark){
+                        self.mail_panel_dark=Some(dark);
+                        let allow=self.settings.mail_auto_remote||self.mail.images.remote_enabled();
+                        self.mail_panel_repush(allow,dark);
+                    }
+                    crate::mail_panel::push(&self.mail_panel_state(dark));
+                    self.mail_panel_commands(cmds,dark);
+                    return;
+                }
+            }else{
+                crate::mail_panel::hide();
+            }
+        }
         let compact=code.is_none();let row_h=if compact{21.5}else{34.0};
         let all_count=self.mail.recent.len();
         let unread=self.mail.recent.iter().filter(|m|self.mail_seen(m,Folder::Inbox)==Some(false)).count();
@@ -1136,17 +1161,26 @@ impl App {
                 let hit=row.hit(0.0,0.0,row_w,row_h-1.0,("mail-row",item.uid,item.account.as_str()));
                 let hovered=ui.ctx().pointer_hover_pos().is_some_and(|p|rect.contains(p)&&ui.clip_rect().contains(p));
                 let ready=self.mail_ready(&item.account,folder);let actions=trash||hovered&&ready;
+                // 悬停底色铺满整行，必须最先画：以前它排在账号标签之后，
+                // 鼠标一放上去标签就被整块盖掉，看起来像「标签消失了」。
                 if hovered{row.fill(0.0,0.0,row_w,row_h-1.0,5.0,Color32::from_gray(29));}
-                if seen==Some(false)&&!trash{row.circle(5.0,if compact{10.5}else{8.0},2.1,theme::BLUE);}
+                let (chip,chip_color)=crate::mail_view::chip(&self.mail.accounts,&item.account);
+                let chip_fill=Color32::from_rgba_unmultiplied(chip_color.r(),chip_color.g(),chip_color.b(),56);
+                // 标签在行高里垂直居中；未读改用左边缘竖条，不再让圆点压在标签左侧。
+                let chip_h=14.0;let chip_y=((row_h-1.0-chip_h)/2.0).max(2.0);
+                row.fill(8.0,chip_y,28.0,chip_h,4.0,chip_fill);
+                row.centered_text(22.0,chip_y+chip_h/2.0,&chip,9.5,W::Semibold,chip_color,H::Center);
+                if seen==Some(false)&&!trash{row.fill(3.2,chip_y,2.6,chip_h,1.3,theme::BLUE);}
                 let ink=if seen==Some(true){theme::GRAY}else{theme::WHITE};
                 if compact{
-                    row.text(12.0,14.0,&row.fit(&item.from,11.0,W::Semibold,57.0),11.0,W::Semibold,ink,H::Left);
-                    let subject_w=(row_w-128.0-if hidden{32.0}else{0.0}).max(10.0);
-                    let width=row.text(76.0,14.0,&row.fit(&item.subject,10.5,W::Regular,subject_w),10.5,W::Regular,if seen==Some(true){theme::GRAY}else{Color32::from_gray(210)},H::Left);
-                    if hidden{row.fill(80.0+width,5.0,29.0,12.0,3.0,theme::BTN);row.text(94.5+width,14.0,"已隐藏",8.0,W::Regular,theme::GRAY,H::Center);}
+                    // x=40 起：左侧 3..36 留给未读竖条与账号标签，不能被发件人文字盖住。
+                    row.text(40.0,14.0,&row.fit(&item.from,10.8,W::Semibold,66.0),10.8,W::Semibold,ink,H::Left);
+                    let subject_w=(row_w-152.0-if hidden{34.0}else{0.0}).max(40.0);
+                    let width=row.text(112.0,14.0,&row.fit(&item.subject,10.5,W::Regular,subject_w),10.5,W::Regular,if seen==Some(true){theme::GRAY}else{Color32::from_gray(210)},H::Left);
+                    if hidden{row.fill(114.0+width,5.0,29.0,12.0,3.0,theme::BTN);row.text(128.5+width,14.0,"已隐藏",8.0,W::Regular,theme::GRAY,H::Center);}
                 }else{
-                    row.text(12.0,12.0,&row.fit(&item.from,11.0,W::Semibold,row_w-65.0),11.0,W::Semibold,ink,H::Left);
-                    row.text(12.0,27.0,&row.fit(&item.subject,10.0,W::Regular,row_w-20.0),10.0,W::Regular,theme::GRAY,H::Left);
+                    row.text(40.0,12.0,&row.fit(&item.from,11.0,W::Semibold,row_w-92.0),11.0,W::Semibold,ink,H::Left);
+                    row.text(40.0,27.0,&row.fit(&item.subject,10.0,W::Regular,row_w-46.0),10.0,W::Regular,theme::GRAY,H::Left);
                 }
                 let cy=if compact{10.0}else{8.0};let mut acted=false;
                 if actions{
@@ -1162,17 +1196,157 @@ impl App {
                     }
                 }else{row.text(row_w-6.0,cy+4.0,item.time.rsplit(' ').next().unwrap_or(&item.time),10.0,W::Regular,theme::GRAY,H::Right);}
                 row.seg((6.0,row_h-0.5),(row_w-6.0,row_h-0.5),0.5,Color32::from_gray(40));
-                hit.clone().on_hover_text(format!("{}\n{}\n收件邮箱：{}\n{}",item.from,item.subject,item.account,item.time));
+                mail_preview_tooltip(&hit,&item,&self.mail.accounts);
                 if hit.clicked()&&!acted{self.mail_open(&raw);}
             }
         });
+    }
+
+
+    /// 岛仔当前是否为深色外观（设置窗口同一套判定：跟随系统/浅色/深色）。
+    pub(crate) fn app_dark(&self,ctx:&egui::Context)->bool{
+        self.settings.settings_theme.dark(crate::settings_theme::system_dark(ctx))
+    }
+
+    /// 阅读页/完整排版的主题：「跟随岛仔」在这里解析成具体主题。
+    pub(crate) fn mail_web_theme(&self,ctx:&egui::Context)->crate::mail_view::WebTheme{
+        crate::mail_view::WebTheme::from_u8(self.settings.mail_view_theme).resolve(self.app_dark(ctx))
+    }
+
+    /// 给 WebView 面板的整份状态（前端整表重绘）。
+    pub(crate) fn mail_panel_state(&self,theme_dark:bool) -> crate::mail_panel::State {
+        let folder=self.mail.manage.folder();
+        let accounts:Vec<crate::mail_panel::StateAccount>=self.mail.accounts.iter().map(|a|{
+            let (tag,color)=crate::mail_view::chip(&self.mail.accounts,&a.email);
+            crate::mail_panel::StateAccount{
+                email:a.email.clone(),
+                note:a.note.clone(),
+                tag,
+                color:[color.r(),color.g(),color.b()],
+                provider:a.provider.label().to_string(),
+            }
+        }).collect();
+        let items:Vec<crate::mail_panel::StateItem>=self.mail_rows().iter().map(|m|{
+            crate::mail_panel::StateItem{
+                uid:m.uid,
+                account:m.account.clone(),
+                from:m.from.clone(),
+                subject:m.subject.clone(),
+                time:m.time.rsplit(' ').next().unwrap_or(&m.time).to_string(),
+                unread:self.mail_seen(m,folder)==Some(false),
+                code:m.code.clone(),
+            }
+        }).collect();
+        crate::mail_panel::State{
+            accounts,
+            folder:if folder==crate::mail_manage::Folder::Trash{"trash".into()}else{"inbox".into()},
+            unread_only:self.mail.manage.unread_only,
+            ready:self.mail_ready(&self.mail.accounts.first().map(|a|a.email.clone()).unwrap_or_default(),folder),
+            syncing:!self.mail.manage.pending.is_empty(),
+            remote_images:self.settings.mail_auto_remote||self.mail.images.remote_enabled(),
+            theme_dark,
+            items,
+            notice:self.mail.manage.message.clone(),
+        }
+    }
+
+    /// 处理面板发来的命令。全部走现有动作，不新开写入路径。
+    /// 用新的远程图许可重推面板里正在读的那封正文。
+    ///
+    /// 「显示图片」和「信任发件人」都要走这一步：面板只认推下去的文档，
+    /// 不重推的话开关点了界面不会变。
+    fn mail_panel_repush(&mut self,allow:bool,dark:bool){
+        let Some((uid,account))=crate::mail_panel::current() else { return };
+        let Some(raw)=self.mail_rows().iter().find(|m|m.uid==uid&&m.account==account).cloned() else { return };
+        let item=self.display_mail(&raw);
+        if item.html.trim().is_empty(){return;}
+        // 信任过的发件人一直是放行状态，不随单次开关回退。
+        let allow=allow||crate::mail_html_view::trusted(&item);
+        let theme=crate::mail_view::WebTheme::from_u8(self.settings.mail_view_theme).resolve(dark);
+        let doc=crate::mail_html_view::document(&item,allow,theme);
+        crate::mail_panel::push_body(uid,&account,"html",&doc.host,allow,doc.blocked);
+    }
+
+    pub(crate) fn mail_panel_commands(&mut self,cmds:&mut Vec<Cmd>,dark:bool) {
+        let folder=self.mail.manage.folder();
+        for command in crate::mail_panel::drain() {
+            use crate::mail_manage::Action;
+            match command {
+                crate::mail_panel::Command::Ready|crate::mail_panel::Command::Refresh=>{
+                    self.mail_manage_request(None,folder,Action::Load);
+                }
+                crate::mail_panel::Command::Folder{trash}=>{
+                    if (folder==crate::mail_manage::Folder::Trash)!=trash{self.mail_toggle_trash();}
+                }
+                crate::mail_panel::Command::Open{uid,account}=>{
+                    if let Some(raw)=self.mail_rows().iter().find(|m|m.uid==uid&&m.account==account).cloned(){
+                        // 阅读页由面板自己画，不能走 egui 详情卡（那会把整块列表顶掉）。
+                        // 只登记「正在阅读」，交给现有 auto_read 逻辑标记已读。
+                        self.mail.manage.auto_read=Some((raw.account.clone(),raw.uid));
+                        let item=self.display_mail(&raw);
+                        let allow=self.settings.mail_auto_remote||self.mail.images.remote_enabled()||crate::mail_html_view::trusted(&item);
+                        if !item.html.trim().is_empty(){
+                            let theme=crate::mail_view::WebTheme::from_u8(self.settings.mail_view_theme).resolve(dark);
+                            let doc=crate::mail_html_view::document(&item,allow,theme);
+                            crate::mail_panel::push_body(uid,&account,"html",&doc.host,allow,doc.blocked);
+                        }else{
+                            // 只有 text/plain 的老邮件：直接给纯文本，别让阅读页空着。
+                            let text=item.summary.to_string();
+                            crate::mail_panel::push_body(uid,&account,"text",&text,allow,0);
+                        }
+                    }
+                }
+                crate::mail_panel::Command::Close=>{self.mail.manage.auto_read=None;crate::mail_panel::clear_current();}
+                crate::mail_panel::Command::Flag{uid,account,unread}=>{
+                    self.mail_manage_request(Some(&account),folder,Action::Read{uid,seen:!unread});
+                }
+                crate::mail_panel::Command::Move{uid,account,to_trash}=>{
+                    let _=to_trash;
+                    self.mail_manage_request(Some(&account),folder,Action::Move{uid});
+                }
+                crate::mail_panel::Command::Copy{text}=>{cmds.push(Cmd::Copy(text));}
+                crate::mail_panel::Command::OpenLink{url}=>{cmds.push(Cmd::OpenUrl(url));}
+                crate::mail_panel::Command::External{uid,account}=>{
+                    if let Some(raw)=self.mail_rows().iter().find(|m|m.uid==uid&&m.account==account).cloned(){
+                        let item=self.display_mail(&raw);
+                        let allow=self.settings.mail_auto_remote||self.mail.images.remote_enabled();
+                        let theme_of=crate::mail_view::WebTheme::from_u8(self.settings.mail_view_theme).resolve(dark);
+                        // 和详情卡的「阅读全文」走同一条路：完整排版 + 系统浏览器。
+                        if let Err(error)=crate::mail_html_view::open(&item,allow,theme_of){
+                            crate::mail_panel::toast("error",&error);
+                        }
+                    }
+                }
+                crate::mail_panel::Command::Settings=>{self.open_mail_settings();}
+                crate::mail_panel::Command::Remote{on}=>{
+                    // 「显示远程图片」是这次阅读的临时决定，同时落回设置，保持一致。
+                    self.settings.mail_auto_remote=on;
+                    self.mail.images.enable_remote(on);
+                    self.mail_panel_repush(on,dark);
+                }
+                crate::mail_panel::Command::Trust=>{
+                    if let Some((uid,account))=crate::mail_panel::current(){
+                        if let Some(raw)=self.mail_rows().iter().find(|m|m.uid==uid&&m.account==account).cloned(){
+                            let item=self.display_mail(&raw);
+                            let sender=if item.from_addr.trim().is_empty(){item.from.clone()}else{item.from_addr.clone()};
+                            crate::mail_html_view::trust(&item);
+                            crate::mail_panel::toast("info",&format!("已信任 {sender}"));
+                            // 立刻用放行后的文档重推一次，用户不用再点「图片」。
+                            self.mail_panel_repush(true,dark);
+                        }
+                    }
+                }
+                crate::mail_panel::Command::Filter{unread_only}=>{self.mail.manage.unread_only=unread_only;}
+            }
+        }
     }
 
     /// 岛内邮件详情可滚动，也可以进入独立窗口阅读全文。
     pub(crate) fn mail_detail(&mut self, c: &Card, raw: &mail::Item, cmds: &mut Vec<Cmd>) {
         let hidden=self.mail_code_hidden(raw);
         let display=self.display_mail(raw);let item=&display;
-        let body=self.mail_body_lines(item);
+        let body=self.mail_body_doc(item);
+        let images=self.mail.images.clone();
         c.fill(36.0, 36.0, 347.0, 188.0, 11.0, theme::CARD);
         let back = c.hit(330.0, 42.0, 44.0, 14.0, ("mail-back", item.uid));
         let bh = c.hover_t(&back).0;
@@ -1193,18 +1367,41 @@ impl App {
             c.text(252.0,50.0,"删除",9.0,W::Regular,if ready{theme::RED}else{theme::DIM},H::Right);
             if c.hit(220.0,39.0,35.0,18.0,("mail-detail-delete",item.uid)).on_hover_text(if self.settings.mail_sync_operations{"移到邮箱回收站"}else{"移到本机回收站，不更改邮箱"}).clicked()&&ready{self.mail_manage_request(Some(&item.account),folder,crate::mail_manage::Action::Move{uid:item.uid});}
         }
-        let from = c.fit(&item.from, 11.5, W::Semibold, 112.0);
-        c.text(46.0, 50.0, &from, 11.5, W::Semibold, theme::WHITE, H::Left);
-        let read=c.hit(266.0,42.0,60.0,14.0,("mail-read",&item.account,item.uid)).on_hover_text("在独立窗口阅读完整正文");
-        c.text(324.0,50.0,"阅读全文",10.5,W::Regular,if read.hovered(){theme::BLUE}else{theme::GRAY},H::Right);
-        if read.clicked(){self.mail_open_reader(raw);}
-        let subject = c.fit(&item.subject, 13.5, W::Semibold, 328.0);
-        c.text(46.0, 73.0, &subject, 13.5, W::Semibold, theme::WHITE, H::Left);
-        c.hit(46.0,58.0,328.0,20.0,("mail-subject",&item.account,item.uid)).on_hover_text(&item.subject);
-        c.text(374.0, 92.0, &item.time, 10.0, W::Regular, Color32::from_gray(170), H::Right);
-        let account=format!("收件邮箱：{}",item.account);
-        c.text(46.0,92.0,&c.fit(&account,10.0,W::Regular,230.0),10.0,W::Regular,Color32::from_gray(175),H::Left);
-        c.hit(46.0,80.0,230.0,16.0,("mail-account",&item.account,item.uid)).on_hover_text(&account);
+        // 「阅读全文」默认就用浏览器内核打开完整排版；纯文本邮件才退回独立阅读窗口。
+        let html_ready=crate::mail_html_view::available()&&!item.html.trim().is_empty();
+        let read=c.hit(258.0,42.0,66.0,14.0,("mail-read",&item.account,item.uid))
+            .on_hover_text(if html_ready{"用浏览器打开完整排版"}else{"在独立窗口阅读纯文本正文"});
+        c.text(324.0,50.0,"阅读全文",10.0,W::Regular,if read.hovered(){theme::BLUE}else{theme::GRAY},H::Right);
+        if read.clicked(){
+            if html_ready{
+                let allow=self.settings.mail_auto_remote||self.mail.images.remote_enabled();
+                let theme_of=self.mail_web_theme(c.ui.ctx());
+                if let Err(error)=crate::mail_html_view::open(item,allow,theme_of){self.mail.note=error;}
+            }else{
+                self.mail.images.reset(self.settings.mail_auto_remote);
+                self.mail_open_reader(raw);
+                self.mail.reader_focus=true;
+            }
+        }
+        // 标题一号字 + 下面一行元信息（发件人 · 备注/邮箱 · 时间），
+        // 和 fly-island 阅读页的「标题 → 元信息 → 正文」是一个顺序。
+        let subject = c.fit(&item.subject, 15.5, W::Semibold, 328.0);
+        c.text(46.0, 68.0, &subject, 15.5, W::Semibold, theme::WHITE, H::Left);
+        c.hit(46.0,54.0,328.0,20.0,("mail-subject",&item.account,item.uid)).on_hover_text(&item.subject);
+        let (note,email)=crate::mail_view::account_line(&self.mail.accounts,&item.account,26);
+        let (_,chip_color)=crate::mail_view::chip(&self.mail.accounts,&item.account);
+        let mut line_x=46.0;
+        line_x+=c.text(line_x,89.0,&c.fit(&item.from,11.0,W::Semibold,92.0),11.0,W::Semibold,theme::WHITE,H::Left);
+        line_x+=c.text(line_x,89.0," · ",10.0,W::Regular,Color32::from_gray(130),H::Left);
+        if let Some(note)=&note {
+            line_x+=c.text(line_x,89.0,&c.fit(note,10.0,W::Semibold,80.0),10.0,W::Semibold,chip_color,H::Left);
+            line_x+=c.text(line_x,89.0," · ",10.0,W::Regular,Color32::from_gray(130),H::Left);
+        }
+        let room=(374.0-line_x-54.0).max(52.0);
+        c.text(line_x,89.0,&c.fit(&email,10.0,W::Regular,room),10.0,W::Regular,Color32::from_gray(170),H::Left);
+        c.text(374.0, 89.0, &item.time, 9.5, W::Regular, Color32::from_gray(150), H::Right);
+        let full=format!("收件邮箱：{}\n备注：{}",item.account,note.as_deref().unwrap_or("未设置"));
+        c.hit(46.0,78.0,300.0,16.0,("mail-account",&item.account,item.uid)).on_hover_text(&full);
 
         // 正文和链接共用滚动区域，会议与验证码操作保留在底部。
         let mut content=egui::Ui::new(c.ui.ctx().clone(),egui::Id::new(("mail-content",&item.account,item.uid,c.live)),
@@ -1216,16 +1413,13 @@ impl App {
         content.style_mut().spacing.scroll.floating=false;
         content.spacing_mut().scroll.bar_width=4.0*c.s;
         egui::ScrollArea::vertical().id_salt(("mail-body",&item.account,item.uid)).max_height(90.0*c.s).auto_shrink([false,false]).show(&mut content,|ui|{
-            if !body.is_empty() {
-                crate::mail_reader::body_ui(ui,body.as_ref(),11.5*c.s);
-            }else if item.links.is_empty(){
-                ui.label(egui::RichText::new("（这封邮件没有正文）").font(c.font(12.0,W::Regular)).color(theme::DIM));
-            }
-            for link in &item.links {
-                let text=format!("{} ↗",c.fit(&link.label,12.0,W::Regular,295.0));
-                if ui.add(egui::Link::new(egui::RichText::new(text).font(c.font(12.0,W::Regular)).color(theme::BLUE))).on_hover_text(&link.url).clicked(){
-                    cmds.push(Cmd::OpenUrl(link.url.clone()));
+            if !body.blocks.is_empty() {
+                let style=crate::mail_body_ui::RenderStyle::new(crate::mail_view::ViewMode::from_u8(self.settings.mail_view_mode));
+                if let Some(url)=crate::mail_body_ui::body_ui(ui,body.as_ref(),11.5,images.as_ref(),&item.images,style){
+                    cmds.push(Cmd::OpenUrl(url));
                 }
+            }else{
+                ui.label(egui::RichText::new("（这封邮件没有正文）").font(c.font(12.0,W::Regular)).color(theme::DIM));
             }
         });
 
@@ -1257,4 +1451,64 @@ impl App {
             }
         }
     }
+}
+
+/// 列表悬停时的自定义预览卡。
+/// 账号标签独占一整行并完整显示（备注全名 + 服务商 + 完整邮箱），
+/// 发件人/时间、标题、摘要依次往下排，任何一层都不会互相挤压或截断。
+fn mail_preview_tooltip(hit:&egui::Response,item:&mail::Item,accounts:&[mail::Account]){
+    hit.clone().on_hover_ui(|ui| mail_preview_card(ui,item,accounts));
+}
+
+/// 预览卡本体。单独成函数，单测可以直接渲染它做像素测量。
+pub(crate) fn mail_preview_card(ui:&mut egui::Ui,item:&mail::Item,accounts:&[mail::Account]){
+    let (tag,tag_color,full_email,provider)=crate::mail_view::full_tag(accounts,&item.account);
+    let from=crate::mail_view::shorten(&item.from,20);
+    let subject={let s:String=item.subject.chars().take(60).collect();if item.subject.chars().count()>60{format!("{s}…")}else{s}};
+    let summary={let s:String=item.summary.chars().take(110).collect();if item.summary.chars().count()>110{format!("{s}…")}else{s}};
+    let time=item.time.rsplit(' ').next().unwrap_or(&item.time).to_string();
+        ui.set_width(292.0);
+        ui.spacing_mut().item_spacing.y=5.0;
+        egui::Frame::new()
+            .fill(Color32::from_rgb(30,30,34))
+            .stroke(egui::Stroke::new(0.5,Color32::from_white_alpha(28)))
+            .corner_radius(12.0)
+            .inner_margin(egui::Margin::symmetric(12,10))
+            .show(ui,|ui|{
+                // ① 账号标签独占一行：彩色圆点 + 备注全名，后面完整邮箱自动换行。
+                //    圆点必须自己画：egui 里「小图形 + 文字同行」没有基线的概念，
+                //    allocate 出来的方块按行高顶端对齐，中英文混排的行高又比字形高，
+                //    结果就是圆点浮在字头（这条踩过三次）。
+                //    这里先只占横向宽度，文字落位后按「首行行高」的中线画圆：
+                //    行高用同一字体单独量一次，标签换行时也不会跑到两行中间去。
+                ui.horizontal_wrapped(|ui|{
+                    ui.spacing_mut().item_spacing.x=6.0;
+                    let (slot,_)=ui.allocate_exact_size(egui::vec2(9.0,0.0),egui::Sense::hover());
+                    let label=ui.add(egui::Label::new(egui::RichText::new(&tag).size(11.5).strong().color(tag_color)).wrap());
+                    // 用标签自己的矩形求中线：Label 的 rect 是「行高盒」（18px），
+                    // 字形墨迹只有 15px 左右且贴盒子上半部，直接取 rect 中线圆点会高 1px。
+                    // +1.0 是像素测试标定的：标定后圆点与文字的墨迹质心完全重合。
+                    // 标签换行时 rect 变高、圆心会落到两行之间——11.5 号字配 8 字以内
+                    // 的备注不会换行，这里不为极端情况复杂化。
+                    let dot_y=label.rect.center().y+1.0;
+                    ui.painter().circle_filled(egui::pos2(slot.left()+4.5,dot_y),4.5,tag_color);
+                    if tag!=provider{
+                        ui.add(egui::Label::new(egui::RichText::new(format!("· {provider}")).size(10.5).color(Color32::from_gray(140))).wrap());
+                    }
+                });
+                ui.add(egui::Label::new(egui::RichText::new(&full_email).size(10.5).color(Color32::from_gray(150))).wrap())
+                    .on_hover_text("收件邮箱");
+                // ② 发件人与时间
+                ui.horizontal(|ui|{
+                    ui.add(egui::Label::new(egui::RichText::new(&from).size(12.5).strong().color(Color32::WHITE)).truncate());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
+                        ui.label(egui::RichText::new(&time).size(10.5).color(Color32::from_gray(150)));
+                    });
+                });
+                // ③ 标题与摘要
+                ui.add(egui::Label::new(egui::RichText::new(&subject).size(12.5).strong().color(Color32::WHITE)).wrap());
+                if !summary.trim().is_empty(){
+                    ui.add(egui::Label::new(egui::RichText::new(&summary).size(11.5).color(Color32::from_gray(170))).wrap());
+                }
+            });
 }

@@ -1,0 +1,37 @@
+From: Example Test <notice@example.test>
+To: Recipient <reader@example.test>
+Subject: [A-18] 通栏轻 HTML / 纯文本 · 合成回归语料 a-18
+Date: Sun, 02 Nov 2025 06:26:40 GMT
+Message-ID: <a-18@example.test>
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary="fixture-related"
+
+--fixture-related
+Content-Type: multipart/alternative; boundary="fixture-alt"
+
+--fixture-alt
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+这是纯文本备选部分。
+--fixture-alt
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+<!DOCTYPE html><html><head><meta charset="utf-8"></head>
+<body style="margin:0;padding:16px;color:#24292f;font-family:Arial,sans-serif">
+<h2 style="font-size:18px">形态 A · 通栏通知 18</h2>
+<p>第 1 段说明文字，包含一条 <a href="https://example.test/doc/18/1">内联链接 1</a> 用于验证链接命中。</p><p>第 2 段说明文字，包含一条 <a href="https://example.test/doc/18/2">内联链接 2</a> 用于验证链接命中。</p><p>第 3 段说明文字，包含一条 <a href="https://example.test/doc/18/3">内联链接 3</a> 用于验证链接命中。</p><ul><li>项目一</li><li>项目二</li><li>项目三</li></ul>
+<hr><p style="font-size:12px;color:#57606a">本邮件为合成回归语料，不含真实数据。</p>
+</body></html>
+--fixture-alt--
+--fixture-related
+Content-Type: image/png
+Content-Transfer-Encoding: base64
+Content-ID: <logo-18>
+Content-Disposition: inline
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGP4z8DwHwAFBQIApfZF
+ngAAAABJRU5ErkJggg==
+
+--fixture-related--

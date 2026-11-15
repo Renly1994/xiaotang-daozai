@@ -81,7 +81,7 @@ mod protocol{
             for f in fetched.iter().filter(|f|!f.flags().contains(&imap::types::Flag::Deleted)){
                 if let Some(uid)=f.uid{entries.push((uid,f.flags().contains(&imap::types::Flag::Seen)));}
             }
-            entries.sort_unstable_by(|a,b|b.0.cmp(&a.0));
+            entries.sort_unstable_by_key(|entry|std::cmp::Reverse(entry.0));
         }
         let extra:Vec<_>=request.extra.iter().filter(|(v,uid)|*v==validity&&*uid>0&&!entries.iter().any(|(id,_)|id==uid)).map(|(_,uid)|*uid).take(60).collect();
         if !extra.is_empty(){
@@ -108,7 +108,7 @@ mod protocol{
         impl Read for Wire{fn read(&mut self,b:&mut[u8])->std::io::Result<usize>{self.input.read(b)}}
         impl Write for Wire{fn write(&mut self,b:&[u8])->std::io::Result<usize>{self.out.lock().unwrap().extend_from_slice(b);Ok(b.len())}fn flush(&mut self)->std::io::Result<()>{Ok(())}}
         fn session(replies:&str)->(imap::Session<Wire>,Arc<Mutex<Vec<u8>>>){let out=Arc::new(Mutex::new(Vec::new()));let wire=Wire{input:Cursor::new(format!("a1 OK login\r\n{replies}").into_bytes()),out:out.clone()};(imap::Client::new(wire).login("test","test").unwrap(),out)}
-        fn request(action:Action)->Request{Request{account:Account{email:"test@example.com".into(),provider:crate::mail::Provider::Qq,custom:None,enabled:true},folder:Folder::Inbox,validity:Some(7),known:vec![42],extra:vec![],action}}
+        fn request(action:Action)->Request{Request{account:Account{email:"test@example.com".into(),provider:crate::mail::Provider::Qq,custom:None,enabled:true,note:String::new()},folder:Folder::Inbox,validity:Some(7),known:vec![42],extra:vec![],action}}
         #[test]fn changed_uid_validity_blocks_all_writes(){
             let(mut s,out)=session("* OK [UIDVALIDITY 8] changed\r\na2 OK select\r\n");
             assert!(execute(&mut s,&request(Action::Read{uid:42,seen:true})).is_err());

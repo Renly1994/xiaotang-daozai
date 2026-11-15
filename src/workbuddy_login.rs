@@ -45,7 +45,7 @@ pub(super) fn connect(expected:Option<&str>,cancel:Arc<AtomicBool>)->Result<(Str
 }
 pub(super) fn wait_for_login(agent:&ureq::Agent,state:&str,expected:Option<&str>,cancel:Arc<AtomicBool>)->Result<(String,Snapshot),String>{
     let mut poll=url::Url::parse(&format!("{ORIGIN}/v2/plugin/auth/token")).unwrap();
-    poll.query_pairs_mut().append_pair("state",&state);
+    poll.query_pairs_mut().append_pair("state",state);
     let start=Instant::now();
     while start.elapsed()<Duration::from_secs(600){
         for _ in 0..20{
@@ -63,14 +63,14 @@ pub(super) fn wait_for_login(agent:&ureq::Agent,state:&str,expected:Option<&str>
         let auth:Auth=serde_json::from_value(value["data"].clone()).map_err(|_|"官网未返回有效授权，请重新连接")?;
         if auth.access_token.is_empty(){return Err("官网登录授权为空，请重新连接".into());}
         let mut session=Session{origin:ORIGIN.into(),ua:String::new(),cookie:String::new(),auth:Some(auth)};
-        let accounts=super::with_transport_retry(&agent,ORIGIN,|agent|super::api(agent,&session,"/v2/plugin/accounts")).map_err(Failure::message)?;
+        let accounts=super::with_transport_retry(agent,ORIGIN,|agent|super::api(agent,&session,"/v2/plugin/accounts")).map_err(Failure::message)?;
         let list=accounts.pointer("/data/accounts").and_then(Value::as_array).ok_or("官网未返回账号列表")?;
-        let personal=list.iter().filter(|a|a["enterpriseId"].as_str().unwrap_or_default().is_empty()&&a["isCurrentOneIdEnterprise"]!=true);
-        let account=personal.filter(|a|a["uid"].as_str().is_some_and(|uid|expected.is_none_or(|id|slot(uid)==id))).next()
+        let mut personal=list.iter().filter(|a|a["enterpriseId"].as_str().unwrap_or_default().is_empty()&&a["isCurrentOneIdEnterprise"]!=true);
+        let account=personal.find(|a|a["uid"].as_str().is_some_and(|uid|expected.is_none_or(|id|slot(uid)==id)))
             .ok_or("请在官网登录原来绑定的个人账号后重试")?;
         let id=slot(account["uid"].as_str().ok_or("官网未返回账号标识")?);
         session.auth.as_mut().unwrap().uid=account["uid"].as_str().unwrap().into();
-        let snapshot=query(&agent,&session,&id).map_err(Failure::message)?;
+        let snapshot=query(agent,&session,&id).map_err(Failure::message)?;
         if cancel.load(Ordering::Relaxed){return Err("已取消 WorkBuddy 登录".into());}
         save_session(&id,&session)?;
         return Ok((id,snapshot));

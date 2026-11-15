@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: https: http:; frame-src data: blob: https: http:;">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>邮件</title>
+<style>
+  /* 深/浅两套配色都走变量：宿主（岛仔）在 state 里下发 theme_dark，
+     页面只切 <html> 上的 light class，不改任何一条规则。 */
+  :root{
+    color-scheme: dark;
+    --bg:#151518; --ink:#e8e8ea; --ink-strong:#ffffff; --ink-sub:#b9b9c2;
+    --dim:#a8a8b0; --meta:#8b8b93; --faint:#7c7c86; --hint:#5f5f68;
+    --line:#2a2a2f; --line-soft:#26262b;
+    --hover:#1e1e23; --btn-hover:#232329;
+    --btn-bg:#2a2a31; --btn-ink:#c8c8d0; --btn-hover-strong:#39424f;
+    --sel-bg:#2b3a4d; --sel-ink:#ffffff;
+    --pressed-bg:#243040; --pressed-ink:#cfe6ff;
+    --accent:#7fbfff; --accent-hover:#1d2a38; --disabled:#585860;
+    --dot:#5aa9e6;
+    --warn-bg:#2a2329; --warn-ink:#e2c6c6;
+    --spin-track:#3a4655;
+    --frame-bg:#1c1c20;
+    --danger-hover:#5a2b2b;
+  }
+  :root.light{
+    color-scheme: light;
+    --bg:#f4f5f7; --ink:#1f2328; --ink-strong:#101318; --ink-sub:#3c424b;
+    --dim:#5b6470; --meta:#6b7280; --faint:#7d8590; --hint:#9aa1ab;
+    --line:#dde1e7; --line-soft:#e3e6ec;
+    --hover:#e9ebef; --btn-hover:#e2e5ea;
+    --btn-bg:#e4e7ec; --btn-ink:#3c424b; --btn-hover-strong:#d3d9e2;
+    --sel-bg:#d2e2f6; --sel-ink:#103a75;
+    --pressed-bg:#dbe9fb; --pressed-ink:#0b57d0;
+    --accent:#0b57d0; --accent-hover:#e3edfb; --disabled:#9aa1ab;
+    --dot:#1f73c9;
+    --warn-bg:#fae9e7; --warn-ink:#8a3a30;
+    --spin-track:#c9d2de;
+    --frame-bg:#ffffff;
+    --danger-hover:#f3dcdc;
+  }
+  *{ box-sizing:border-box; }
+  html,body{ height:100%; margin:0; }
+  body{
+    background:var(--bg); color:var(--ink); overflow:hidden;
+    font:13px/1.5 system-ui,-apple-system,'Segoe UI','Microsoft YaHei UI',sans-serif;
+    display:flex; flex-direction:column;
+  }
+  header{ flex:none; display:flex; align-items:center; gap:4px; padding:7px 8px; border-bottom:1px solid var(--line); }
+  button{ font:inherit; }
+  .tab,.mini{ border:0; background:transparent; color:var(--dim); padding:3px 8px; border-radius:6px; cursor:pointer; }
+  .tab:hover,.mini:hover{ background:var(--btn-hover); color:var(--ink); }
+  .tab[aria-selected="true"]{ background:var(--sel-bg); color:var(--sel-ink); }
+  .mini{ font-size:11.5px; padding:2px 7px; }
+  .mini[aria-pressed="true"]{ background:var(--pressed-bg); color:var(--pressed-ink); }
+  .spacer{ flex:1; }
+  .ghost{ border:0; background:transparent; color:var(--accent); cursor:pointer; padding:3px 6px; border-radius:6px; }
+  .ghost:hover{ background:var(--accent-hover); }
+  .ghost[disabled]{ color:var(--disabled); cursor:default; background:transparent; }
+  .spin{ width:11px; height:11px; border:2px solid var(--spin-track); border-top-color:var(--accent); border-radius:50%;
+         animation:spin .8s linear infinite; flex:none; }
+  @keyframes spin{ to{ transform:rotate(360deg); } }
+
+  #list{ flex:1; overflow-y:auto; margin:0; padding:4px 0; list-style:none; }
+  .row{ position:relative; padding:7px 10px; border-radius:8px; cursor:pointer; }
+  .row:hover{ background:var(--hover); }
+  .row .top{ display:flex; align-items:center; gap:6px; }
+  .dot{ width:6px; height:6px; border-radius:50%; background:var(--dot); flex:none; }
+  .dot.off{ background:transparent; }
+  .from{ font-weight:600; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .time{ margin-left:auto; color:var(--meta); font-size:11px; flex:none; }
+  .chip{ font-size:10px; padding:1px 6px; border-radius:999px; flex:none; }
+  .subject{ color:var(--ink-sub); margin-top:2px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  .row.unread .from,.row.unread .subject{ color:var(--ink-strong); }
+  .row.unread .subject{ font-weight:500; }
+  .acts{ position:absolute; right:8px; top:22px; display:none; gap:4px; }
+  .row:hover .acts{ display:flex; }
+  .acts button{ border:0; background:var(--btn-bg); color:var(--btn-ink); font-size:11px; padding:2px 7px; border-radius:5px; cursor:pointer; }
+  .acts button:hover{ background:var(--btn-hover-strong); color:var(--ink-strong); }
+  .acts .danger:hover{ background:var(--danger-hover); }
+
+  #reader{ flex:1; display:none; flex-direction:column; min-height:0; }
+  #reader.on{ display:flex; }
+  #reader .bar{ flex:none; display:flex; align-items:center; gap:6px; padding:6px 8px; border-bottom:1px solid var(--line); }
+  #reader .title{ flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--ink-strong); font-weight:600; }
+  #reader .meta{ flex:none; padding:2px 10px 6px; color:var(--meta); font-size:11px;
+                 overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #reader-status{ flex:none; display:none; align-items:center; gap:8px; margin:0 8px 6px;
+                  padding:7px 10px; border-radius:8px; background:var(--warn-bg); color:var(--warn-ink); font-size:11.5px; }
+  #reader-status.on{ display:flex; }
+  /* iframe 底色只是 srcdoc 加载前的过渡色；正文自己的底色由「完整视图主题」决定。 */
+  iframe{ flex:1; width:100%; border:0; background:var(--frame-bg); }
+  #reader-foot{ flex:none; padding:3px 10px; color:var(--faint); font-size:10.5px; }
+
+  #placeholder{ flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center;
+                gap:6px; color:var(--faint); }
+  #placeholder .hint{ font-size:11px; color:var(--hint); }
+  footer{ flex:none; padding:4px 10px; border-top:1px solid var(--line-soft); color:var(--meta); font-size:11px; min-height:22px;
+          display:flex; align-items:center; gap:6px; }
+  /* 提示条是浮层，深/浅主题下都保持深色胶囊，不参与换肤。 */
+  #toast{ position:fixed; left:50%; bottom:34px; transform:translateX(-50%);
+          background:#26262c; color:#fff; padding:6px 12px; border-radius:8px; font-size:12px; opacity:0;
+          transition:opacity .2s; pointer-events:none; }
+  #toast.on{ opacity:1; }
+  #toast.error{ background:#4a2626; }
+</style>
+</head>
+<body>
+<header>
+  <button class="tab" id="tab-inbox" aria-selected="true">收件箱</button>
+  <button class="tab" id="tab-trash" aria-selected="false">回收站</button>
+  <span class="spacer"></span>
+  <button class="mini" id="all" aria-pressed="true">全部</button>
+  <button class="mini" id="unread" aria-pressed="false">未读</button>
+  <button class="ghost" id="refresh">刷新</button>
+</header>
+
+<ul id="list"></ul>
+<div id="placeholder" style="display:none"><span id="placeholder-text">还没有邮件</span></div>
+
+<section id="reader">
+  <div class="bar">
+    <button class="ghost" id="back">‹ 返回</button>
+    <span class="title" id="reader-title"></span>
+    <button class="mini" id="images" aria-pressed="false" title="加载这封邮件里的远程图片（可能被发件人追踪）">图片</button>
+    <button class="mini" id="trust" style="display:none" title="信任这个发件人：以后自动加载它的远程图片">信任</button>
+    <button class="mini" id="mark-read">标为已读</button>
+    <button class="ghost" id="open-web" title="用系统浏览器打开完整排版">浏览器</button>
+  </div>
+  <div class="meta" id="reader-meta"></div>
+  <div id="reader-status"><span id="status-text"></span><button class="ghost" id="retry">重试</button></div>
+  <iframe id="body" sandbox="allow-same-origin allow-popups"></iframe>
+  <div id="reader-foot"></div>
+</section>
+
+<footer id="notice"><span class="spin" id="spin" style="display:none"></span><span id="notice-text"></span></footer>
+<div id="toast"></div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const list = $('list'), placeholder = $('placeholder'), reader = $('reader');
+  const frame = $('body'), title = $('reader-title'), meta = $('reader-meta');
+  const status = $('reader-status'), statusText = $('status-text'), foot = $('reader-foot');
+  const noticeText = $('notice-text'), spin = $('spin'), toast = $('toast');
+  const imagesBtn = $('images'), markBtn = $('mark-read'), trustBtn = $('trust');
+  const host = window.chrome && window.chrome.webview;
+
+  const BODY_TIMEOUT = 8000;
+  let state = { accounts: [], items: [], folder: 'inbox', unread_only: false, ready: false,
+                syncing: false, remote_images: false, theme_dark: true, notice: '' };
+  let current = null;
+  let bodyTimer = 0;
+  // 当前正文的种类与原文：纯文本兜底页切主题时要自己重绘（html 由宿主重推）。
+  let bodyKind = '';
+  let bodyText = '';
+  // 外壳深/浅：由 state.theme_dark 驱动，默认深色（岛仔默认外观）。
+  let themeDark = true;
+
+  function applyTheme(dark) {
+    themeDark = dark;
+    document.documentElement.classList.toggle('light', !dark);
+  }
+
+  const send = (type, payload = {}) => host && host.postMessage(JSON.stringify({ v: 1, type, payload }));
+  const metaOf = (account) => state.accounts.find(a => a.email === account) || {};
+
+  function esc(text) {
+    return String(text == null ? '' : text)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function showToast(text, level) {
+    toast.textContent = text;
+    toast.className = 'on' + (level === 'error' ? ' error' : '');
+    clearTimeout(showToast.timer);
+    showToast.timer = setTimeout(() => { toast.className = ''; }, 2400);
+  }
+
+  function emptyText() {
+    if (state.syncing) return '正在同步邮件…';
+    if (state.folder === 'trash') return '回收站为空';
+    if (state.unread_only) return '没有未读邮件';
+    return '还没有收到邮件';
+  }
+
+  function rowActions(item) {
+    const acts = document.createElement('div');
+    acts.className = 'acts';
+    const flag = document.createElement('button');
+    flag.textContent = item.unread ? '标为已读' : '标为未读';
+    flag.onclick = (event) => {
+      event.stopPropagation();
+      send('flag', { uid: item.uid, account: item.account, unread: !item.unread });
+    };
+    const move = document.createElement('button');
+    move.className = 'danger';
+    move.textContent = state.folder === 'trash' ? '恢复' : '删除';
+    move.onclick = (event) => {
+      event.stopPropagation();
+      send('move', { uid: item.uid, account: item.account, to: state.folder === 'trash' ? 'inbox' : 'trash' });
+    };
+    // 回收站里「标为已读」没有意义，只留恢复。
+    if (state.folder === 'trash') {
+      acts.append(move);
+    } else {
+      acts.append(flag, move);
+    }
+    return acts;
+  }
+
+  function render() {
+    // 主题先落，后面的重绘才不会闪一下旧配色。
+    const dark = state.theme_dark !== false;
+    const flipped = dark !== themeDark;
+    applyTheme(dark);
+    if (flipped && current) repaintShell();
+    const items = state.items.filter(i => !state.unread_only || i.unread);
+    const scroll = list.scrollTop;
+    list.textContent = '';
+    const blank = items.length === 0;
+    placeholder.style.display = blank ? 'flex' : 'none';
+    $('placeholder-text').textContent = emptyText();
+    $('tab-inbox').setAttribute('aria-selected', String(state.folder !== 'trash'));
+    $('tab-trash').setAttribute('aria-selected', String(state.folder === 'trash'));
+    $('all').setAttribute('aria-pressed', String(!state.unread_only));
+    $('unread').setAttribute('aria-pressed', String(state.unread_only));
+    imagesBtn.setAttribute('aria-pressed', String(!!state.remote_images));
+    spin.style.display = state.syncing ? '' : 'none';
+    noticeText.textContent = state.notice || (state.syncing ? '正在同步…' : '');
+
+    for (const item of items) {
+      const li = document.createElement('li');
+      const row = document.createElement('div');
+      row.className = 'row' + (item.unread ? ' unread' : '');
+
+      const top = document.createElement('div');
+      top.className = 'top';
+      const dot = document.createElement('span');
+      dot.className = 'dot' + (item.unread ? '' : ' off');
+      const chipMeta = metaOf(item.account);
+      const tag = document.createElement('span');
+      tag.className = 'chip';
+      tag.textContent = chipMeta.tag || '邮箱';
+      tag.style.color = chipMeta.color || '#9bbfe0';
+      tag.style.background = (chipMeta.color || '#9bbfe0') + '22';
+      const from = document.createElement('span');
+      from.className = 'from';
+      from.textContent = item.from;
+      const time = document.createElement('span');
+      time.className = 'time';
+      time.textContent = item.time;
+      top.append(dot, tag, from, time);
+
+      const subject = document.createElement('div');
+      subject.className = 'subject';
+      subject.textContent = item.subject;
+
+      row.append(top, subject, rowActions(item));
+      row.onclick = () => openMail(item);
+      li.append(row);
+      list.append(li);
+    }
+    // 整表重绘会丢滚动位置，恢复回去，免得同步时列表自己往上跳。
+    list.scrollTop = scroll;
+  }
+
+  // 纯文本/提示用的兜底文档是独立 iframe，继承不到宿主页变量，
+  // 颜色按当前主题现取。配色与 WebTheme 的纸张白/深色一致。
+  function shell(html, extra) {
+    const bg = themeDark ? '#1c1c20' : '#ffffff';
+    const ink = themeDark ? '#e6e6ea' : '#1f1f24';
+    const tip = themeDark ? '#9a9aa2' : '#777';
+    return '<!doctype html><meta charset="utf-8"><style>' +
+      ':root{color-scheme:' + (themeDark ? 'dark' : 'light') + '}' +
+      'html,body{margin:0}body{padding:14px 16px;font:14px/1.7 system-ui,"Microsoft YaHei UI",sans-serif;' +
+      'color:' + ink + ';background:' + bg + ';word-break:break-word}' +
+      'pre{margin:0;white-space:pre-wrap;font:inherit}' +
+      '.dz-tip{color:' + tip + ';font-size:13px}' + (extra || '') + '</style><body>' + html + '</body>';
+  }
+
+  function showLoading() {
+    status.className = '';
+    bodyKind = '';
+    bodyText = '';
+    frame.srcdoc = shell('<span class="dz-tip">正在加载正文…</span>');
+  }
+
+  function showProblem(text) {
+    statusText.textContent = text;
+    status.className = 'on';
+    frame.srcdoc = shell('<span class="dz-tip">正文没有加载出来，可以点上面的「重试」，或用「浏览器」打开完整排版。</span>');
+  }
+
+  function syncReaderButtons() {
+    markBtn.style.display = current && current.unread ? '' : 'none';
+  }
+
+  // 已渲染的正文文档是烤好的色，切主题时宿主只会重推 html；
+  // 纯文本/空邮件的兜底页靠这里按新主题重绘一次，否则白底黑字卡在深色外壳里。
+  function repaintShell() {
+    if (bodyKind === 'text' && bodyText.trim()) {
+      frame.srcdoc = shell('<pre>' + esc(bodyText) + '</pre>');
+    } else if (bodyKind === 'text' || bodyKind === 'empty') {
+      frame.srcdoc = shell('<span class="dz-tip">这封邮件没有正文。</span>');
+    }
+  }
+
+  function openMail(item) {
+    current = item;
+    title.textContent = item.subject;
+    const chipMeta = metaOf(item.account);
+    meta.textContent = [item.from, item.time, chipMeta.note || chipMeta.email || item.account]
+      .filter(Boolean).join(' · ');
+    foot.textContent = '';
+    // 「信任」是上一封的判断结果，换邮件先收起来，等这一封的正文到了再定。
+    trustBtn.style.display = 'none';
+    syncReaderButtons();
+    reader.classList.add('on');
+    list.style.display = 'none';
+    placeholder.style.display = 'none';
+    showLoading();
+    send('open', { uid: item.uid, account: item.account });
+    clearTimeout(bodyTimer);
+    const wanted = item;
+    bodyTimer = setTimeout(() => {
+      if (current === wanted) showProblem('正文加载超时（8 秒）');
+    }, BODY_TIMEOUT);
+  }
+
+  function closeReader() {
+    clearTimeout(bodyTimer);
+    reader.classList.remove('on');
+    status.className = '';
+    frame.srcdoc = '';
+    list.style.display = '';
+    trustBtn.style.display = 'none';
+    current = null;
+    render();
+  }
+
+  if (host) {
+    host.addEventListener('message', (event) => {
+      let msg = event.data;
+      if (typeof msg === 'string') { try { msg = JSON.parse(msg); } catch { return; } }
+      if (!msg || msg.v !== 1) return;
+      const payload = msg.payload || {};
+      if (msg.type === 'state') {
+        state = payload;
+        render();
+        if (current) {
+          const fresh = state.items.find(i => i.uid === current.uid && i.account === current.account);
+          if (fresh) {
+            current = fresh;
+            syncReaderButtons();
+          } else if (!state.syncing) {
+            // 这封邮件已经不在列表里（被删/被移走）：退回列表，别停在空正文上。
+            // 同步进行中先不动，等本轮 state 落定再判断，避免中途闪一下列表。
+            closeReader();
+          }
+        }
+      } else if (msg.type === 'body') {
+        if (!current || payload.uid !== current.uid || payload.account !== current.account) return;
+        clearTimeout(bodyTimer);
+        status.className = '';
+        const blocked = Number(payload.blocked || 0);
+        foot.textContent = blocked > 0 && !payload.allow_remote
+          ? '这封邮件里的 ' + blocked + ' 张远程图片已隐藏，点「图片」可以加载。'
+          : '';
+        // 用户真的被图片拦住过，才给「信任」这个更重的选项；已经放行就没必要多一个按钮。
+        trustBtn.style.display = blocked > 0 && !payload.allow_remote ? '' : 'none';
+        if (payload.kind === 'text') {
+          const text = payload.text || '';
+          bodyKind = 'text';
+          bodyText = text;
+          frame.srcdoc = shell(text.trim() ? '<pre>' + esc(text) + '</pre>' : '<span class="dz-tip">这封邮件没有正文。</span>');
+        } else if (payload.html) {
+          bodyKind = 'html';
+          bodyText = '';
+          frame.srcdoc = payload.html;
+        } else {
+          bodyKind = 'empty';
+          bodyText = '';
+          frame.srcdoc = shell('<span class="dz-tip">这封邮件没有正文。</span>');
+        }
+      } else if (msg.type === 'toast') {
+        showToast(payload.text || '', payload.level);
+      }
+    });
+  }
+
+  $('tab-inbox').onclick = () => send('folder', { name: 'inbox' });
+  $('tab-trash').onclick = () => send('folder', { name: 'trash' });
+  $('all').onclick = () => send('filter', { unread_only: false });
+  $('unread').onclick = () => send('filter', { unread_only: true });
+  $('refresh').onclick = () => send('refresh');
+  $('back').onclick = () => { closeReader(); send('close'); };
+  $('retry').onclick = () => {
+    if (!current) return;
+    showLoading();
+    send('open', { uid: current.uid, account: current.account });
+    clearTimeout(bodyTimer);
+    const wanted = current;
+    bodyTimer = setTimeout(() => { if (current === wanted) showProblem('正文加载超时（8 秒）'); }, BODY_TIMEOUT);
+  };
+  markBtn.onclick = () => {
+    if (current) send('flag', { uid: current.uid, account: current.account, unread: false });
+  };
+  imagesBtn.onclick = () => {
+    send('remote', { on: imagesBtn.getAttribute('aria-pressed') !== 'true' });
+  };
+  trustBtn.onclick = () => {
+    trustBtn.style.display = 'none';
+    foot.textContent = '';
+    send('trust', {});
+  };
+  $('open-web').onclick = () => {
+    if (current) send('external', { uid: current.uid, account: current.account });
+  };
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && current) { closeReader(); send('close'); }
+  });
+
+  send('ready');
+})();
+</script>
+</body>
+</html>

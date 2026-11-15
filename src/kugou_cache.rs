@@ -60,7 +60,8 @@ fn select(raw:&str,title:&str,artist:&str,duration:f64)->Option<Lyrics>{
 
 fn directory_from_ini(bytes:&[u8])->Option<PathBuf>{
     let text=if let Some(bytes)=bytes.strip_prefix(&[0xff,0xfe]){
-        String::from_utf16(&bytes.chunks_exact(2).map(|b|u16::from_le_bytes([b[0],b[1]])).collect::<Vec<_>>()).ok()?
+        let (units,_)=bytes.as_chunks::<2>();
+        String::from_utf16(&units.iter().map(|b|u16::from_le_bytes(*b)).collect::<Vec<_>>()).ok()?
     }else{String::from_utf8(bytes.to_vec()).ok()?};
     text.lines().find_map(|line|{
         let (key,value)=line.split_once('=')?;
@@ -82,7 +83,7 @@ fn read_directory(root:&Path,title:&str,artist:&str,duration:f64)->Option<Lyrics
         let meta=entry.metadata().ok()?;
         (meta.is_file() && meta.len()<=LIMIT as u64).then_some((meta.modified().ok(),name.to_owned(),singer.to_owned(),path))
     }).collect::<Vec<_>>();
-    files.sort_by(|a,b|b.0.cmp(&a.0));
+    files.sort_by_key(|file|std::cmp::Reverse(file.0));
     let mut fallback=None;
     let mut transliterated=None;
     for (_,name,singer,path) in files{

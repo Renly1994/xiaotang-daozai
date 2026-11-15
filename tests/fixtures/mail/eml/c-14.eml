@@ -1,0 +1,19 @@
+From: Example Test <notice@example.test>
+To: Recipient <reader@example.test>
+Subject: [C-14] 深色 hero 营销 · 合成回归语料 c-14
+Date: Sun, 02 Nov 2025 02:26:40 GMT
+Message-ID: <c-14@example.test>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>.hero{color:#ffffff;font-size:34px;font-weight:700} .sub{color:#d0d7de} .price{color:#ff6a5e;font-size:22px}</style>
+</head><body style="margin:0;background:#eef7ef;padding:20px">
+<table width="600" align="center" cellpadding="0" cellspacing="0"><tr><td style="background-color:#111418;padding:36px">
+<span class="hero">限时活动 14</span><p class="sub">多行副标题用于验证深色底上的文字对比度。</p>
+<p class="price">¥ 213.00</p>
+<p><a href="https://example.test/offer/14" style="background:#116329;color:#fff;padding:12px 26px;border-radius:8px;text-decoration:none">恢复访问</a></p>
+</td></tr>
+<tr><td bgcolor="#ffffff" style="padding:20px"><img src="//cdn.example.test/assets/banner-14.png" width="20" height="10" alt=""><p>下方是商品列表与说明文字。</p></td></tr>
+</table></body></html>

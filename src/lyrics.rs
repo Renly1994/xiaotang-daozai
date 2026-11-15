@@ -621,7 +621,9 @@ fn lyrics_from_items(items:&[serde_json::Value],track:&str,duration_secs:f64)->R
         if let Some(raw)=it.get("syncedLyrics").and_then(|v|v.as_str()) {
             let parsed=parse_lrc(raw);
             let rank=(romanized(track,&parsed),score);
-            if !parsed.lines.is_empty() && synced.as_ref().is_none_or(|(_,s)|rank.0<s.0 || rank.0==s.0 && rank.1<s.1){synced=Some((parsed,rank));}
+            // rank.0 是「是否罗马音」的布尔，用 !rank.0 && s.0 表达「本条不是、候选是」，
+            // 比布尔比大小（false < true）更直白。
+            if !parsed.lines.is_empty() && synced.as_ref().is_none_or(|(_,s)|(!rank.0&&s.0) || (rank.0==s.0 && rank.1<s.1)){synced=Some((parsed,rank));}
         }
         if let Some(raw)=it.get("plainLyrics").and_then(|v|v.as_str()).filter(|s|!s.trim().is_empty()) {
             if plain.as_ref().is_none_or(|(_,s)|score<*s){plain=Some((from_plain(raw),score));}

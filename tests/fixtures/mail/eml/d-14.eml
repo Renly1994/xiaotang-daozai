@@ -1,0 +1,19 @@
+From: Example Test <notice@example.test>
+To: Recipient <reader@example.test>
+Subject: [D-14] 中文事务 / logo + 明细 · 合成回归语料 d-14
+Date: Sun, 02 Nov 2025 02:26:40 GMT
+Message-ID: <d-14@example.test>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+<!DOCTYPE html><html><head><meta charset="utf-8"></head>
+<body style="margin:0;padding:24px;background:#eef7ef;font-family:'Microsoft YaHei',sans-serif">
+<table width="600" align="center" bgcolor="#ffffff" cellpadding="24"><tr><td>
+<img src="cid:logo-14" width="96" height="24" alt="Logo">
+<h3 style="font-size:17px;color:#1f2328">形态 D · 账户变动提醒 14</h3>
+<p style="font-size:13px;color:#57606a">你好，以下是本次变动的明细，请核对。</p>
+<table width="100%" cellpadding="0" cellspacing="0"><tr><td style='padding:6px;border-bottom:1px solid #eaeef2'>项目 1</td><td align='right' style='padding:6px'>¥ 24.00</td></tr><tr><td style='padding:6px;border-bottom:1px solid #eaeef2'>项目 2</td><td align='right' style='padding:6px'>¥ 34.00</td></tr><tr><td style='padding:6px;border-bottom:1px solid #eaeef2'>项目 3</td><td align='right' style='padding:6px'>¥ 44.00</td></tr><tr><td style='padding:6px;border-bottom:1px solid #eaeef2'>项目 4</td><td align='right' style='padding:6px'>¥ 54.00</td></tr></table>
+<p style="font-size:12px;color:#8c959f">如需帮助，请联系支持团队（本邮件为合成语料）。</p>
+<p><a href="https://example.test/help/14" style="color:#116329">查看完整明细</a></p>
+</td></tr></table></body></html>

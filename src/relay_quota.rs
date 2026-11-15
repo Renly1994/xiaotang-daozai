@@ -13,6 +13,8 @@ const PROBE_TIMEOUT:Duration=Duration::from_secs(5);
 const MAX_PROBE_REQUESTS:usize=4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// 三个变体就是三个产品的名字，共同后缀 Api 不是重复，是它们真的都叫 *API。
+#[allow(clippy::enum_variant_names)]
 pub enum Kind { NewApi, OneApi, Sub2Api }
 impl Kind {
     fn name(self) -> &'static str { match self { Self::NewApi => "New API", Self::OneApi => "兼容计费接口", Self::Sub2Api => "Sub2API" } }

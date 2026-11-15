@@ -158,6 +158,12 @@ fn build_fonts()->FontDefinitions {
         find(&[("msyhbd.ttc", 1), ("NotoSansSC-Bold.otf", 0), ("NotoSansCJK-Bold.ttc", 2)], &dirs),
     ];
 
+    // emoji 与符号单独一档：邮件正文里大量装饰符号（🍎✨✅）落在这两个字体里，
+    // 缺了就是一整排「□□□」空心方框。只挑带 glyf 轮廓的字体，彩色位图字体
+    // （NotoColorEmoji / AppleColorEmoji）无法被 ab_glyph 解析，会直接 panic。
+    let emoji = find(&[("seguiemj.ttf", 0), ("SegoeUIEmoji.ttf", 0)], &dirs);
+    let symbol = find(&[("seguisym.ttf", 0), ("NotoSansSymbols-Regular.ttf", 0)], &dirs);
+
     let korean = [
         find(&[("malgun.ttf", 0), ("NotoSansKR-Regular.otf", 0), ("NotoSansCJK-Regular.ttc", 1)], &dirs),
         find(&[("malgunbd.ttf", 0), ("malgun.ttf", 0), ("NotoSansKR-Bold.otf", 0), ("NotoSansCJK-Bold.ttc", 1)], &dirs),
@@ -192,6 +198,12 @@ fn build_fonts()->FontDefinitions {
             list.push(k);
         }
         if let Some(k) = add(&mut fonts, &korean[usize::from(i > 0)], format!("korean{i}")) {
+            list.push(k);
+        }
+        if let Some(k) = add(&mut fonts, &emoji, "emoji".to_string()) {
+            list.push(k);
+        }
+        if let Some(k) = add(&mut fonts, &symbol, "symbol".to_string()) {
             list.push(k);
         }
         list.extend(builtin.iter().cloned());

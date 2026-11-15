@@ -352,7 +352,7 @@ pub fn open_wechat_from_tray(unread:crate::app::Unread)->Result<(),String>{
                     let Ok(items)=ui.ElementFromHandle(window).and_then(|root|root.FindAll(TreeScope_Descendants,&all)) else{continue;};
                     for i in 0..items.Length().unwrap_or(0){
                         let Ok(item)=items.GetElement(i) else{continue;};
-                        if !legacy && !item.CurrentClassName().is_ok_and(|s|s.to_string()=="SystemTray.NormalButton"){continue;}
+                        if !legacy && !item.CurrentClassName().is_ok_and(|s|s.to_string().eq("SystemTray.NormalButton")){continue;}
                         if !item.CurrentName().is_ok_and(|s|wechat_tray_name(&s.to_string())){continue;}
                         let Ok(r)=item.CurrentBoundingRectangle() else{continue;};
                         if r.right<=r.left || r.bottom<=r.top || r.right-r.left>200 || r.bottom-r.top>200 || item.CurrentIsOffscreen().map_or(true,|b|b.as_bool())
@@ -363,7 +363,7 @@ pub fn open_wechat_from_tray(unread:crate::app::Unread)->Result<(),String>{
                 }
                 let rects=buttons.iter().map(|(r,_)|*r).collect::<Vec<_>>();
                 let index=remaining_tray_button(&rects,&other_positions())?;
-                if tray_hosts(&paths)!=account.hosts || buttons.iter().any(|(rect,b)|b.CurrentBoundingRectangle().map_or(true,|r|r!=*rect))
+                if tray_hosts(&paths)!=account.hosts || buttons.iter().any(|(rect,b)|!b.CurrentBoundingRectangle().is_ok_and(|r|r==*rect))
                     || remaining_tray_button(&rects,&other_positions())!=Some(index){
                     return None;
                 }

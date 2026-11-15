@@ -423,6 +423,7 @@ impl Window {
     }
 
     /// 区域参数均为窗口内的逻辑坐标 (x, y, 宽, 高)。
+    #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
         region: (f32, f32, f32, f32),

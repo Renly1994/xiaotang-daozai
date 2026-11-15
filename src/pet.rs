@@ -285,11 +285,11 @@ impl Pet {
                 look=[0.0,0.0];y=-0.5+sway*0.25;
                 match self.music_pose() {
                     MusicPose::Microphone=>{eyes=[Eye::arc(2.5,0.7);2];},
-                    MusicPose::SideSing=>{eyes=[Eye::open(1.6);2];eyes[0].y=-0.5;eyes[1].y=0.5;look=[0.4,0.0];y=sway*0.35;},
-                    MusicPose::HighNote=>{eyes=[Eye::arc(2.3,-0.7);2];eyes[0].tilt=-0.3;eyes[1].tilt=0.3;y=-1.5+sway*0.2;},
+                    MusicPose::SideSing=>{eyes=[Eye::open(1.6);2];eyes[0].y= -0.5;eyes[1].y=0.5;look=[0.4,0.0];y=sway*0.35;},
+                    MusicPose::HighNote=>{eyes=[Eye::arc(2.3,-0.7);2];eyes[0].tilt= -0.3;eyes[1].tilt=0.3;y= -1.5+sway*0.2;},
                     MusicPose::Hum=>{eyes=[Eye::arc(2.5,0.7);2];y=sway*0.3;},
                     MusicPose::Squint=>{eyes=[Eye::arc(1.6,0.0);2];y=sway*0.45;},
-                    MusicPose::Smile=>{eyes=[Eye::arc(2.3,-0.8);2];eyes[0].y=-0.5;eyes[1].y=0.5;look=[sway*0.5,0.0];},
+                    MusicPose::Smile=>{eyes=[Eye::arc(2.3,-0.8);2];eyes[0].y= -0.5;eyes[1].y=0.5;look=[sway*0.5,0.0];},
                 }
             },
             PetState::Worried => {

@@ -2,6 +2,11 @@
 //!
 //! `Card` 把「面板局部逻辑点」映射到屏幕，并自带裁剪、整体透明度与可交互开关：
 //! 切页时旧页用 `live = false` 的画布绘制，只画不响应点击，也不会和新页抢 id。
+//!
+//! 这里的绘制函数一律「坐标 + 尺寸 + 颜色」平铺成参数：`text(x, base, t, size, w, color, h)`
+//! 拆成结构体后每个调用点都要多写一层构造，读起来反而更长。参数多了确实不好看，
+//! 但它们都是同一类东西，且每个函数都很短，所以保留扁平签名。
+#![allow(clippy::too_many_arguments)]
 
 use crate::theme::{self, font, W};
 use eframe::egui::{self, Color32, FontId, Id, Pos2, Rect, Response, Sense, Stroke, Vec2};
@@ -111,7 +116,7 @@ impl<'a> Card<'a> {
         let chars: Vec<char> = t.chars().collect();
         let (mut low, mut high) = (0, chars.len().saturating_sub(1));
         while low < high {
-            let n = low + (high - low + 1) / 2;
+            let n = low + (high - low + 1).div_ceil(2);
             let s: String = chars[..n].iter().collect::<String>() + "…";
             if self.text_w(&s, size, w) <= max_w {
                 low = n;
@@ -838,6 +843,7 @@ const CHASE_ROWS: [f32; 23] = [
 /// 3. `band`：贴着中轴的细光带，**在头部收窄**，尾巴那头再张开；
 /// 4. `core`：播放头附近的中等亮核；
 /// 5. `needle`：压在播放头正上方的一颗极小的近白高光——头部之所以"尖"全靠它。
+///
 /// 五者共用同一条横向拖尾曲线，所以从头到尾是一次连续过渡，
 /// 没有矩形拼接、没有台阶色带、没有可见的圆环接缝。
 ///

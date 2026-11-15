@@ -31,7 +31,7 @@ pub fn kind(code: u8, day: bool) -> Kind {
         51 | 53 | 55 | 56 | 57 => Kind::Drizzle,
         61 | 63 | 65 | 66 | 67 => Kind::Rain,
         71 | 73 | 75 | 77 => Kind::Snow,
-        80 | 81 | 82 => Kind::Shower,
+        80..=82 => Kind::Shower,
         85 | 86 => Kind::Snow,
         95 | 96 | 97 | 99 => Kind::Thunder,
         _ => Kind::Cloud,
@@ -373,7 +373,7 @@ pub fn parse(place: &str, value: &Value) -> Result<Snapshot, String> {
     }
     if days.is_empty() { return Err("天气数据不完整".into()); }
     // timezone=auto 时 daily.sunrise/sunset 就是当地时间，直接截 HH:MM。
-    let hhmm = |list: Option<&Vec<Value>>| list.and_then(|items| items.get(0)).and_then(Value::as_str)
+    let hhmm = |list: Option<&Vec<Value>>| list.and_then(|items| items.first()).and_then(Value::as_str)
         .and_then(|s| s.get(11..16)).map(str::to_string);
     Ok(Snapshot {
         place: place.to_string(),
@@ -638,7 +638,7 @@ impl State {
     }
 
     /// 数据是否该刷新了（首次打开也算）。
-    pub fn stale(&self, now: i64) -> bool { self.snapshot.as_ref().map_or(true, |s| now - s.at >= INTERVAL) }
+    pub fn stale(&self, now: i64) -> bool { self.snapshot.as_ref().is_none_or(|s| now - s.at >= INTERVAL) }
 }
 
 fn cache_matches(snapshot: &Snapshot, city: &str, position: Option<&Position>) -> bool {

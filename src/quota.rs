@@ -31,7 +31,7 @@ pub struct Discovery {pub added:usize,pub notes:Vec<String>}
 impl Discovery {
     pub fn message(&self)->String{
         let mut text=if self.added>0{format!("新增 {} 个账号",self.added)}else{"未发现新的本机账号".into()};
-        if !self.notes.is_empty(){text.push_str("；");text.push_str(&self.notes.join("；"));}text
+        if !self.notes.is_empty(){text.push('；');text.push_str(&self.notes.join("；"));}text
     }
 }
 

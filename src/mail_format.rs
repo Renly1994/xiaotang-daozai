@@ -517,6 +517,7 @@ mod tests {
             summary: "本周周报 完成三件事".into(),
             html: "<h2>本周周报</h2><ul><li>完成三件事</li></ul>".into(),
             links: vec![], meeting: None, uid: 7,
+            images: Default::default(), message_id: String::new(), from_addr: String::new(),
         };
         let out = item_lines(&item);
         assert_eq!(out[0].kind, Kind::Title, "不能退化成压平的 text/plain");

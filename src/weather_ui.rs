@@ -1,4 +1,8 @@
 //! 天气页与天气设置：实况、七日预报与日照时段，图标全部用面板矢量绘制。
+//!
+//! 绘制函数与 `paint` 一样采用扁平参数（坐标、尺寸、颜色、文字），拆结构体只会让
+//! 每个调用点更长，见 `paint` 模块顶部的说明。
+#![allow(clippy::too_many_arguments)]
 use crate::app::{App, Cmd, Env, WEATHER_PAGE, WEATHER_H};
 use crate::paint::{self, Card, H};
 use crate::theme::{self, W};
@@ -895,7 +899,7 @@ impl App {
         let place=c.hit(x,y,w,h,"weather-place").on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("切换城市");
         let (hover,_)=c.hover_t(&place);
         if hover>0.0 {c.fill(x,y,w,h,h/2.0,Color32::from_white_alpha((hover*14.0) as u8));}
-        if place.clicked() {self.weather.picker_open=!self.weather.picker_open;}
+        if place.clicked() {self.weather.picker_open= !self.weather.picker_open;}
         let ctx=c.ui.ctx().clone();
         let open=ctx.animate_bool_with_time(egui::Id::new(("weather-picker",c.live)),self.weather.picker_open,0.16);
         if open>0.0 {self.paint_weather_picker(c,open);}
@@ -940,7 +944,7 @@ impl App {
 
         let response=c.hit(36.0,34.0,347.0,WEATHER_H-48.0,"weather-view").on_hover_cursor(egui::CursorIcon::PointingHand);
         if response.clicked(){
-            self.weather.solar_open=!self.weather.solar_open;
+            self.weather.solar_open= !self.weather.solar_open;
             self.weather.solar_at=env.t;
             let at=response.interact_pointer_pos().map(|p|c.to_local(p)).unwrap_or(egui::pos2(209.5,120.0));
             self.weather.tap=Some((at.x,at.y,env.t));

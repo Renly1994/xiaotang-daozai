@@ -5,7 +5,7 @@ pub struct Lane { pub name:&'static str, limit:usize, active:AtomicUsize, starte
 impl Lane {
     pub const fn new(name:&'static str,limit:usize)->Self{Self{name,limit,active:AtomicUsize::new(0),started:AtomicUsize::new(0),denied:AtomicUsize::new(0)}}
     pub fn acquire(&'static self)->Option<Lease>{
-        if self.active.fetch_update(Ordering::AcqRel,Ordering::Relaxed,|n|(n<self.limit).then_some(n+1)).is_err(){self.denied.fetch_add(1,Ordering::Relaxed);return None;}
+        if self.active.try_update(Ordering::AcqRel,Ordering::Relaxed,|n|(n<self.limit).then_some(n+1)).is_err(){self.denied.fetch_add(1,Ordering::Relaxed);return None;}
         self.started.fetch_add(1,Ordering::Relaxed);Some(Lease(self))
     }
     pub fn spawn(&'static self,run:impl FnOnce()+Send+'static)->Option<std::thread::JoinHandle<()>>{
@@ -40,6 +40,7 @@ pub static GALLEYS:AtomicUsize=AtomicUsize::new(0);
 
 struct Pending { _lease:Lease, ready:Box<dyn Fn()->bool+Send>, after:Instant }
 pub struct PendingRequests(Mutex<Vec<Pending>>);
+impl Default for PendingRequests {fn default()->Self{Self::new()}}
 impl PendingRequests {
     pub const fn new()->Self{Self(Mutex::new(Vec::new()))}
     pub fn retain(&self,lease:Lease,ready:impl Fn()->bool+Send+'static,after:Instant){
@@ -60,6 +61,7 @@ impl Snapshot {
 /// 资源保护：连续两次采样都严重超标时「熔断」，由界面暂停音乐读取与歌词等后台任务。
 /// 只能触发一次，重启岛仔后恢复；单次尖峰不会触发。
 pub struct Guard {strikes:AtomicUsize,tripped:std::sync::atomic::AtomicBool}
+impl Default for Guard {fn default()->Self{Self::new()}}
 impl Guard {
     pub const fn new()->Self{Self{strikes:AtomicUsize::new(0),tripped:std::sync::atomic::AtomicBool::new(false)}}
     /// 返回 true 表示这次采样刚好触发熔断。

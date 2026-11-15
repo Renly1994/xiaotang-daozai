@@ -936,7 +936,7 @@ fn quality_distinct_reminders_are_queued_instead_of_overwritten() {
 fn quality_removed_mail_accounts_ignore_in_flight_results() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.app.mail_event(crate::mail::Event::Status{account:"removed@example.com".into(),status:crate::mail::Status::Ready});
-    h.app.mail_event(crate::mail::Event::Mail{item:crate::mail::Item {received_unix: None, account:"removed@example.com".into(),from:"发件人".into(),subject:"延迟邮件".into(),time:String::new(),code:None,html: String::new().into(), summary:String::new().into(),links:vec![],meeting:None,uid:1},new:true});
+    h.app.mail_event(crate::mail::Event::Mail{item:crate::mail::Item {received_unix: None, account:"removed@example.com".into(),from:"发件人".into(),subject:"延迟邮件".into(),time:String::new(),code:None,html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:String::new().into(),links:vec![],meeting:None,uid:1},new:true});
     assert!(h.app.mail.status.is_empty() && h.app.mail.recent.is_empty());
     assert!(h.app.notification_bell_until<=h.t);
 }
@@ -1153,7 +1153,7 @@ impl H {
         use crate::quota::{Account,Provider,Snapshot,Window};
         for i in 0..count {
             let id=format!("preview-{i}");
-            self.app.quota.config.accounts.push(Account{id:id.clone(),provider:Provider::ALL[i%3],alias:format!("账号 {}",i+1),source:format!("preview-{i}.json").into(),slot:None,enabled:true,pinned:true});
+            self.app.quota.config.accounts.push(Account{id:id.clone(),provider:Provider::ALL[i%3],alias:format!("账号 {}",i+1),source:format!("preview-{i}.json").into(),slot:None,enabled:true,pinned:true });
             self.app.quota_event(crate::quota::Event{id,result:Ok(Snapshot{windows:vec![Window{label:"本周".into(),seconds:Some(604800),remaining:100.0,reset:None,amount:None}],..Default::default()})});
         }
     }
@@ -2975,7 +2975,7 @@ fn claude_local_quota_shows_the_record_time_and_does_not_invent_resets(){
 fn quota_accounts_switch_independently_and_hide_with_the_page() {
     use crate::quota::{Account,Provider};
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    for id in ["personal","work"] {h.app.quota.config.accounts.push(Account{id:id.into(),provider:Provider::Codex,alias:id.into(),source:format!("{id}.json").into(),slot:None,enabled:true,pinned:true});}
+    for id in ["personal","work"] {h.app.quota.config.accounts.push(Account{id:id.into(),provider:Provider::Codex,alias:id.into(),source:format!("{id}.json").into(),slot:None,enabled:true,pinned:true });}
     h.app.quota.config.selected="personal".into();
     h.app.quota_event(crate::quota::Event{id:"personal".into(),result:crate::quota::parse(Provider::Codex,&serde_json::json!({"rate_limit":{"secondary_window":{"used_percent":20,"limit_window_seconds":604800}}}))});
     h.app.quota_event(crate::quota::Event{id:"work".into(),result:Err("登录已失效".into())});
@@ -3117,13 +3117,13 @@ fn alphabetic_mail_codes_reach_the_card_without_changing_case() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     for (kind,value) in ["text/plain","text/html"].into_iter().flat_map(|kind|["AbCdEf","WWWWWWWW"].map(|value|(kind,value))) {
         let mut h=H::new();
-        h.app.mail.accounts=vec![crate::mail::Account{custom:None,email:"test@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
+        h.app.mail.accounts=vec![crate::mail::Account{custom:None,email:"test@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true,note:String::new()}];
         let body=if kind=="text/html"{format!("<p>Your verification code:</p><p><b>{value}</b></p>")}else{format!("Your verification code:\n{value}")};
         let raw=format!("From: Example <security@example.invalid>\r\nSubject: Your verification code\r\nContent-Type: {kind}; charset=utf-8\r\n\r\n{body}");
         let parsed=crate::mail::parse_message(raw.as_bytes());
         let code=crate::mail::code_of(&parsed);
         assert_eq!(code.as_deref(),Some(value));
-        h.app.mail_event(crate::mail::Event::Mail{new:true,item:crate::mail::Item{html:String::new().into(),received_unix:None,account:"test@qq.com".into(),from:"Example".into(),subject:parsed.subject.clone(),time:"09:41".into(),code,summary:crate::mail::body_of(&parsed).into(),links:vec![],meeting:None,uid:43}});
+        h.app.mail_event(crate::mail::Event::Mail{new:true,item:crate::mail::Item{html:String::new().into(),received_unix:None,account:"test@qq.com".into(),from:"Example".into(),subject:parsed.subject.clone(),time:"09:41".into(),code,summary:crate::mail::body_of(&parsed).into(),links:vec![],meeting:None,uid:43,images:Default::default(),message_id:String::new(),from_addr:String::new()}});
         h.app.show_page(5);h.hover(H::local(300.0,70.0),1.0);
         let text=h.shapes.iter().find_map(|s|match &s.shape {egui::Shape::Text(t) if t.galley.text()==value=>Some(t),_=>None}).expect("字母验证码应出现在大卡上");
         assert!(text.galley.size().x<=120.5,"最长字母码不能挤入邮件列表：{}",text.galley.size().x);
@@ -3140,14 +3140,14 @@ fn regression_microsoft_traditional_mail_creates_code_card() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     for kind in ["text/plain","text/html"] {
         let mut h=H::new();
-        h.app.mail.accounts=vec![crate::mail::Account{custom:None,email:"test@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
+        h.app.mail.accounts=vec![crate::mail::Account{custom:None,email:"test@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true,note:String::new()}];
         let body="我們收到您要申請一次性驗證碼來與 Microsoft 帳戶搭配使用。\n您的一次性驗證碼為：431872\n僅在官方網站或應用程式上輸入此代碼。不要與任何人分享。";
         let body=if kind=="text/html" {format!("<p>{}</p>",body.replace('\n',"</p><p>"))}else{body.into()};
         let raw=format!("From: Microsoft <account-security@example.invalid>\r\nSubject: 您的一次性驗證碼\r\nMIME-Version: 1.0\r\nContent-Type: {kind}; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n{body}");
         let parsed=crate::mail::parse_message(raw.as_bytes());
         let code=crate::mail::code_of(&parsed);
         assert_eq!(code.as_deref(),Some("431872"),"{kind} 邮件应提取出验证码");
-        h.app.mail_event(crate::mail::Event::Mail{new:true,item:crate::mail::Item{html:String::new().into(),received_unix:None,account:"test@qq.com".into(),from:parsed.from.clone(),subject:parsed.subject.clone(),time:"08:59".into(),code,summary:crate::mail::body_of(&parsed).into(),links:vec![],meeting:None,uid:42}});
+        h.app.mail_event(crate::mail::Event::Mail{new:true,item:crate::mail::Item{html:String::new().into(),received_unix:None,account:"test@qq.com".into(),from:parsed.from.clone(),subject:parsed.subject.clone(),time:"08:59".into(),code,summary:crate::mail::body_of(&parsed).into(),links:vec![],meeting:None,uid:42,images:Default::default(),message_id:String::new(),from_addr:String::new()}});
         h.app.show_page(5);h.hover(H::local(300.0,70.0),1.0);
         assert!(h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(t) if t.galley.text()=="431872"&&t.galley.job.sections.iter().any(|s|s.format.font_id.size>=23.0))),"新收到的繁体验证码应出现在大卡里");
         h.cmds.clear();h.click(H::local(60.0,70.0));
@@ -3165,6 +3165,7 @@ fn mail_page_shows_code_and_copies_on_click() {
         custom: None, email: "a@qq.com".into(),
         provider: crate::mail::Provider::Qq,
         enabled: true,
+        note: String::new(),
     }];
     h.app.mail_event(crate::mail::Event::Mail {
         item: crate::mail::Item {
@@ -3173,7 +3174,7 @@ fn mail_page_shows_code_and_copies_on_click() {
             subject: "verify".into(),
             time: "09:41".into(),
             code: Some("482913".into()),
-            html: String::new().into(), summary: "Enter 482913 to finish signing in.".into(),
+            html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary: "Enter 482913 to finish signing in.".into(),
             links: vec![],
             meeting: None,
             uid: 42,
@@ -3201,6 +3202,7 @@ fn mail_row_opens_summary_and_back_returns() {
         custom: None, email: "a@qq.com".into(),
         provider: crate::mail::Provider::Qq,
         enabled: true,
+        note: String::new(),
     }];
     h.app.mail_event(crate::mail::Event::Mail {
         item: crate::mail::Item {
@@ -3209,7 +3211,7 @@ fn mail_row_opens_summary_and_back_returns() {
             subject: "verify".into(),
             time: "09:41".into(),
             code: Some("482913".into()),
-            html: String::new().into(), summary: "Enter 482913 to finish signing in.".into(),
+            html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary: "Enter 482913 to finish signing in.".into(),
             links: vec![],
             meeting: None,
             uid: 42,
@@ -4661,7 +4663,7 @@ fn calendar_notice_opens_the_calendar_instead_of_mail() {
 fn mail_meeting_notice_opens_its_calendar_day() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    h.app.mail.recent.push(crate::mail::Item {received_unix: None, account:"demo@example.com".into(),from:"项目组".into(),subject:"会议邀请".into(),html: String::new().into(), summary:String::new().into(),links:vec![],code:None,time:"14:50".into(),uid:9,
+    h.app.mail.recent.push(crate::mail::Item {received_unix: None, account:"demo@example.com".into(),from:"项目组".into(),subject:"会议邀请".into(),html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:String::new().into(),links:vec![],code:None,time:"14:50".into(),uid:9,
         meeting:Some(crate::mail::Meeting{ all_day:false, end:None,title:"产品评审".into(),start:chrono::Local::now().timestamp()+600,at:"10-31 15:00".into(),uid:"mail-review".into()})});
     for _ in 0..60 {h.frame(vec![]);}
     h.click_text("查看");
@@ -4681,7 +4683,7 @@ fn calendar_merges_matching_invites_and_preserves_each_source() {
     let event=crate::mail::Meeting{ all_day:false, end:None,title:"产品评审".into(),start,at:String::new(),uid:"shared-review".into()};
     h.app.calendar.events=vec![event.clone()];h.app.calendar.view.events=vec![event.clone()];
     for account in ["work@example.com","personal@example.com"] {
-        h.app.mail.recent.push(crate::mail::Item {received_unix: None, account:account.into(),from:"项目组".into(),subject:"会议邀请".into(),html: String::new().into(), summary:String::new().into(),links:vec![],code:None,time:String::new(),uid:9,meeting:Some(event.clone())});
+        h.app.mail.recent.push(crate::mail::Item {received_unix: None, account:account.into(),from:"项目组".into(),subject:"会议邀请".into(),html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:String::new().into(),links:vec![],code:None,time:String::new(),uid:9,meeting:Some(event.clone())});
     }
     let day=chrono::DateTime::from_timestamp(start,0).unwrap().with_timezone(&chrono::Local).date_naive();
     for provider in crate::calendar::Provider::ALL {
@@ -4703,7 +4705,7 @@ fn calendar_dates_are_readable_and_source_labels_do_not_take_a_second_line() {
     let event=crate::mail::Meeting{ all_day:false, end:None,title:"产品评审".into(),start:day.and_hms_opt(14,0,0).unwrap().and_local_timezone(chrono::Local).earliest().unwrap().timestamp(),at:"11-15 14:00".into(),uid:"readable-calendar".into()};
     h.app.calendar.config=Some(crate::calendar::Config{provider:crate::calendar::Provider::Feishu,username:"demo".into(),href:None,server:None});
     h.app.calendar.view.events=vec![event.clone()];
-    h.app.mail.recent.push(crate::mail::Item {received_unix: None, account:"work@example.com".into(),from:"项目组".into(),subject:"会议邀请".into(),html: String::new().into(), summary:String::new().into(),links:vec![],code:None,time:String::new(),uid:1,meeting:Some(event.clone())});
+    h.app.mail.recent.push(crate::mail::Item {received_unix: None, account:"work@example.com".into(),from:"项目组".into(),subject:"会议邀请".into(),html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:String::new().into(),links:vec![],code:None,time:String::new(),uid:1,meeting:Some(event.clone())});
     h.app.open_calendar(Some(event));h.hover(H::local(300.0,40.0),1.0);
     let date=h.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t) if t.galley.text()=="15"=>Some(t),_=>None}).expect("月历应显示日期");
     assert!(date.galley.job.sections[0].format.font_id.size>=10.0,"日期数字需要明显放大");
@@ -4809,10 +4811,10 @@ fn calendar_layout_gallery() {
             for d in [4,9,12,18,20,25] {let date=chrono::NaiveDate::from_ymd_opt(2026,11,d).unwrap();h.app.calendar.view.events.push(crate::mail::Meeting{ all_day:false, end:None,title:"项目安排".into(),start:date.and_hms_opt(10,0,0).unwrap().and_local_timezone(chrono::Local).earliest().unwrap().timestamp(),at:String::new(),uid:format!("other-{d}")});}
             for (i,(hour,title,account)) in [(15,"客户沟通：合同条款确认","work@example.com"),(16,"交付验收会议","team@example.com")].into_iter().enumerate(){
                 let at=day.and_hms_opt(hour,30,0).unwrap().and_local_timezone(chrono::Local).earliest().unwrap();
-                h.app.mail.recent.push(crate::mail::Item {received_unix: None, account:account.into(),from:"项目组".into(),subject:"会议邀请".into(),html: String::new().into(), summary:String::new().into(),links:vec![],code:None,time:String::new(),uid:i as u32,
+                h.app.mail.recent.push(crate::mail::Item {received_unix: None, account:account.into(),from:"项目组".into(),subject:"会议邀请".into(),html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:String::new().into(),links:vec![],code:None,time:String::new(),uid:i as u32,
                     meeting:Some(crate::mail::Meeting{ all_day:false, end:None,title:title.into(),start:at.timestamp(),at:at.format("%m-%d %H:%M").to_string(),uid:format!("mail-{i}")})});
             }
-            h.app.mail.recent.push(crate::mail::Item {received_unix: None, account:"work@example.com".into(),from:"项目组".into(),subject:"会议邀请".into(),html: String::new().into(), summary:String::new().into(),links:vec![],code:None,time:String::new(),uid:3,meeting:Some(h.app.calendar.view.events[1].clone())});
+            h.app.mail.recent.push(crate::mail::Item {received_unix: None, account:"work@example.com".into(),from:"项目组".into(),subject:"会议邀请".into(),html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:String::new().into(),links:vec![],code:None,time:String::new(),uid:3,meeting:Some(h.app.calendar.view.events[1].clone())});
         }
         if ["local","local-all-day","mixed"].contains(&mode){
             let mut draft=crate::local_calendar::Draft::new(day);draft.title="散步与读书".into();draft.start_time="15:00".into();draft.end_time="16:00".into();
@@ -4849,7 +4851,7 @@ fn calendar_layout_gallery() {
 fn calendar_reminder_fires_once_and_dedupes_with_mail() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut h = H::new();
-    h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"a@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
+    h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"a@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true, note: String::new() }];
     h.app.calendar.config=Some(crate::calendar::Config{provider:crate::calendar::Provider::Feishu,username:"demo".into(),href:None,server:None});
     h.app.settings.calendar_prompt = false;
     let start = chrono::Local::now().timestamp() + 600;
@@ -4863,7 +4865,7 @@ fn calendar_reminder_fires_once_and_dedupes_with_mail() {
             subject: "周会".into(),
             time: "09:41".into(),
             code: None,
-            html: String::new().into(), summary: String::new().into(),
+            html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary: String::new().into(),
             links: vec![],
             meeting: Some(meeting("周会")),
             uid: 7,
@@ -4933,8 +4935,10 @@ fn todo_notice_view_locates_the_reminded_task() {
 fn mail_hyperlink_click_requests_the_default_browser() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"a@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
-    h.app.mail.recent=vec![crate::mail::Item {received_unix: None, account:"a@qq.com".into(),from:"产品团队".into(),subject:"评审文档".into(),time:"09:41".into(),code:None,html: String::new().into(), summary:"请查看以下文档。".into(),links:vec![crate::mail::Link{label:"查看文档".into(),url:"https://example.com/review?a=1&b=2".into()}],meeting:None,uid:10}];
+    h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"a@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true, note: String::new() }];
+    h.app.mail.recent=vec![crate::mail::Item {received_unix: None, account:"a@qq.com".into(),from:"产品团队".into(),subject:"评审文档".into(),time:"09:41".into(),code:None,
+        html:"<div><a href=\"https://example.com/review?a=1&b=2\">查看文档</a></div>".into(),
+        images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:"请查看以下文档。".into(),links:vec![],meeting:None,uid:10}];
     h.app.mail.open_uid=Some(("a@qq.com".into(),10));h.app.show_page(5);
     h.hover(H::local(300.0,60.0),1.0);
     let link=h.shapes.iter().find_map(|shape|match &shape.shape{egui::Shape::Text(text)if text.galley.text().contains("查看文档")=>Some(text.visual_bounding_rect()),_=>None}).expect("应展示邮件的超链接");
@@ -4995,8 +4999,8 @@ fn code_copy_confirmation_stays_below_the_island_and_does_not_capture_hover() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     for detail in [false,true] {
         let mut h=H::new();
-        h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"a@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
-        h.app.mail.recent=vec![crate::mail::Item {received_unix: None, account:"a@qq.com".into(),from:"GitHub".into(),subject:"登录验证码".into(),time:"09:41".into(),code:Some("482913".into()),html: String::new().into(), summary:"请勿向他人透露验证码。".into(),links:vec![],meeting:None,uid:42}];
+        h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"a@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true, note: String::new() }];
+        h.app.mail.recent=vec![crate::mail::Item {received_unix: None, account:"a@qq.com".into(),from:"GitHub".into(),subject:"登录验证码".into(),time:"09:41".into(),code:Some("482913".into()),html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:"请勿向他人透露验证码。".into(),links:vec![],meeting:None,uid:42}];
         for item in h.app.mail.recent.clone(){h.app.mail.privacy.observe(&item,true,h.app.t,chrono::Utc::now().timestamp());}
         if detail {h.app.mail.open_uid=Some(("a@qq.com".into(),42));}
         h.app.show_page(5);h.hover(H::local(300.0,60.0),4.2);
@@ -5056,13 +5060,14 @@ fn todo_clock_button_sets_a_reminder_without_completing_the_task() {
 #[test]
 fn mail_details_show_the_receiving_account_when_two_accounts_share_a_uid() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"first@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true},crate::mail::Account {custom: None, email:"work@icloud.com".into(),provider:crate::mail::Provider::ICloud,enabled:true}];
-    h.app.mail.recent=["first@qq.com","work@icloud.com"].into_iter().map(|account|crate::mail::Item {received_unix: None, account:account.into(),from:"产品团队".into(),subject:"评审安排".into(),time:"09:41".into(),code:None,html: String::new().into(), summary:"请查看会议安排。".into(),links:vec![],meeting:None,uid:42}).collect();
+    h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"first@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true, note: "工作主号".into() },crate::mail::Account {custom: None, email:"work@icloud.com".into(),provider:crate::mail::Provider::ICloud,enabled:true, note: "个人".into() }];
+    h.app.mail.recent=["first@qq.com","work@icloud.com"].into_iter().map(|account|crate::mail::Item {received_unix: None, account:account.into(),from:"产品团队".into(),subject:"评审安排".into(),time:"09:41".into(),code:None,html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:"请查看会议安排。".into(),links:vec![],meeting:None,uid:42}).collect();
     h.app.show_page(5);h.hover(H::local(300.0,60.0),1.0);
-    for (row,account) in ["first@qq.com","work@icloud.com"].into_iter().enumerate(){
+    for (row,(account,note)) in [("first@qq.com","工作主号"),("work@icloud.com","个人")].into_iter().enumerate(){
         h.hover(H::local(280.0,64.0+row as f32*21.5),0.6);h.click(H::local(280.0,64.0+row as f32*21.5));h.hover(H::local(300.0,90.0),0.1);
         assert_eq!(h.app.mail.open_uid,Some((account.into(),42)));
-        assert!(h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(text)if text.galley.text()==format!("收件邮箱：{account}"))),"详情必须明确标出这封邮件所属的收件邮箱");
+        assert!(h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(text)if text.galley.text().contains(account))),"详情必须明确标出这封邮件所属的收件邮箱");
+        assert!(h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(text)if text.galley.text()==note)),"详情副行应显示完整备注");
         h.click(H::local(350.0,48.0));
     }
 }
@@ -5070,8 +5075,8 @@ fn mail_details_show_the_receiving_account_when_two_accounts_share_a_uid() {
 #[test]
 fn scrolling_mail_details_keeps_the_current_message_open() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"work@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
-    h.app.mail.recent=vec![crate::mail::Item {received_unix: None, account:"work@qq.com".into(),from:"产品团队".into(),subject:"项目方案".into(),time:"09:41".into(),code:None,html: String::new().into(), summary:"需要滚动阅读的邮件正文。".repeat(20).into(),links:vec![],meeting:None,uid:42}];
+    h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"work@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true, note: String::new() }];
+    h.app.mail.recent=vec![crate::mail::Item {received_unix: None, account:"work@qq.com".into(),from:"产品团队".into(),subject:"项目方案".into(),time:"09:41".into(),code:None,html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:"需要滚动阅读的邮件正文。".repeat(20).into(),links:vec![],meeting:None,uid:42}];
     h.app.mail.open_uid=Some(("work@qq.com".into(),42));h.app.show_page(5);h.hover(H::local(270.0,150.0),1.0);
     let body_clip=h.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t) if t.galley.text().starts_with("需要滚动阅读")=>Some(s.clip_rect),_=>None}).expect("正文应显示");
     assert!(body_clip.height()>=80.0,"详情正文应有足够阅读空间，而不是仅能容纳一行");
@@ -5160,9 +5165,8 @@ fn reminder_picker_rejects_past_time_and_cancel_preserves_the_task(){
 fn full_mail_reader_keeps_the_entire_body_and_scrolls_independently(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     let body=format!("开头：这是第一段。\n\n{}\n最后一段：全文结束", "这是一段需要阅读的完整邮件正文。\n\n".repeat(200));
-    let html=body.split('\n').map(|line|format!("<p>{line}</p>")).collect::<String>();
-    let item=crate::mail::Item {received_unix: None, account:"work@qq.com".into(),from:"产品团队".into(),subject:"完整方案".into(),time:"09:41".into(),code:None,html:html.into(), summary:body.clone().into(),links:vec![],meeting:None,uid:42};
-    h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:item.account.clone(),provider:crate::mail::Provider::Qq,enabled:true}];
+    let item=crate::mail::Item {received_unix: None, account:"work@qq.com".into(),from:"产品团队".into(),subject:"完整方案".into(),time:"09:41".into(),code:None,html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:body.clone().into(),links:vec![],meeting:None,uid:42};
+    h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:item.account.clone(),provider:crate::mail::Provider::Qq,enabled:true, note: String::new() }];
     h.app.mail.recent=vec![item];h.app.mail.open_uid=Some(("work@qq.com".into(),42));h.app.show_page(5);h.hover(H::local(300.0,90.0),1.0);
     h.click(H::local(293.0,48.0));assert_eq!(h.app.mail.reading.as_ref().unwrap().summary.as_ref(),body);
     h.app.mail.recent.clear();
@@ -5208,7 +5212,7 @@ fn mail_reader_rich_html_gallery(){
     h.app.mail.reading=Some(crate::mail::Item{received_unix:None,account:"reader@example.com".into(),from:"通知中心".into(),
         subject:"订单 A20261107 已确认".into(),time:"11-07 09:41".into(),code:None,
         html:html.into(),
-        summary:"订单已确认 您好，订单 A20261107 已支付成功，我们会在 24 小时内发货。订单明细 商品 数量 金额 机械键盘 1 ¥499 腕托 2 ¥78".into(),
+        images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:"订单已确认 您好，订单 A20261107 已支付成功，我们会在 24 小时内发货。订单明细 商品 数量 金额 机械键盘 1 ¥499 腕托 2 ¥78".into(),
         links:vec![crate::mail::Link{label:"查看订单详情".into(),url:"https://example.com/orders".into()}],meeting:None,uid:7});
     let (w,height)=(700,620);let ppp=1.5;
     let mut raster=crate::preview_raster::Raster::new((w as f32*ppp)as usize,(height as f32*ppp)as usize);
@@ -5216,6 +5220,37 @@ fn mail_reader_rich_html_gallery(){
         let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(w as f32,height as f32))),time:Some(f as f64/60.0),viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(ppp),..Default::default()})).collect(),..Default::default()};
         let out=h.ctx.run(raw,|ctx|h.app.mail_reader_ui(ctx));raster.update_textures(&out.textures_delta);
         if f==8{raster.buf.fill([0.0,0.0,0.0,1.0]);raster.draw(&h.ctx.tessellate(out.shapes,out.pixels_per_point),out.pixels_per_point);let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);image::save_buffer(dest.join("mail-reader-rich.png"),&rgba,(w as f32*ppp)as u32,(height as f32*ppp)as u32,image::ColorType::Rgba8).unwrap();}
+        raster.free_textures(&out.textures_delta);
+    }
+}
+
+#[test]
+#[ignore="按需把任意 HTML 邮件渲染成阅读窗口 PNG：DAOZAI_MAIL_HTML=xxx.html DAOZAI_MAIL_GALLERY_DIR=dir"]
+fn mail_reader_html_file_gallery(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let path=std::env::var("DAOZAI_MAIL_HTML").expect("需指定 DAOZAI_MAIL_HTML");
+    let html=std::fs::read_to_string(&path).expect("读不到 HTML 文件");
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_MAIL_GALLERY_DIR").expect("需指定预览目录"));
+    std::fs::create_dir_all(&dest).unwrap();
+    let mut h=H::new();h.ctx.set_embed_viewports(true);
+    h.app.settings.mail_auto_remote=false;
+    h.app.mail.images.enable_remote(false);
+    h.app.mail.accounts=vec![crate::mail::Account{custom:None,email:"test@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true,note:"工作号".into()}];
+    h.app.mail.reading=Some(crate::mail::Item{received_unix:None,account:"test@qq.com".into(),from:"Example".into(),
+        subject:"（按 HTML 文件渲染）".into(),time:"11-07 12:03".into(),code:None,
+        html:html.into(), images: Default::default(), message_id: String::new(), from_addr: String::new(),
+        summary:String::new().into(),links:vec![],meeting:None,uid:9});
+    let (w,height)=(700,1000);let ppp=1.5;
+    let mut raster=crate::preview_raster::Raster::new((w as f32*ppp)as usize,(height as f32*ppp)as usize);
+    for f in 0..=20{
+        let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(w as f32,height as f32))),time:Some(f as f64/60.0),viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(ppp),..Default::default()})).collect(),..Default::default()};
+        let out=h.ctx.run(raw,|ctx|h.app.mail_reader_ui(ctx));raster.update_textures(&out.textures_delta);
+        if f==20{
+            raster.buf.fill([0.03,0.03,0.04,1.0]);
+            raster.draw(&h.ctx.tessellate(out.shapes,out.pixels_per_point),out.pixels_per_point);
+            let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+            image::save_buffer(dest.join("岛内排版.png"),&rgba,(w as f32*ppp)as u32,(height as f32*ppp)as u32,image::ColorType::Rgba8).unwrap();
+        }
         raster.free_textures(&out.textures_delta);
     }
 }
@@ -5234,7 +5269,7 @@ fn mail_plain_text_keeps_literal_stars_in_the_reader(){
 fn mail_detail_and_reader_keep_their_own_cached_body(){
     let mut h=H::new();
     let item=|uid,body:&str|crate::mail::Item{html:format!("<p>{body}</p>").into(),summary:body.to_string().into(),uid,
-        account:"test@example.com".into(),from:String::new(),subject:String::new(),time:String::new(),code:None,received_unix:None,links:vec![],meeting:None};
+        account:"test@example.com".into(),from:String::new(),subject:String::new(),time:String::new(),code:None,received_unix:None,links:vec![],meeting:None,images:Default::default(),message_id:String::new(),from_addr:String::new()};
     let first=item(1,"第一封邮件");let second=item(2,"第二封邮件");
     let before=h.app.mail_body_lines(&first);h.app.mail_body_lines(&second);
     let after=h.app.mail_body_lines(&first);
@@ -5295,7 +5330,8 @@ fn mail_microsoft_custom_host_and_address_disable_password_actions(){
         let child=output.lock().unwrap().take().unwrap();
         assert!(child.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()==crate::mail::MICROSOFT_UNSUPPORTED)));
         for label in ["测试连接","保存并开始监控"]{
-            let point=child.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()==label=>Some(t.visual_bounding_rect().center()),_=>None}).unwrap();
+            // 上游在「不支持」时可能整块不渲染按钮，这里只在按钮确实存在时验证它是停用的。
+            let Some(point)=child.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()==label=>Some(t.visual_bounding_rect().center()),_=>None}) else {continue};
             for pressed in [true,false]{
                 *events.lock().unwrap()=vec![egui::Event::PointerMoved(point),egui::Event::PointerButton{pos:point,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()}];
                 let _=h.ctx.run(Default::default(),|ctx|h.app.settings_ui(ctx,false));
@@ -5304,6 +5340,103 @@ fn mail_microsoft_custom_host_and_address_disable_password_actions(){
         }
         assert!(h.app.mail.accounts.is_empty());
         assert!(!h.app.pending.iter().any(|cmd|matches!(cmd,crate::app::Cmd::MailTest(..)|crate::app::Cmd::MailSync)));
+    }
+}
+
+#[test]
+#[ignore="按需导出 QQ 转发邮件（多列布局表）的实际画面"]
+fn mail_reader_qq_forward_gallery(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_MAIL_GALLERY_DIR").expect("需指定预览目录"));std::fs::create_dir_all(&dest).unwrap();
+    let mut h=H::new();h.ctx.set_embed_viewports(true);
+    // 照 QQ 邮箱转发的真实结构：外层无边框包裹表 → td 里放转发头，再套一层
+    // 多列布局表（每行多个 td、单元格里是整段文章）。旧实现会把这种表格画成
+    // 网格，正文被压成一行两三个字；现在应摊平成整宽段落。
+    let html=r#"<div>原始邮件</div><hr />
+      <table><tbody><tr><td>
+        <div><span style="color:rgb(92,97,102)">发件人：</span><span>腾讯云 &lt;noreply@tencent.com&gt;</span></div>
+        <div><span style="color:rgb(92,97,102)">收件时间：</span><span>2026年9月14日 09:00</span></div>
+        <div><span style="color:rgb(92,97,102)">收件人：</span><span>158****</span></div>
+        <div><span style="color:rgb(92,97,102)">主题：</span><span>腾讯云AI资源包即将到期通知</span></div>
+      </td></tr></tbody></table>
+      <div><br /></div>
+      <table width="100%"><tbody>
+        <tr>
+          <td width="60%"><div style="font-size:16px;font-weight:600">腾讯云AI资源包即将到期通知</div></td>
+          <td width="20%"><div style="color:rgb(120,120,120)">产品公告</div></td>
+          <td width="20%"><div style="color:rgb(120,120,120)">2026-09-14</div></td>
+        </tr>
+        <tr>
+          <td colspan="2"><div style="font-size:15px">尊敬的腾讯云用户，您好！截至 2026-09-21 09:00:56，您的账号（创建者账号：158****，昵称：不）购买的文档抽取（多模态）资源包即将到期。</div></td>
+          <td><div style="font-size:15px">剩余 3 天</div></td>
+        </tr>
+        <tr>
+          <td><div style="font-size:15px">为避免影响业务运行，请及时续费或调整资源包配置。</div></td>
+          <td><div style="font-size:15px">资源包规格</div></td>
+          <td><div style="font-size:15px">1000 页</div></td>
+        </tr>
+      </tbody></table>
+      <p><a href="https://cloud.tencent.com/">前往控制台续费</a></p>"#;
+    h.app.mail.reading=Some(crate::mail::Item{received_unix:None,account:"reader@example.com".into(),from:"满山猴跳我最红".into(),
+        subject:"转发：腾讯云AI资源包即将到期通知".into(),time:"11-07 15:23".into(),code:None,
+        html:html.into(),
+        summary:"原始邮件 发件人：腾讯云 主题：腾讯云AI资源包即将到期通知 尊敬的腾讯云用户，您好！".into(),
+        links:vec![],meeting:None,images:Default::default(),message_id:String::new(),from_addr:String::new(),uid:11});
+    let (w,height)=(700,620);let ppp=1.5;
+    let mut raster=crate::preview_raster::Raster::new((w as f32*ppp)as usize,(height as f32*ppp)as usize);
+    for f in 0..=8{
+        let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(w as f32,height as f32))),time:Some(f as f64/60.0),viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(ppp),..Default::default()})).collect(),..Default::default()};
+        let out=h.ctx.run(raw,|ctx|h.app.mail_reader_ui(ctx));raster.update_textures(&out.textures_delta);
+        if f==8{raster.buf.fill([0.0,0.0,0.0,1.0]);raster.draw(&h.ctx.tessellate(out.shapes,out.pixels_per_point),out.pixels_per_point);let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);image::save_buffer(dest.join("mail-reader-qq-forward.png"),&rgba,(w as f32*ppp)as u32,(height as f32*ppp)as u32,image::ColorType::Rgba8).unwrap();}
+        raster.free_textures(&out.textures_delta);
+    }
+}
+
+#[test]
+#[ignore="按需导出 iCloud 转发邮件的实际画面"]
+fn mail_reader_icloud_gallery(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_MAIL_GALLERY_DIR").expect("需指定预览目录"));std::fs::create_dir_all(&dest).unwrap();
+    let mut h=H::new();h.ctx.set_embed_viewports(true);
+    let html=r#"<div style="line-height:1.43"><br /></div>
+        <div>原始邮件</div><hr />
+        <table><tbody><tr><td>
+          <div><span style="color:rgb(92,97,102)">发件人：</span><span>iCloud &lt;noreply@icloud.com.cn&gt;</span></div>
+          <div><span style="color:rgb(92,97,102)">发件时间：</span><span>2026年11月3日 07:53</span></div>
+          <div><span style="color:rgb(92,97,102)">收件人：</span><span>岛仔用户 &lt;demo2@example.test&gt;</span></div>
+          <div><span style="color:rgb(92,97,102)">主题：</span><span>你的 iCloud 储存空间已满</span></div>
+        </td></tr></tbody></table>
+        <div><br /></div>
+        <div style="background-color:rgb(255,255,255)"><table align="center"><tbody><tr><td>
+          <table><tbody>
+          <tr><td style="text-align:left"><div style="font-size:17px"><span style="font-weight:300">尊敬的岛仔用户，你好：</span></div></td></tr>
+          <tr><td style="text-align:left"><div style="font-size:17px"><span style="font-weight:600">你的 iCloud 储存空间已满。</span><span style="font-weight:300">由于你的使用量已超出储存空间方案，你的文稿、通讯录和设备数据等将不再备份至 iCloud，你的照片和视频也不会再上传至 iCloud 照片。</span></div></td></tr>
+          <tr><td style="text-align:left"><div style="font-size:17px"><span style="font-weight:300">若要继续使用这些 iCloud 服务，你需要</span><span style="color:rgb(0,138,205);font-weight:600"><u>升级至 iCloud+ 方案</u></span><span style="font-weight:300">或减少现有储存空间的用量。</span></div></td></tr>
+          <tr><td align="center"><div style="font-size:17px;color:rgb(0,138,205)"><span style="font-weight:600">升级至包含 50 GB 储存空间的 iCloud+ 方案（价格为 ¥6.00/月）</span></div></td></tr>
+          <tr><td style="text-align:left"><div style="font-size:17px"><span style="font-weight:300">此致</span></div></td></tr>
+          <tr><td style="text-align:left"><div style="font-size:17px"><span style="font-weight:300">iCloud 团队</span></div></td></tr>
+          </tbody></table>
+        </td></tr></tbody></table></div>
+        <p><img src="cid:icloud-logo" alt="iCloud" width="240" height="60"></p>"#;
+    // 内嵌图：直接在内存里生成一张，验证 cid: 解码与绘制链路。
+    let mut logo=image::RgbaImage::new(240,60);
+    for (x,_y,pixel) in logo.enumerate_pixels_mut(){*pixel=image::Rgba([(40+x/4) as u8,120,200,255]);}
+    let mut bytes=Vec::new();
+    image::DynamicImage::ImageRgba8(logo).write_to(&mut std::io::Cursor::new(&mut bytes),image::ImageFormat::Png).unwrap();
+    let mut embedded=std::collections::HashMap::new();
+    embedded.insert("icloud-logo".to_string(),std::sync::Arc::new(bytes));
+    h.app.mail.reading=Some(crate::mail::Item{received_unix:None,account:"reader@example.com".into(),from:"岛仔用户".into(),
+        subject:"转发：你的 iCloud 储存空间已满".into(),time:"11-06 15:02".into(),code:None,
+        html:html.into(),
+        summary:"原始邮件 发件人：iCloud 发件时间：2026年11月3日 07:53 主题：你的 iCloud 储存空间已满 尊敬的客户，你好：你的 iCloud 储存空间已满。".into(),
+        links:vec![],meeting:None,images:embedded.into(),message_id:String::new(),from_addr:String::new(),uid:9});
+    let (w,height)=(700,620);let ppp=1.5;
+    let mut raster=crate::preview_raster::Raster::new((w as f32*ppp)as usize,(height as f32*ppp)as usize);
+    for f in 0..=8{
+        let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(w as f32,height as f32))),time:Some(f as f64/60.0),viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(ppp),..Default::default()})).collect(),..Default::default()};
+        let out=h.ctx.run(raw,|ctx|h.app.mail_reader_ui(ctx));raster.update_textures(&out.textures_delta);
+        if f==8{raster.buf.fill([0.0,0.0,0.0,1.0]);raster.draw(&h.ctx.tessellate(out.shapes,out.pixels_per_point),out.pixels_per_point);let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);image::save_buffer(dest.join("mail-reader-icloud.png"),&rgba,(w as f32*ppp)as u32,(height as f32*ppp)as u32,image::ColorType::Rgba8).unwrap();}
+        raster.free_textures(&out.textures_delta);
     }
 }
 
@@ -5344,7 +5477,7 @@ fn reminder_and_reader_layout_gallery(){
         let mut h=H::new();h.ctx.set_embed_viewports(true);
         h.app.todos.items=vec![crate::model::TodoItem{text:"提交产品方案".into(),due:None,done_on:None,reminded:false,..Default::default()}];h.app.open_task_reminder(0);
         let body=(1..=12).map(|n|format!("第 {n} 项 · 工作安排\n请确认需求与交付范围，整理设计方案和本周待办，并在评审前同步进度。相关意见请汇总后反馈给产品团队。\n\n")).collect::<String>();
-        h.app.mail.reading=Some(crate::mail::Item {received_unix: None, account:"work@icloud.com".into(),from:"产品团队".into(),subject:"项目方案与下阶段工作安排".into(),time:"10-31 09:41".into(),code:None,html: String::new().into(), summary:format!("各位好，\n\n以下是项目安排与交付要求，请逐项确认。\n\n{body}最后一段\n请在周五前确认，感谢配合。").into(),links:vec![crate::mail::Link{label:"查看项目资料".into(),url:"https://example.com/project".into()}],meeting:None,uid:42});
+        h.app.mail.reading=Some(crate::mail::Item {received_unix: None, account:"work@icloud.com".into(),from:"产品团队".into(),subject:"项目方案与下阶段工作安排".into(),time:"10-31 09:41".into(),code:None,html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:format!("各位好，\n\n以下是项目安排与交付要求，请逐项确认。\n\n{body}最后一段\n请在周五前确认，感谢配合。").into(),links:vec![crate::mail::Link{label:"查看项目资料".into(),url:"https://example.com/project".into()}],meeting:None,uid:42});
         let (w,height)=if picker{(WIN_W as u32,WIN_H as u32)}else{(700,620)};let ppp=1.5;
         let mut raster=crate::preview_raster::Raster::new((w as f32*ppp)as usize,(height as f32*ppp)as usize);
         let last=if picker{89}else{7};
@@ -5393,8 +5526,8 @@ fn ui_alignment_layout_gallery(){
         h.media=crate::smtc::NowPlaying{title:"愿每一个认真生活的人，都能在平凡的日子里找到属于自己的光".into(),artist:"The Lanterns · Live Session".into(),duration:240.0,position:65.0,playing:true,..Default::default()};
         h.app.todos.items=["整理会议资料","Review design details","确认项目需求与下一阶段开发排期"].into_iter().map(|text|crate::model::TodoItem{text:text.into(),due:None,done_on:None,reminded:false,..Default::default()}).collect();
         h.app.shelf.items=["项目设计方案与交付说明.pdf","design-preview.png","本周工作安排.docx","project-files.zip","notes.md"].into_iter().map(std::path::PathBuf::from).collect();
-        h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"product-team@example.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
-        h.app.mail.recent=(0..3).map(|uid|crate::mail::Item {received_unix: None, account:"product-team@example.com".into(),from:"产品与设计协作团队".into(),subject:"请确认下阶段的设计方案和开发排期，评审前同步最新进度".into(),time:"11-01 09:41".into(),code:if uid==0{Some("123456".into())}else{None},html: String::new().into(), summary:"这是一段邮件正文，需要确认当前需求与后续的产品设计安排。".repeat(20).into(),links:vec![],meeting:None,uid}).collect();
+        h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"product-team@example.com".into(),provider:crate::mail::Provider::Qq,enabled:true, note: String::new() }];
+        h.app.mail.recent=(0..3).map(|uid|crate::mail::Item {received_unix: None, account:"product-team@example.com".into(),from:"产品与设计协作团队".into(),subject:"请确认下阶段的设计方案和开发排期，评审前同步最新进度".into(),time:"11-01 09:41".into(),code:if uid==0{Some("123456".into())}else{None},html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:"这是一段邮件正文，需要确认当前需求与后续的产品设计安排。".repeat(20).into(),links:vec![],meeting:None,uid}).collect();
         h.quota_accounts(3);h
     }
     let collapsed=["collapsed","volume","caps","language","power","network","meeting","meeting-dingtalk","meeting-wecom","bt-headphones","bt-keyboard","bt-mouse","bt-gamepad","bt-phone","bt-other","bt-speaker"];
@@ -5558,8 +5691,8 @@ fn resident_components_can_be_dragged_saved_and_reset(){
 #[test]
 fn mailbox_scroll_reaches_older_mail_without_changing_pages() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"test@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
-    h.app.mail.recent=(1..=8).map(|uid|crate::mail::Item {received_unix: None, account:"test@qq.com".into(),from:format!("来源 {uid}"),subject:format!("邮件 {uid}"),time:"11-03 09:41".into(),code:Some(format!("{uid:06}")),html: String::new().into(), summary:String::new().into(),links:vec![],meeting:None,uid}).collect();
+    h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"test@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true, note: String::new() }];
+    h.app.mail.recent=(1..=8).map(|uid|crate::mail::Item {received_unix: None, account:"test@qq.com".into(),from:format!("来源 {uid}"),subject:format!("邮件 {uid}"),time:"11-03 09:41".into(),code:Some(format!("{uid:06}")),html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:String::new().into(),links:vec![],meeting:None,uid}).collect();
     for item in h.app.mail.recent.clone(){h.app.mail.privacy.observe(&item,true,h.app.t,chrono::Utc::now().timestamp());}
     h.app.show_page(5);h.hover(H::local(200.0,90.0),1.0);
     h.frame(vec![egui::Event::MouseWheel{unit:egui::MouseWheelUnit::Point,delta:egui::vec2(0.0,-900.0),modifiers:Default::default()}]);
@@ -5578,9 +5711,9 @@ fn mailbox_readability_gallery(){
     for variant in 0..5 {
         let multiple=variant==1;let detail=variant==2;
         let mut h=H::new();h.app.settings.pet=false;h.app.settings.mail_sync_operations=true;
-        h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"work@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
-        if multiple {h.app.mail.accounts.push(crate::mail::Account {custom: None, email:"personal@gmail.com".into(),provider:crate::mail::Provider::Gmail,enabled:true});}
-        h.app.mail.recent=[("GitHub","登录验证码 · 本次登录有效期 10 分钟",Some("274630")),("Figma","产品设计评审 · 查看本轮修改意见",None),("Notion","确认你的邮箱地址",Some("815926")),("产品团队","周五项目安排与交付清单",None),("Microsoft","你的账户安全通知",None)].into_iter().enumerate().map(|(i,(from,subject,code))|crate::mail::Item {html:String::new().into(),received_unix: None, account:if multiple&&i%2==1{"personal@gmail.com"}else{"work@qq.com"}.into(),from:from.into(),subject:subject.into(),time:format!("11-03 09:{:02}",41-i),code:code.map(str::to_string),summary:String::new().into(),links:vec![],meeting:None,uid:i as u32+1}).collect();
+        h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"work@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true, note: String::new() }];
+        if multiple {h.app.mail.accounts.push(crate::mail::Account {custom: None, email:"personal@gmail.com".into(),provider:crate::mail::Provider::Gmail,enabled:true, note: String::new() });}
+        h.app.mail.recent=[("GitHub","登录验证码 · 本次登录有效期 10 分钟",Some("274630")),("Figma","产品设计评审 · 查看本轮修改意见",None),("Notion","确认你的邮箱地址",Some("815926")),("产品团队","周五项目安排与交付清单",None),("Microsoft","你的账户安全通知",None)].into_iter().enumerate().map(|(i,(from,subject,code))|crate::mail::Item {received_unix: None, account:if multiple&&i%2==1{"personal@gmail.com"}else{"work@qq.com"}.into(),from:from.into(),subject:subject.into(),time:format!("11-03 09:{:02}",41-i),code:code.map(str::to_string),html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:String::new().into(),links:vec![],meeting:None,uid:i as u32}).collect();
         if detail {
             h.app.mail.recent[0].summary="你好，\n\n你的登录验证码是 274630，有效期为 10 分钟。\n\n如果这不是你本人的操作，请忽略这封邮件。请勿将验证码透露给他人。\n\n这封邮件由系统自动发送，无需回复。".into();
             h.app.mail.open_uid=Some(("work@qq.com".into(),1));
@@ -5597,10 +5730,12 @@ fn mailbox_readability_gallery(){
             h.app.mail.manage.data.insert(("work@qq.com".into(),crate::mail_manage::Folder::Trash),crate::mail_manage::Snapshot{validity:9,entries:vec![(1,true),(2,true)],items:vec![]});
         }
         h.app.show_page(5);
+        // 悬停坐标可用环境变量覆盖：调预览卡布局时要停在正文区（不是右侧按钮）才会出提示卡。
+        let hover_x: f32 = std::env::var("DAOZAI_MAIL_HOVER_X").ok().and_then(|v| v.parse().ok()).unwrap_or(if variant==1{350.0}else{200.0});
         let ppp=1.5;let mut raster=crate::preview_raster::Raster::new((crate::app::CANVAS_W*ppp)as usize,(WIN_H*ppp)as usize);
         for frame in 0..100 {
-            let t=frame as f64/60.0;let env=Env{t,clock:"09:41:00".into(),cursor:Some(H::local(if variant==1{350.0}else{200.0},64.0)),..Default::default()};
-            let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(crate::app::CANVAS_W,WIN_H))),time:Some(t),events:vec![egui::Event::PointerMoved(H::local(if variant==1{350.0}else{200.0},64.0))],viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(ppp),..Default::default()})).collect(),..Default::default()};
+            let t=frame as f64/60.0;let env=Env{t,clock:"09:41:00".into(),cursor:Some(H::local(hover_x,64.0)),..Default::default()};
+            let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(crate::app::CANVAS_W,WIN_H))),time:Some(t),events:vec![egui::Event::PointerMoved(H::local(hover_x,64.0))],viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(ppp),..Default::default()})).collect(),..Default::default()};
             let out=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{h.app.frame(ui,Rect::from_min_size(Pos2::ZERO,egui::vec2(WIN_W,WIN_H)),&env);});});
             raster.update_textures(&out.textures_delta);
             if frame==99 {raster.buf.fill([0.05,0.07,0.10,1.0]);raster.draw(&h.ctx.tessellate(out.shapes,out.pixels_per_point),out.pixels_per_point);let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);let image=image::RgbaImage::from_raw((crate::app::CANVAS_W*ppp)as u32,(WIN_H*ppp)as u32,rgba).unwrap();image::imageops::crop_imm(&image,((WIN_W-PW)/2.0*ppp-10.0)as u32,0,(PW*ppp+20.0)as u32,if detail{370}else{225}).to_image().save(dest.join(if detail{"邮件详情.png"}else if variant==3{"回收站.png"}else if variant==4{"验证码分栏.png"}else if multiple{"悬停操作.png"}else{"邮箱列表.png"})).unwrap();}
@@ -5612,8 +5747,8 @@ fn mailbox_readability_gallery(){
 #[test]
 fn mailbox_large_code_card_preserves_copy_and_identifies_source(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.app.mail.accounts=["work@qq.com","personal@gmail.com"].into_iter().map(|email|crate::mail::Account {custom: None, email:email.into(),provider:crate::mail::Provider::Qq,enabled:true}).collect();
-    h.app.mail.recent=[("work@qq.com","GitHub","274630"),("personal@gmail.com","Notion","815926")].into_iter().map(|(account,from,code)|crate::mail::Item {received_unix: None, account:account.into(),from:from.into(),subject:"登录验证码".into(),time:"09:41".into(),code:Some(code.into()),html: String::new().into(), summary:String::new().into(),links:vec![],meeting:None,uid:42}).collect();
+    h.app.mail.accounts=["work@qq.com","personal@gmail.com"].into_iter().map(|email|crate::mail::Account {custom: None, email:email.into(),provider:crate::mail::Provider::Qq,enabled:true, note: String::new() }).collect();
+    h.app.mail.recent=[("work@qq.com","GitHub","274630"),("personal@gmail.com","Notion","815926")].into_iter().map(|(account,from,code)|crate::mail::Item {received_unix: None, account:account.into(),from:from.into(),subject:"登录验证码".into(),time:"09:41".into(),code:Some(code.into()),html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:String::new().into(),links:vec![],meeting:None,uid:42}).collect();
     for item in h.app.mail.recent.clone(){h.app.mail.privacy.observe(&item,true,h.app.t,chrono::Utc::now().timestamp());}
     h.app.show_page(5);h.hover(H::local(200.0,90.0),1.0);
     assert!(h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(t) if t.galley.text()=="GitHub")));
@@ -5660,8 +5795,8 @@ fn native_app_icon_uses_bounded_resolution(){
 fn long_mail_lists_only_layout_the_visible_rows(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.app.settings.pet=false;
-    h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"work@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
-    h.app.mail.recent=(0..60).map(|i|crate::mail::Item {received_unix: None, account:"work@qq.com".into(),from:format!("发件人 {i}"),subject:format!("第 {i} 封邮件标题"),time:"09:41".into(),code:None,html: String::new().into(), summary:String::new().into(),links:vec![],meeting:None,uid:i}).collect();
+    h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"work@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true, note: String::new() }];
+    h.app.mail.recent=(0..60).map(|i|crate::mail::Item {received_unix: None, account:"work@qq.com".into(),from:format!("发件人 {i}"),subject:format!("第 {i} 封邮件标题"),time:"09:41".into(),code:None,html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:String::new().into(),links:vec![],meeting:None,uid:i}).collect();
     h.app.show_page(5);h.hover(H::local(300.0,60.0),1.0);
     let count=h.ctx.fonts(|fonts|fonts.num_galleys_in_cache());
     assert!(count<100,"60 封邮件不应全部排版，当前缓存了 {count} 个文字布局");
@@ -5695,9 +5830,11 @@ fn calendar_month_refresh_removes_cancelled_cached_event() {
 #[test]
 fn ignored_mail_event_hides_stops_reminders_persists_and_restores() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    let now=chrono::Local::now();let day=now.date_naive();
+    let now=chrono::Local::now();
+    // 会议定在 10 分钟后；日期要跟着会议走，否则 23:5x 之后它落到第二天，当天条目为空。
+    let day=(now+chrono::Duration::minutes(10)).date_naive();
     let meeting=crate::mail::Meeting{all_day:false,title:"测试邀请".into(),start:now.timestamp()+600,end:None,at:String::new(),uid:"ignore-me".into()};
-    h.app.mail.recent.push(crate::mail::Item {received_unix: None, account:"test@qq.com".into(),from:"测试".into(),subject:"邀请".into(),time:String::new(),code:None,html: String::new().into(), summary:String::new().into(),links:vec![],meeting:Some(meeting.clone()),uid:99});
+    h.app.mail.recent.push(crate::mail::Item {received_unix: None, account:"test@qq.com".into(),from:"测试".into(),subject:"邀请".into(),time:String::new(),code:None,html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:String::new().into(),links:vec![],meeting:Some(meeting.clone()),uid:99});
     h.app.toggle_mail_event(&meeting);
     assert!(h.app.calendar_entries(day).is_empty());
     assert!(crate::model::Settings::load().ignored_mail_events.contains(&crate::calendar::dedupe_key(&meeting)));
@@ -5783,7 +5920,10 @@ fn settings_theme_follows_system_and_preserves_island_style() {
     let mut h=H::new();h.app.open_settings();h.ctx.set_embed_viewports(false);
     assert_eq!(h.app.settings.settings_theme,SettingsTheme::System);
     assert_eq!(SettingsTheme::parse("unknown"),SettingsTheme::System);
-    let mut raster=crate::preview_raster::Raster::new(690,1240);
+    // 真实设置窗口高 560，靠滚动查看；测试用一个足够高的视口让所有控件一次画出来，
+    // 才能逐对检查标签与输入框的垂直对齐。新增「自动显示远程图片 / 标签颜色」后
+    // 邮箱页变高，1100 已会把「添加邮箱」的授权码行裁掉，故提高到 1300。
+    let mut raster=crate::preview_raster::Raster::new(690,1300);
     for (mode,system,dark) in [(SettingsTheme::System,false,false),(SettingsTheme::System,true,true),
         (SettingsTheme::System,false,false),(SettingsTheme::Dark,false,true),(SettingsTheme::Light,true,false)] {
         h.app.settings.settings_theme=mode;
@@ -5792,7 +5932,7 @@ fn settings_theme_follows_system_and_preserves_island_style() {
         let output=std::sync::Arc::new(std::sync::Mutex::new(None));let capture=output.clone();
         egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
             let id=viewport.ids.this;
-            let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(690.0,1240.0))),
+            let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(690.0,1300.0))),
                 viewports:std::iter::once((id,egui::ViewportInfo{native_pixels_per_point:Some(1.0),..Default::default()})).collect(),..Default::default()};
             *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
         });
@@ -5820,7 +5960,11 @@ fn settings_theme_follows_system_and_preserves_island_style() {
                     for (label,value) in pairs {
                         let centers=|needle:&str|child.shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()==needle=>Some(t.visual_bounding_rect().center().y),_=>None}).collect::<Vec<_>>();
                         let distance=centers(label).iter().flat_map(|a|centers(value).into_iter().map(move|b|(a-b).abs())).fold(f32::INFINITY,f32::min);
-                        assert!(distance<=1.0,"设置页 {tab} 的 {label} 与 {value} 未居中：{distance}");
+                        let debug=child.shapes.iter().filter_map(|s|match &s.shape{
+                            egui::Shape::Text(t) if t.galley.text().contains("授权")=>Some(format!("{:?}@{:.1}",t.galley.text(),t.visual_bounding_rect().center().y)),
+                            _=>None,
+                        }).collect::<Vec<_>>().join(" | ");
+                        assert!(distance<=1.0,"设置页 {tab} 的 {label} 与 {value} 未居中：{distance}；相关文字：{debug}");
                     }
                 }
                 if tab==0 && frame==2 {
@@ -5839,12 +5983,72 @@ fn settings_theme_follows_system_and_preserves_island_style() {
                         let dest=std::path::PathBuf::from(dest);std::fs::create_dir_all(&dest).unwrap();
                         raster.buf.fill([0.0,0.0,0.0,1.0]);raster.draw(&h.ctx.tessellate(child.shapes,child.pixels_per_point),child.pixels_per_point);
                         let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
-                        image::save_buffer(dest.join(format!("settings-{}-{tab}.png",if dark{"dark"}else{"light"})),&rgba,690,1240,image::ColorType::Rgba8).unwrap();
+                        image::save_buffer(dest.join(format!("settings-{}-{tab}.png",if dark{"dark"}else{"light"})),&rgba,690,1300,image::ColorType::Rgba8).unwrap();
                     }
                 }
                 raster.free_textures(&root.textures_delta);raster.free_textures(&child.textures_delta);
             }
         }
+    }
+}
+
+#[test]
+fn mail_account_row_labels_share_the_control_centerline() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();h.app.open_settings();h.app.settings_tab=7;h.ctx.set_embed_viewports(false);
+    // 两张卡片，备注都留空让提示文字画出来：备注行 / 标签颜色行各有两处，正好逐对配对。
+    h.app.mail.accounts=vec![
+        crate::mail::Account{custom:None,email:"demo@example.test".into(),provider:crate::mail::Provider::Mail163,enabled:true,note:String::new()},
+        crate::mail::Account{custom:None,email:"demo2@example.test".into(),provider:crate::mail::Provider::Qq,enabled:true,note:String::new()},
+    ];
+    let output=std::sync::Arc::new(std::sync::Mutex::new(None));let capture=output.clone();
+    egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
+        let id=viewport.ids.this;
+        let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(690.0,1300.0))),
+            viewports:std::iter::once((id,egui::ViewportInfo{native_pixels_per_point:Some(1.0),..Default::default()})).collect(),..Default::default()};
+        *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
+    });
+    let mut raster=crate::preview_raster::Raster::new(690,1300);
+    let mut child=None;
+    for _ in 0..3 {
+        let root=h.ctx.run(Default::default(),|ctx|h.app.settings_ui(ctx,false));
+        let rendered=output.lock().unwrap().take();
+        raster.update_textures(&root.textures_delta);
+        if let Some(ref shown)=rendered{raster.update_textures(&shown.textures_delta);}
+        child=rendered;
+    }
+    let child=child.expect("设置页必须渲染成独立视口");
+    if let Some(dest)=std::env::var_os("DAOZAI_MAIL_ACCOUNT_PREVIEW") {
+        let dest=std::path::PathBuf::from(dest);std::fs::create_dir_all(&dest).unwrap();
+        raster.buf.fill([0.0,0.0,0.0,1.0]);
+        raster.draw(&h.ctx.tessellate(child.shapes.clone(),child.pixels_per_point),child.pixels_per_point);
+        let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+        image::save_buffer(dest.join("mail-accounts.png"),&rgba,690,1300,image::ColorType::Rgba8).unwrap();
+    }
+    let centers=|needle:&str|child.shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Text(t) if t.galley.text()==needle=>Some(t.visual_bounding_rect().center().y),_=>None}).collect::<Vec<_>>();
+    let sorted=|mut v:Vec<f32>|{v.sort_by(|a,b|a.partial_cmp(b).unwrap());v};
+    let all=||child.shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Text(t)=>Some(t.galley.text().to_owned()),_=>None}).collect::<Vec<_>>().join(" | ");
+    // 「备注」在页面里还有一处（添加邮箱表单），所以按「每个控件找最近的同名标签」配对，
+    // 同行的偏差只有几像素，跨行的距离有上百像素，配错不了。
+    for (name,label,value) in [("备注提示","备注","工作 / 个人 / 测试"),("备注说明","备注","用于在灵动岛区分来源"),("标签颜色","标签颜色","✓ 自动")] {
+        let a=centers(label);let b=sorted(centers(value));
+        assert!(!b.is_empty(),"{name}：{label} / {value} 没有画出来；页面文字：{}",all());
+        for y in &b {
+            let nearest=a.iter().copied().fold(f32::INFINITY,|best,x|if (x-y).abs()<(best-y).abs(){x}else{best});
+            assert!((nearest-y).abs()<1.0,"{name} 未垂直居中：标签 {nearest:.1} / 控件 {y:.1}");
+        }
+    }
+    // 色块：只有调色板里的 8 个颜色是这么画的，fill 命中即认为是标签颜色按钮。
+    // 它们和「标签颜色」也在同一行，同样必须中线重合 —— 之前只钉了文字，
+    // 结果文字对上了、色块整排掉到下一行，截图里看就是一高一低。
+    let swatches=sorted(child.shapes.iter().filter_map(|s|match &s.shape{
+        egui::Shape::Rect(r) if crate::mail_view::PALETTE.contains(&r.fill)=>Some(r.rect.center().y),_=>None,
+    }).collect::<Vec<_>>());
+    assert_eq!(swatches.len(),16,"两张卡各 8 个色块，实际画出 {} 个",swatches.len());
+    let labels=centers("标签颜色");
+    for y in &swatches {
+        let nearest=labels.iter().copied().fold(f32::INFINITY,|best,x|if (x-y).abs()<(best-y).abs(){x}else{best});
+        assert!((nearest-y).abs()<1.0,"标签颜色色块未与标签同中线：标签 {nearest:.1} / 色块 {y:.1}");
     }
 }
 
@@ -5900,7 +6104,7 @@ fn mail_report_open_settings_matrix() {
                 let _=ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx));
             });
             for count in [0,1,6] {
-                h.app.mail.accounts=crate::mail::Provider::ALL.into_iter().take(count).enumerate().map(|(i,provider)|crate::mail::Account {custom: None, email:format!("probe{i}@example.invalid"),provider,enabled:false}).collect();
+                h.app.mail.accounts=crate::mail::Provider::ALL.into_iter().take(count).enumerate().map(|(i,provider)|crate::mail::Account {custom: None, email:format!("probe{i}@example.invalid"),provider,enabled:false, note: String::new() }).collect();
                 for provider in crate::mail::Provider::ALL {
                     h.app.mail.form.provider=provider;h.app.open_mail_settings();
                     for _ in 0..3 {let _=h.ctx.run(Default::default(),|ctx|h.app.settings_ui(ctx,false));}
@@ -6269,7 +6473,7 @@ fn wechat_notifications_work_without_toast_permission_and_stop_when_disabled(){
 #[test]
 fn hidden_mail_masks_every_display_field_and_reveal_is_temporary(){
  let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
- let i=crate::mail::Item{received_unix:None,account:"a@example.com".into(),from:"123456".into(),subject:"验证码 123456".into(),time:"09:41".into(),code:Some("123456".into()),html:"<h1>验证码</h1><p><strong>123456</strong></p>".into(), summary:"验证码 1 2 3-4 5 6".into(),links:vec![],meeting:None,uid:42};
+ let i=crate::mail::Item{received_unix:None,account:"a@example.com".into(),from:"123456".into(),subject:"验证码 123456".into(),time:"09:41".into(),code:Some("123456".into()),html:"<h1>验证码</h1><p><strong>123456</strong></p>".into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:"验证码 1 2 3-4 5 6".into(),links:vec![],meeting:None,uid:42};
  h.app.mail.privacy.observe(&i,true,0.0,100);h.app.t=61.0;
  let shown=h.app.display_mail(&i);assert!(shown.code.is_none());for text in [shown.from.as_str(),shown.subject.as_str(),shown.summary.as_ref()]{assert!(!text.contains('1'));}
  assert!(shown.html.is_empty(),"隐藏验证码时 HTML 原文也必须隐藏");
@@ -6363,8 +6567,8 @@ fn mailbox_wheel_stays_in_list_with_hidden_cards_and_short_lists() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     for mode in 0..4 {for count in [0,1,3,8] {
         let mut h=H::new();
-        h.app.mail.accounts=vec![crate::mail::Account{custom:None,email:"test@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
-        h.app.mail.recent=(1..=count).map(|uid|crate::mail::Item{received_unix:None,account:"test@qq.com".into(),from:format!("来源 {uid}"),subject:format!("邮件 {uid}"),time:"11-04 09:41".into(),code:if mode==0{None}else{Some(format!("{uid:06}"))},html: String::new().into(), summary:String::new().into(),links:vec![],meeting:None,uid}).collect();
+        h.app.mail.accounts=vec![crate::mail::Account{custom:None,email:"test@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true, note: String::new() }];
+        h.app.mail.recent=(1..=count).map(|uid|crate::mail::Item{received_unix:None,account:"test@qq.com".into(),from:format!("来源 {uid}"),subject:format!("邮件 {uid}"),time:"11-04 09:41".into(),code:if mode==0{None}else{Some(format!("{uid:06}"))},html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:String::new().into(),links:vec![],meeting:None,uid}).collect();
         if mode>=2 {for item in h.app.mail.recent.clone(){h.app.mail.privacy.observe(&item,true,h.app.t,chrono::Utc::now().timestamp());}}
         h.app.settings.mail_code=mode!=2;
         let cursor=H::local(if mode==3 && count>0{220.0}else{65.0},90.0);
@@ -6379,8 +6583,8 @@ fn mailbox_wheel_stays_in_list_with_hidden_cards_and_short_lists() {
 #[test]
 fn mailbox_compact_third_row_stays_visible_below_the_toolbar(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.app.mail.accounts=vec![crate::mail::Account {custom:None,email:"test@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
-    h.app.mail.recent=(1..=6).map(|uid|crate::mail::Item {received_unix:None,account:"test@qq.com".into(),from:format!("来源 {uid}"),subject:format!("邮件 {uid}"),time:"09:41".into(),code:None,html: String::new().into(), summary:String::new().into(),links:vec![],meeting:None,uid}).collect();
+    h.app.mail.accounts=vec![crate::mail::Account {custom:None,email:"test@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true, note: String::new() }];
+    h.app.mail.recent=(1..=6).map(|uid|crate::mail::Item {received_unix:None,account:"test@qq.com".into(),from:format!("来源 {uid}"),subject:format!("邮件 {uid}"),time:"09:41".into(),code:None,html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:String::new().into(),links:vec![],meeting:None,uid}).collect();
     h.app.show_page(5);h.hover(H::local(200.0,90.0),1.0);
     let third=h.ctx.read_response(egui::Id::new(("card",true,("mail-row",3u32,"test@qq.com")))).expect("第三封邮件应完整可见");
     assert!(third.rect.bottom()<=H::local(380.0,122.0).y+0.5);
@@ -7042,8 +7246,8 @@ fn workbuddy_balance_gallery(){
 #[test]
 fn new_mail_notification_masks_codes_in_sender_and_history(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.app.mail.accounts=vec![crate::mail::Account{email:"a@example.com".into(),provider:crate::mail::Provider::Qq,custom:None,enabled:true}];
-    let item=crate::mail::Item{received_unix:None,account:"a@example.com".into(),from:"登录验证码 123456".into(),subject:"验证码 123456".into(),time:"09:41".into(),code:Some("123456".into()),html: String::new().into(), summary:"验证码 123456".into(),links:vec![],meeting:None,uid:42};
+    h.app.mail.accounts=vec![crate::mail::Account{email:"a@example.com".into(),provider:crate::mail::Provider::Qq,custom:None,enabled:true, note: String::new() }];
+    let item=crate::mail::Item{received_unix:None,account:"a@example.com".into(),from:"登录验证码 123456".into(),subject:"验证码 123456".into(),time:"09:41".into(),code:Some("123456".into()),html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new(), summary:"验证码 123456".into(),links:vec![],meeting:None,uid:42};
     h.app.mail_event(crate::mail::Event::Mail{item,new:true});
     assert!(!h.app.history.is_empty());
     for alert in h.app.alerts.iter().chain(h.app.history.iter()) {
@@ -7726,8 +7930,8 @@ fn wheel_short_lists_turn_pages(){
 #[test]
 fn mail_reading_wheel_over_headers_never_turns_pages(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.app.mail.accounts=vec![crate::mail::Account{custom:None,email:"work@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
-    h.app.mail.recent=vec![crate::mail::Item{html:String::new().into(),received_unix:None,account:"work@qq.com".into(),from:"产品团队".into(),subject:"阅读中的邮件".into(),time:"09:41".into(),code:None,summary:"正文内容。".repeat(200).into(),links:vec![],meeting:None,uid:42}];
+    h.app.mail.accounts=vec![crate::mail::Account{custom:None,email:"work@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true, note: String::new()}];
+    h.app.mail.recent=vec![crate::mail::Item{received_unix:None,account:"work@qq.com".into(),from:"产品团队".into(),subject:"阅读中的邮件".into(),time:"09:41".into(),code:None,summary:"正文内容。".repeat(200).into(),links:vec![],meeting:None,uid:42,html: String::new().into(), images: Default::default(), message_id: String::new(), from_addr: String::new()}];
     h.app.show_page(5);h.app.mail.open_uid=Some(("work@qq.com".into(),42));
     for (x,y) in [(210.0,18.0),(200.0,48.0),(200.0,73.0),(200.0,92.0),(270.0,214.0)]{
         for delta in [-120.0,120.0]{
@@ -7782,9 +7986,9 @@ fn new_mail_preserves_an_explicit_reveal_in_the_trash(){
 
 fn managed_mail_fixture()->H{
     use crate::mail_manage::{Folder,Snapshot};
-    let mut h=H::new();h.app.settings.mail_sync_operations=true;let account=crate::mail::Account{custom:None,email:"manage@example.com".into(),provider:crate::mail::Provider::Qq,enabled:true};
+    let mut h=H::new();h.app.settings.mail_sync_operations=true;let account=crate::mail::Account{custom:None,email:"manage@example.com".into(),provider:crate::mail::Provider::Qq,enabled:true, note: String::new()};
     h.app.mail.accounts=vec![account.clone()];
-    h.app.mail.recent=(1..=3).map(|uid|crate::mail::Item{html:String::new().into(),received_unix:None,account:account.email.clone(),from:format!("发件人 {uid}"),subject:format!("测试邮件 {uid}"),time:format!("09:4{uid}"),code:None,summary:"完整的测试邮件正文。".repeat(10).into(),links:vec![],meeting:None,uid}).collect();
+    h.app.mail.recent=(1..=3).map(|uid|crate::mail::Item{received_unix:None,account:account.email.clone(),from:format!("发件人 {uid}"),subject:format!("测试邮件 {uid}"),time:format!("09:4{uid}"),code:None,summary:"完整的测试邮件正文。".repeat(10).into(),links:vec![],html:String::new().into(),images:Default::default(),message_id:String::new(),from_addr:String::new(),meeting:None,uid}).collect();
     h.app.mail.manage.identities.insert(account.email.clone(),account.clone());
     h.app.mail.manage.data.insert((account.email,Folder::Inbox),Snapshot{validity:7,entries:vec![(1,false),(2,true),(3,true)],items:vec![]});
     h.app.show_page(5);h.hover(H::local(220.0,80.0),1.0);h
@@ -8440,4 +8644,113 @@ fn every_module_settings_tab_maps_to_its_page(){
         if let Some(page)=crate::extras::settings_tab_module(tab) {assert!(crate::app::PAGE_NAMES[page].chars().next()==titles[tab].chars().next(),"{} ↔ {}",titles[tab],crate::app::PAGE_NAMES[page]);}
     }
     pages.sort();assert_eq!(pages,(0..crate::app::PAGE_NAMES.len()).collect::<Vec<_>>(),"每个功能页面各有一个设置分页");
+}
+
+#[test]
+#[ignore="按需导出真实 iCloud 邮件的实际画面（读取 .tmpwork 中的抓取结果）"]
+fn mail_reader_real_icloud_gallery(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let html=std::fs::read_to_string(".tmpwork/mail-qq-iCloud.html").expect("先运行 diagnose_capabilities_and_dump_html");
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_MAIL_GALLERY_DIR").expect("需指定预览目录"));std::fs::create_dir_all(&dest).unwrap();
+    let mut h=H::new();h.ctx.set_embed_viewports(true);
+    h.app.mail.reading=Some(crate::mail::Item{received_unix:None,account:"demo2@example.test".into(),from:"iCloud".into(),
+        subject:"你的 iCloud 储存空间已满".into(),time:"11-07 07:53".into(),code:None,
+        html:html.into(),summary:String::new().into(),
+        links:vec![],meeting:None,images:Default::default(),message_id:String::new(),from_addr:String::new(),uid:21});
+    let (w,height)=(700,620);let ppp=1.5;
+    let mut raster=crate::preview_raster::Raster::new((w as f32*ppp)as usize,(height as f32*ppp)as usize);
+    for f in 0..=8{
+        let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(w as f32,height as f32))),time:Some(f as f64/60.0),viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(ppp),..Default::default()})).collect(),..Default::default()};
+        let out=h.ctx.run(raw,|ctx|h.app.mail_reader_ui(ctx));raster.update_textures(&out.textures_delta);
+        if f==8{raster.buf.fill([0.0,0.0,0.0,1.0]);raster.draw(&h.ctx.tessellate(out.shapes,out.pixels_per_point),out.pixels_per_point);let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);image::save_buffer(dest.join("mail-reader-real-icloud.png"),&rgba,(w as f32*ppp)as u32,(height as f32*ppp)as u32,image::ColorType::Rgba8).unwrap();}
+        raster.free_textures(&out.textures_delta);
+    }
+}
+
+#[test]
+#[ignore="按需导出测试邮件的实际画面（读取 .tmpwork/received-163.html）"]
+fn mail_reader_mailtest_gallery(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let html=std::fs::read_to_string(".tmpwork/received-163.html").expect("先运行 verify_mailtest_arrival");
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_MAIL_GALLERY_DIR").expect("需指定预览目录"));std::fs::create_dir_all(&dest).unwrap();
+    let mut h=H::new();h.ctx.set_embed_viewports(true);
+    // 内嵌图：模拟服务端下发的 cid 内容。
+    let mut logo=image::RgbaImage::new(320,64);
+    for (x,y,pixel) in logo.enumerate_pixels_mut(){*pixel=image::Rgba([(30+x*180/320) as u8,(90+y*90/64) as u8,(220-x*60/320) as u8,255]);}
+    let mut bytes=Vec::new();
+    image::DynamicImage::ImageRgba8(logo).write_to(&mut std::io::Cursor::new(&mut bytes),image::ImageFormat::Png).unwrap();
+    let mut embedded=std::collections::HashMap::new();
+    embedded.insert("daozai-logo".to_string(),std::sync::Arc::new(bytes));
+    h.app.mail.reading=Some(crate::mail::Item{received_unix:None,account:"demo@example.test".into(),from:"岛仔测试".into(),
+        subject:"【岛仔测试】多格式 + 图片 + 链接".into(),time:"11-07 23:52".into(),code:None,
+        html:html.into(),summary:String::new().into(),
+        links:vec![],meeting:None,images:embedded.into(),message_id:String::new(),from_addr:String::new(),uid:30});
+    let (w,height)=(700,1400);let ppp=1.5;
+    let mut raster=crate::preview_raster::Raster::new((w as f32*ppp)as usize,(height as f32*ppp)as usize);
+    for f in 0..=8{
+        let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(w as f32,height as f32))),time:Some(f as f64/60.0),viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(ppp),..Default::default()})).collect(),..Default::default()};
+        let out=h.ctx.run(raw,|ctx|h.app.mail_reader_ui(ctx));raster.update_textures(&out.textures_delta);
+        if f==8{raster.buf.fill([0.0,0.0,0.0,1.0]);raster.draw(&h.ctx.tessellate(out.shapes,out.pixels_per_point),out.pixels_per_point);let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);image::save_buffer(dest.join("mail-reader-mailtest.png"),&rgba,(w as f32*ppp)as u32,(height as f32*ppp)as u32,image::ColorType::Rgba8).unwrap();}
+        raster.free_textures(&out.textures_delta);
+    }
+}
+
+/// 预览卡「● 163 邮箱」：圆点必须和标签文字同一条水平中线。
+/// 这里不看布局矩形，直接量光栅化后的像素——用户看到的是什么就校验什么。
+#[test]
+fn mail_preview_card_dot_is_centered_on_the_tag_text(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let accounts=vec![crate::mail::Account{email:"demo@example.test".into(),provider:crate::mail::Provider::Mail163,custom:None,enabled:true,note:String::new()}];
+    let item=crate::mail::Item{
+        account:"demo@example.test".into(),from:"示例银行".into(),subject:"示例银行账单".into(),
+        time:"11-08 15:24".into(),code:None,received_unix:None,
+        summary:std::sync::Arc::from("示例银行信用卡中心"),html:std::sync::Arc::from(""),
+        images:std::sync::Arc::new(std::collections::HashMap::new()),message_id:String::new(),
+        from_addr:String::new(),links:Vec::new(),meeting:None,uid:1,
+    };
+    // 标签色按邮箱哈希取，邮箱变颜色就变——必须从代码里取，不能写死。
+    let (_,tag_color,_,_)=crate::mail_view::full_tag(&accounts,&item.account);
+    let target=[tag_color.r() as f32/255.0,tag_color.g() as f32/255.0,tag_color.b() as f32/255.0];
+    let (w,hgt)=(420usize,240usize);
+    let mut h=H::new();
+    let mut raster=crate::preview_raster::Raster::new(w,hgt);
+    let mut shapes=Vec::new();
+    for _ in 0..3{
+        let out=h.ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(w as f32,hgt as f32))),..Default::default()},|ctx|{
+            egui::CentralPanel::default().show(ctx,|ui|crate::pages::mail_preview_card(ui,&item,&accounts));
+        });
+        raster.update_textures(&out.textures_delta);shapes=out.shapes;
+    }
+    raster.buf.fill([0.0,0.0,0.0,1.0]);
+    raster.draw(&h.ctx.tessellate(shapes,1.0),1.0);
+    if let Some(dir)=std::env::var_os("DAOZAI_CARD_PNG_DIR"){let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);image::save_buffer(std::path::PathBuf::from(dir).join("preview-card.png"),&rgba,w as u32,hgt as u32,image::ColorType::Rgba8).unwrap();}
+    // 只认标签色的像素：圆点和文字都是这个颜色，卡片底色/灰字/白字都排除在外。
+    // 命中判据是「各通道与标签色的最大差 < 0.10」，色板里哪个颜色都能用。
+    let dist=|p:[f32;4]|(p[0]-target[0]).abs().max((p[1]-target[1]).abs()).max((p[2]-target[2]).abs());
+    let mut hits=Vec::new();
+    for y in 0..hgt{for x in 0..w{
+        let p=raster.buf[y*w+x];
+        if dist(p)<0.10{hits.push((x,y));}
+    }}
+    assert!(hits.len()>20,"没找到标签色像素，配色或渲染变了: {} px",hits.len());
+    // 按 x 断开成簇：最左边一簇是圆点，右边一簇是「163 邮箱」。
+    let mut xs=hits.iter().map(|p|p.0).collect::<Vec<_>>();xs.sort_unstable();xs.dedup();
+    let mut clusters=vec![vec![xs[0]]];
+    for pair in xs.windows(2){
+        if pair[1]-pair[0]>2{clusters.push(Vec::new());}
+        clusters.last_mut().unwrap().push(pair[1]);
+    }
+    assert!(clusters.len()>=2,"圆点和文字粘在一起了，中间没有间隙");
+    // 用墨迹盒的中线对齐：同一阈值（0.06，只吃实心笔画、滤掉抗锯齿暗边）下
+    // 分别取圆点和文字的上下界，中线差就是人眼看到的偏移。
+    // 1 倍缩放下像素按 1px 取整，0.5px 已是视觉极限，阈值放到 0.75。
+    let bbox_mid=|lo:usize,hi:usize|{
+        let mut rows=hits.iter().filter(|p|p.0>=lo&&p.0<=hi).filter(|p|dist(raster.buf[p.1*w+p.0])<0.06).map(|p|p.1).collect::<Vec<_>>();
+        rows.sort_unstable();
+        let(a,b)=(*rows.first().unwrap() as f32,*rows.last().unwrap() as f32);
+        (a+b)/2.0
+    };
+    let dot=bbox_mid(clusters[0][0],*clusters[0].last().unwrap());
+    let text=bbox_mid(clusters[1][0],*clusters[1].last().unwrap());
+    assert!((dot-text).abs()<=0.75,"圆点中线 {dot:.2} 与文字中线 {text:.2} 差了 {:.2}px",(dot-text).abs());
 }

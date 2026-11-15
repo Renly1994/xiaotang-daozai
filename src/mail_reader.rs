@@ -116,6 +116,27 @@ impl App {
                     reveal=ui.button("主动查看验证码与正文 15 秒").clicked();
                 }
                 ui.separator();
+                // 内嵌 WebView2（DAOZAI_MAIL_EMBED=1）：正文交给浏览器内核，
+                // 这里把窗口剩下的矩形交给子窗口贴合，egui 只负责上面的头部。
+                let embed = crate::mail_webview::embed_enabled() && !item.html.trim().is_empty();
+                if embed {
+                    let top = ui.cursor().min.y + 2.0;
+                    let screen = ctx.screen_rect();
+                    let rect = [0.0, top, screen.width(), (screen.bottom() - top).max(60.0)];
+                    let key = (item.uid as u64) << 24 ^ crate::mail_view::shorten(&item.account, 8).len() as u64;
+                    let allow = self.settings.mail_auto_remote || self.mail.images.remote_enabled();
+                    let theme_of = crate::mail_view::WebTheme::from_u8(self.settings.mail_view_theme)
+                        .resolve(self.settings.settings_theme.dark(crate::settings_theme::system_dark(ctx)));
+                    let owned = item.clone();
+                    crate::mail_webview::embed_present(
+                        key,
+                        "邮件全文 · 岛仔",
+                        || crate::mail_html_view::document(&owned, allow, theme_of).host,
+                        rect,
+                        ctx.pixels_per_point(),
+                    );
+                    ui.label(egui::RichText::new("正文由浏览器内核渲染（实验）").size(10.5).color(Color32::from_gray(110)));
+                } else {
                 ui.label(egui::RichText::new("鼠标滚轮或拖动右侧滚动条查看全文").size(11.5).color(Color32::from_gray(160)));
                 ui.style_mut().spacing.scroll.floating=false;
                 egui::ScrollArea::vertical().id_salt(("mail-reader-body",&item.account,item.uid)).auto_shrink([false,false]).show(ui,|ui|{
@@ -131,12 +152,13 @@ impl App {
                         }
                     }
                 });
+                }
             });
         });
         if let Some(action)=action.filter(|_|self.mail_reader_ready(&raw,folder)){self.mail_manage_request(Some(&raw.account),folder,action);ctx.request_repaint();}
         if reveal{self.reveal_mail_code(&raw);ctx.request_repaint();}
         if let Some(event)=toggle{self.toggle_mail_event(&event);}
-        if close{self.mail.reading=None;}
+        if close{self.mail.reading=None;crate::mail_webview::embed_close();}
         if let Some(url)=link{self.pending.push(Cmd::OpenUrl(url));ctx.request_repaint();}
     }
 }

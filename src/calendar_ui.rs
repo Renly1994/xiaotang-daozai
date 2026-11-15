@@ -400,7 +400,7 @@ impl App {
         }
         if remaining_count>4 {c.text(376.0,208.0,&format!("列表 {}–{} / {}",first+1,(first+4).min(remaining_count),remaining_count),7.0,W::Regular,muted,H::Right);}
         self.calendar.view.first=first;
-        if toggle_ended{self.calendar.view.show_ended=!show_ended;self.calendar.view.first=0;}
+        if toggle_ended{self.calendar.view.show_ended= !show_ended;self.calendar.view.first=0;}
         if let Some(key)=clicked{self.calendar.view.focus=Some(key);}
         if let Some(uid)=edit_local{self.open_calendar_editor(Some(&uid));}
         if add_local{self.open_calendar_editor(None);}
