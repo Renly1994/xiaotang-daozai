@@ -554,6 +554,13 @@ pub(crate) struct CalendarState {
     /// 导入 .ics 文件的结果说明。
     pub import_note: String,
     pub warning:String,
+    /// vivo 办公套件：本机只读缓存映射出的日程。
+    /// 与 `local` 分开保存，避免编辑本机日程时被写回 local-calendar.json。
+    pub vivo: Vec<crate::local_calendar::Entry>,
+    pub vivo_error: String,
+    pub vivo_last_sync_ms: i64,
+    /// 上次只读重扫的时刻；-30 表示需要立即刷新。
+    pub vivo_checked: f64,
 }
 
 pub(crate) struct CalendarFeed {
@@ -593,7 +600,7 @@ impl CalendarState {
             server: config.as_ref().filter(|cfg| cfg.provider.custom_server()).and_then(|cfg| cfg.server.clone()).unwrap_or_default(), ..Default::default() };
         let feeds = calendar::load_configs().into_iter().map(CalendarFeed::new).collect();
         let (local,local_error)=match crate::local_calendar::load(){Ok(events)=>(events,String::new()),Err(error)=>(vec![],error)};
-        Self { config, form, feeds, local, local_error, ..Default::default() }
+        Self { config, form, feeds, local, local_error, vivo_checked: -30.0, ..Default::default() }
     }
 
 }
@@ -2947,14 +2954,38 @@ impl App {
         let now_ts = chrono::Local::now().timestamp();
         let mut picks = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // vivo 办公套件：每 30 秒只读重扫本机缓存；与云端的同步由办公套件自己负责。
+        if self.settings.vivo_calendar && self.t - self.calendar.vivo_checked >= 30.0 {
+            self.calendar.vivo_checked = self.t;
+            match crate::vivo_calendar::load() {
+                Ok(snapshot) => {
+                    self.calendar.vivo = snapshot.entries;
+                    self.calendar.vivo_last_sync_ms = snapshot.last_sync_ms;
+                    self.calendar.vivo_error.clear();
+                }
+                Err(error) => {
+                    self.calendar.vivo.clear();
+                    self.calendar.vivo_error = error;
+                }
+            }
+        } else if !self.settings.vivo_calendar
+            && (!self.calendar.vivo.is_empty() || !self.calendar.vivo_error.is_empty())
+        {
+            self.calendar.vivo.clear();
+            self.calendar.vivo_error.clear();
+            self.calendar.vivo_checked = -30.0;
+        }
         // 会议提醒点开后进入日程页；日程模块关闭时不再提醒（含邮件邀请）。
         let calendar_on=self.module_on(CALENDAR_PAGE);
-        for entry in self.calendar.local.iter().filter(|_|calendar_on) {
+        for (entry, source) in self.calendar.local.iter().map(|entry| (entry, "本机日程"))
+            .chain(self.calendar.vivo.iter().map(|entry| (entry, "vivo 日历")))
+            .filter(|_| calendar_on)
+        {
             let Some(at)=entry.reminder_at() else{continue;};
             let key=calendar::dedupe_key(&entry.event);
             let cutoff=if entry.event.all_day{at+60}else{entry.event.start+60};
             if now_ts>=at && now_ts<cutoff && !self.mail.fired.contains(&key) && seen.insert(key.clone()) {
-                picks.push((key,entry.event.clone(),"本机日程".into(),CALENDAR_PAGE));
+                picks.push((key,entry.event.clone(),source.into(),CALENDAR_PAGE));
             }
         }
         for (m,provider) in self.calendar_work_events(None).into_iter().filter(|_|calendar_on) {

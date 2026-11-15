@@ -19,6 +19,7 @@ pub mod bt;
 pub mod calendar;
 mod calendar_ui;
 mod local_calendar;
+mod vivo_calendar;
 mod calendar_editor;
 pub mod glass;
 pub mod skin_paint;
