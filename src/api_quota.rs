@@ -10,14 +10,14 @@ fn endpoint(provider:Provider,source:&str)->Result<String,String>{
         _=>Err("该服务不使用此连接方式".into())
     }
 }
-fn request(agent:&ureq::Agent,provider:Provider,source:&str,key:&str,cancel:Option<&std::sync::atomic::AtomicBool>)->Result<Snapshot,(String,u64)>{
+fn request(agent:&ureq::Agent,provider:Provider,source:&str,key:&str,use_favicon:bool,cancel:Option<&std::sync::atomic::AtomicBool>)->Result<Snapshot,(String,u64)>{
     if cancel.is_some_and(|c|c.load(std::sync::atomic::Ordering::Acquire)){return Err(("已取消连接".into(),0));}
     let source=endpoint(provider,source).map_err(|e|(e,0))?;
     match provider {
         Provider::OpenCodeGo=>plans::request(agent,PlanProvider::OpenCodeGo,key),
         Provider::MiniMax=>plans::request(agent,if source=="global"{PlanProvider::MiniMaxGlobal}else{PlanProvider::MiniMaxChina},key),
         Provider::Glm=>plans::request(agent,if source=="global"{PlanProvider::GlmGlobal}else{PlanProvider::GlmChina},key),
-        Provider::NewApi|Provider::OneApi|Provider::Sub2Api=>relay::request_cancellable(agent,match provider{Provider::NewApi=>Kind::NewApi,Provider::OneApi=>Kind::OneApi,_=>Kind::Sub2Api},&source,key,||cancel.is_some_and(|c|c.load(std::sync::atomic::Ordering::Acquire))),
+        Provider::NewApi|Provider::OneApi|Provider::Sub2Api=>relay::request_cancellable(agent,match provider{Provider::NewApi=>Kind::NewApi,Provider::OneApi=>Kind::OneApi,_=>Kind::Sub2Api},&source,key,use_favicon,||cancel.is_some_and(|c|c.load(std::sync::atomic::Ordering::Acquire))),
         _=>Err(("不支持的 API 服务".into(),0))
     }
 }
@@ -77,9 +77,9 @@ pub fn cleanup_pending(config:&Config)->Result<(),String>{
     let retained=retained_cleanup(slots,&active,delete_slot);journal_save(&retained)?;
     if retained.is_empty(){Ok(())}else{Err("账号配置已保留，部分旧凭据尚未清理；下次启动会重试".into())}
 }
-pub fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
+pub fn fetch(agent:&ureq::Agent,account:&Account,use_favicon:bool)->Result<Snapshot,(String,u64)>{
     let slot=account.slot.as_deref().ok_or(("请连接 API Key".into(),0))?;
-    request(agent,account.provider,&account.source.to_string_lossy(),&load(slot).map_err(|e|(e,0))?,None)
+    request(agent,account.provider,&account.source.to_string_lossy(),&load(slot).map_err(|e|(e,0))?,use_favicon,None)
 }
 
 // Validation never persists a credential. Closing the dialog drops this result and
@@ -123,9 +123,10 @@ impl Connect {
                 let source=if provider.relay(){relay::normalize_base_url(&source)?}else{endpoint(provider,&source)?};
                 let key=key.trim();if key.is_empty()||key.len()>8192||key.chars().any(char::is_whitespace)||key.chars().any(char::is_control){return Err("请输入有效的 API Key".into());}
                 let (provider,snapshot)=if automatic{
-                    let (kind,snapshot)=relay::detect_cancellable(super::http_agent_with_connect_timeout,&source,key,||worker_cancel.load(std::sync::atomic::Ordering::Acquire)).map_err(|e|e.0)?;
+                    // 新账号尚未保存，图标开关只会是关；连接成功后再由刷新按账号设置决定。
+                    let (kind,snapshot)=relay::detect_cancellable(super::http_agent_with_connect_timeout,&source,key,false,||worker_cancel.load(std::sync::atomic::Ordering::Acquire)).map_err(|e|e.0)?;
                     (match kind{Kind::NewApi=>Provider::NewApi,Kind::OneApi=>Provider::OneApi,Kind::Sub2Api=>Provider::Sub2Api},snapshot)
-                }else{(provider,request(&super::http_agent(),provider,&source,key,Some(&worker_cancel)).map_err(|e|e.0)?)};
+                }else{(provider,request(&super::http_agent(),provider,&source,key,false,Some(&worker_cancel)).map_err(|e|e.0)?)};
                 if worker_cancel.load(std::sync::atomic::Ordering::Acquire){return Err("已取消连接".into());}
                 let alias=if alias.trim().is_empty(){if automatic{url::Url::parse(&source).ok().and_then(|u|u.host_str().map(str::to_owned)).unwrap_or_else(||"中转站".into())}else{provider.name().into()}}else{alias.trim().to_owned()};
                 Ok(Validated{provider,source,alias,key:key.into(),snapshot})

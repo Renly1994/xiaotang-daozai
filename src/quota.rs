@@ -56,8 +56,8 @@ impl Accent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Account {pub id:String, pub provider:Provider, pub alias:String, pub source:PathBuf, pub slot:Option<String>, pub enabled:bool, pub pinned:bool}
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Config {pub enabled:bool, pub compact:bool, pub selected:String, pub accounts:Vec<Account>, pub colors:HashMap<String,Accent>}
-impl Default for Config {fn default()->Self {Self{enabled:true,compact:true,selected:String::new(),accounts:vec![],colors:HashMap::new()}}}
+pub struct Config {pub enabled:bool, pub compact:bool, pub selected:String, pub accounts:Vec<Account>, pub colors:HashMap<String,Accent>, pub currency:HashMap<String,String>, pub site_icon:HashMap<String,bool>}
+impl Default for Config {fn default()->Self {Self{enabled:true,compact:true,selected:String::new(),accounts:vec![],colors:HashMap::new(),currency:HashMap::new(),site_icon:HashMap::new()}}}
 impl Config {
     pub fn load()->Self {
         let path=crate::model::config_dir().join("ai-quota.json");
@@ -69,9 +69,13 @@ impl Config {
             id:a["id"].as_str()?.into(),provider:Provider::parse(a["provider"].as_str()?)?,alias:a["alias"].as_str()?.into(),source:PathBuf::from(a["source"].as_str()?),slot:a["slot"].as_str().map(str::to_owned),enabled:a["enabled"].as_bool().unwrap_or(true),pinned:a["pinned"].as_bool().unwrap_or(false)
         })).collect();
         let colors=v["colors"].as_object().into_iter().flatten().filter_map(|(id,value)|{let color=Accent::parse(value.as_str()?);(color!=Accent::Brand).then(||(id.clone(),color))}).collect();
-        Self{enabled:v["enabled"].as_bool().unwrap_or(true),compact:v["compact"].as_bool().unwrap_or(true),selected:v["selected"].as_str().unwrap_or_default().into(),accounts,colors}
+        // 手动货币符号覆盖：只在站点自报值与实际不符时才需要，缺省即自动判断。
+        let currency=v["currency"].as_object().into_iter().flatten().filter_map(|(id,value)|Some((id.clone(),value.as_str()?.to_owned()))).filter(|(_,s)|!s.is_empty()&&s.chars().count()<=4).collect();
+        // 站点图标抓取默认关闭；只有显式开启的账号才会记录 true。
+        let site_icon=v["site_icon"].as_object().into_iter().flatten().filter_map(|(id,value)|Some((id.clone(),value.as_bool()?))).filter(|(_,on)|*on).collect();
+        Self{enabled:v["enabled"].as_bool().unwrap_or(true),compact:v["compact"].as_bool().unwrap_or(true),selected:v["selected"].as_str().unwrap_or_default().into(),accounts,colors,currency,site_icon}
     }
-    fn json(&self)->Value {let colors:serde_json::Map<String,Value>=self.colors.iter().map(|(id,color)|(id.clone(),json!(color.key()))).collect();json!({"enabled":self.enabled,"compact":self.compact,"selected":self.selected,"colors":colors,"accounts":self.accounts.iter().map(|a|json!({"id":a.id,"provider":a.provider.name(),"alias":a.alias,"source":a.source,"slot":a.slot,"enabled":a.enabled,"pinned":a.pinned})).collect::<Vec<_>>()})}
+    fn json(&self)->Value {let colors:serde_json::Map<String,Value>=self.colors.iter().map(|(id,color)|(id.clone(),json!(color.key()))).collect();let currency:serde_json::Map<String,Value>=self.currency.iter().map(|(id,symbol)|(id.clone(),json!(symbol))).collect();let site_icon:serde_json::Map<String,Value>=self.site_icon.iter().map(|(id,on)|(id.clone(),json!(on))).collect();json!({"enabled":self.enabled,"compact":self.compact,"selected":self.selected,"colors":colors,"currency":currency,"site_icon":site_icon,"accounts":self.accounts.iter().map(|a|json!({"id":a.id,"provider":a.provider.name(),"alias":a.alias,"source":a.source,"slot":a.slot,"enabled":a.enabled,"pinned":a.pinned})).collect::<Vec<_>>()})}
     pub fn save(&self) {let _=self.save_checked();}
     pub(crate) fn save_checked(&self)->Result<(),String>{
         let dir=crate::model::config_dir();fs::create_dir_all(&dir).map_err(|_|"无法创建额度配置目录")?;
@@ -414,8 +418,14 @@ fn http_agent_with_connect_timeout(timeout:Duration)->ureq::Agent{
     let server=if text.contains('='){text.split(';').find_map(|s|s.trim().strip_prefix("https=")).or_else(||text.split(';').find_map(|s|s.trim().strip_prefix("http=")))?}else{text.trim()};
     if server.is_empty(){None}else if server.contains("://"){Some(server.into())}else{Some(format!("http://{server}"))}
 }
+/// 刷新线程只拿得到 Account，图标开关按 id 从已保存配置里读。
+///
+/// 这是只读查询；配置损坏时按关闭处理（宁可不抓，也不误抓）。
+fn site_icon_for(account:&Account)->bool{
+    Config::load().site_icon.get(&account.id).copied().unwrap_or(false)
+}
 fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
-    if account.provider.api_key(){return api::fetch(agent,account);}
+    if account.provider.api_key(){return api::fetch(agent,account,site_icon_for(account));}
     if account.provider==Provider::Claude{return claude::fetch(account).map_err(|e|(e,0));}
     if account.provider==Provider::ZCode{return zcode::fetch(agent,account).map_err(|e|(e,60));}
     if account.provider==Provider::WorkBuddy{return workbuddy::fetch(agent,account);}

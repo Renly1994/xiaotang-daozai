@@ -8107,7 +8107,7 @@ fn quota_acceptance_relay_subscription_exhausted_week_is_visible() {
 fn quota_acceptance_relay_key_only_response_shows_balance_unavailable(){
     use crate::quota::{Provider,Account,relay};
     let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    let snapshot=relay::parse_new_api(&serde_json::json!({"code":true,"data":{"object":"token_usage","unlimited_quota":true,"total_used":2}})).unwrap();
+    let snapshot=relay::parse_new_api(&serde_json::json!({"code":true,"data":{"object":"token_usage","unlimited_quota":true,"total_used":2}}),None).unwrap();
     h.app.quota.config.accounts=vec![Account{id:"relay".into(),provider:Provider::NewApi,alias:"测试站点".into(),source:"https://relay.example".into(),slot:None,enabled:true,pinned:true}];
     h.app.quota.config.selected="relay".into();h.app.quota.rows.insert("relay".into(),Ok(snapshot));h.app.show_page(6);h.hover(H::local(230.0,65.0),1.0);
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="余额暂不可查询")));
@@ -8250,7 +8250,7 @@ fn quota_acceptance_gallery() {
         plans::parse(plans::PlanProvider::OpenCodeGo,&json!({"usage":{"rolling":{"percent":25,"resetsAt":"2030-01-01T00:00:00Z"},"weekly":{"percent":50,"resetsAt":"2030-01-03T00:00:00Z"},"monthly":{"percent":100,"resetsAt":"2030-02-01T00:00:00Z"}}})).unwrap(),
         plans::parse(plans::PlanProvider::MiniMaxChina,&json!({"model_remains":[{"model_name":"general","current_interval_remaining_percent":62,"current_weekly_remaining_percent":35}]})).unwrap(),
         plans::parse(plans::PlanProvider::GlmChina,&json!({"data":{"limits":[{"type":"TOKENS_LIMIT","percentage":30,"unit":3,"number":5,"nextResetTime":1900000000000i64},{"type":"CREDIT_LIMIT","percentage":52,"unit":6,"number":1,"nextResetTime":1900604800000i64},{"type":"TIME_LIMIT","percentage":10}]}})).unwrap(),
-        relay::parse_new_api(&json!({"code":true,"data":{"object":"token_usage","total_granted":500000,"total_available":250000,"total_used":250000,"unlimited_quota":false,"user_quota":{"total_available":100000,"total_used":400000}}})).unwrap(),
+        relay::parse_new_api(&json!({"code":true,"data":{"object":"token_usage","total_granted":500000,"total_available":250000,"total_used":250000,"unlimited_quota":false,"user_quota":{"total_available":100000,"total_used":400000}}}),None).unwrap(),
         relay::parse_one_api(&json!({"object":"billing_subscription","hard_limit_usd":100}),&json!({"object":"list","total_usage":2500})).unwrap(),
         relay::parse_sub2api(&json!({"mode":"unrestricted","isValid":true,"unit":"USD","remaining":0,"subscription":{"daily_limit_usd":10,"daily_usage_usd":5,"weekly_limit_usd":20,"weekly_usage_usd":20}})).unwrap(),
     ];
