@@ -29,13 +29,19 @@ pub fn pids_named(exe:&str)->Vec<u32> {
 
 /// 仅以有限查询权限核对进程映像名（进程号可能被复用，每次使用前都要核对）。
 pub fn image_is(pid:u32,exe:&str)->bool {
-    if pid==0 {return false;}
+    image_path(pid).is_some_and(|path|exe_name(&path).eq_ignore_ascii_case(exe))
+}
+
+/// 用“查询有限信息”权限读取进程的可执行文件路径；只用于核对身份和读取版本号。
+pub fn image_path(pid:u32)->Option<String> {
+    if pid==0 {return None;}
     unsafe {
-        let Ok(process)=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,false,pid) else {return false};
+        let process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,false,pid).ok()?;
         let mut path=[0u16;1024];let mut length=path.len() as u32;
         let result=QueryFullProcessImageNameW(process,PROCESS_NAME_WIN32,windows::core::PWSTR(path.as_mut_ptr()),&mut length);
         let _=CloseHandle(process);
-        result.is_ok() && exe_name(&String::from_utf16_lossy(&path[..length as usize])).eq_ignore_ascii_case(exe)
+        result.ok()?;
+        Some(String::from_utf16_lossy(&path[..length as usize]))
     }
 }
 

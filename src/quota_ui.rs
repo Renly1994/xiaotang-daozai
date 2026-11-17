@@ -12,6 +12,8 @@ pub(crate) struct State {
     pub config:Config,pub rows:HashMap<String,Result<Snapshot,String>>,pub busy:HashSet<String>,
     pub provider:Provider,pub alias:String,pub source:String,pub note:String,
     pub relay_manual:bool,
+    pub relay_user_token:bool,pub relay_user_id:String,
+    pub relay_script:String,pub relay_access_token:String,
     pub connect_open:bool,pub connect_target:Option<String>,
     pub login:Option<quota::grok::Login>,
     pub workbuddy_connecting:Option<quota::workbuddy::Connect>,
@@ -256,6 +258,8 @@ impl App {
         if let Some(connect)=&mut self.quota.kiro_connecting{connect.cancel();}
         self.quota.connect_open=false;self.quota.connect_target=None;
         self.quota.api_connecting=None;self.quota.api_key.clear();
+        self.quota.relay_user_token=false;self.quota.relay_user_id.clear();
+        self.quota.relay_script.clear();self.quota.relay_access_token.clear();
         self.quota.gemini_connecting=None;
         self.quota.deepseek_key.clear();self.quota.gemini_cookie.clear();
         self.quota.doubao_connecting=None;self.quota.doubao_cookie.clear();
@@ -463,7 +467,7 @@ impl App {
             if let Some(q)=snapshot.and_then(|s|s.relay.as_ref()){
                 if let Some(amount)=q.primary(){
                     let exhausted=amount.remaining.is_some_and(|n|n<=0.0)&&!amount.unlimited;
-                    let title=if matches!(amount.scope,quota::relay::Scope::Account){if amount.label=="账户余额"{"账户余额".into()}else{"账户剩余额度".into()}}else{format!("{}剩余",amount.label)};
+                    let title=if matches!(amount.scope,quota::relay::Scope::Account){if amount.label=="账户余额"{"账户余额".into()}else{"账户剩余额度".into()}}else if amount.label=="剩余额度"{"剩余额度".into()}else{format!("{}剩余",amount.label)};
                     c.text(125.0,78.0,&c.fit(&title,11.0,W::Semibold,176.0),11.0,W::Semibold,theme::GRAY,H::Left);
                     let value=amount.remaining_text();let size=23.0*(225.0/c.text_w(&value,23.0,W::Semibold).max(225.0));
                     c.text(125.0,109.0,&value,size,W::Semibold,if exhausted{Color32::from_rgb(255,166,77)}else{theme::WHITE},H::Left);
@@ -475,7 +479,7 @@ impl App {
                 }else{
                     c.text(125.0,78.0,"账户余额与套餐额度",11.0,W::Semibold,theme::GRAY,H::Left);
                     c.text(125.0,109.0,q.unavailable_text(),18.0,W::Semibold,theme::WHITE,H::Left);
-                    c.text(125.0,132.0,"请到站点查看账户余额或套餐",10.5,W::Regular,theme::GRAY,H::Left);
+                    c.text(125.0,132.0,if a.provider==Provider::NewApi{"请检查查询模板或账户查询权限"}else{"请到站点查看账户余额或套餐"},10.5,W::Regular,theme::GRAY,H::Left);
                 }
                 if c.hit(310.0,60.0,47.0,22.0,("relay-details",&a.id)).on_hover_text("查看全部周期与额度").clicked(){
                     self.quota.detail_account=Some(a.id.clone());self.settings_tab=11;self.open_settings();
@@ -548,10 +552,15 @@ impl App {
         self.quota.note.clear();self.quota.api_key.clear();self.quota.deepseek_key.clear();self.quota.gemini_cookie.clear();self.quota.doubao_cookie.clear();self.quota.source.clear();self.quota.alias.clear();
         self.quota.gemini_email.clear();
         self.quota.relay_manual=id.is_some();
+        self.quota.relay_user_token=false;self.quota.relay_user_id.clear();
+        self.quota.relay_script.clear();self.quota.relay_access_token.clear();
         if let Some(a)=id.as_ref().and_then(|id|self.quota.config.accounts.iter().find(|a|&a.id==id)){
             self.quota.provider=a.provider;self.quota.alias=a.alias.clone();self.quota.source=a.source.to_string_lossy().into();
+            if let Some(user_id)=quota::api::new_api_user_id(a){self.quota.relay_user_token=true;self.quota.relay_user_id=user_id;}
+            if let Some(c)=quota::api::custom_credentials(a){self.quota.relay_script=c.script;self.quota.api_key=c.api_key;self.quota.relay_access_token=c.access_token;self.quota.relay_user_id=c.user_id;}
             if a.provider==Provider::Gemini{self.quota.gemini_email=quota::gemini::address(a).unwrap_or_default();}
         }
+        if self.quota.provider==Provider::RelayCustom&&self.quota.relay_script.is_empty(){self.quota.relay_script=quota::relay::script::DEFAULT_SCRIPT.into();}
         self.quota.connect_target=id;self.quota.connect_open=true;
     }
     fn quota_remove_account(&mut self,id:&str){
@@ -658,7 +667,8 @@ impl App {
         if !self.quota.connect_open{return;}let mut open=true;
         egui::Window::new(egui::RichText::new(if self.quota.connect_target.is_some(){"重新连接账号"}else{"添加账号"}).size(16.0).color(crate::settings_theme::color(ctx,Color32::from_gray(235),Color32::from_gray(35)))).id(egui::Id::new("quota-connect-window")).open(&mut open).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER,egui::Vec2::ZERO).default_width(410.0).show(ctx,|ui|{
             ui.set_max_width(410.0);ui.style_mut().wrap_mode=Some(egui::TextWrapMode::Wrap);ui.spacing_mut().item_spacing.y=9.0;ui.visuals_mut().override_text_color=Some(crate::settings_theme::color(ctx,Color32::from_gray(225),Color32::from_gray(35)));
-            egui::ScrollArea::vertical().max_height(460.0).show(ui,|ui|{
+            if self.quota.provider==Provider::RelayCustom{ui.set_min_height((ctx.screen_rect().height()-160.0).clamp(260.0,560.0));}
+            egui::ScrollArea::vertical().max_height(if self.quota.provider==Provider::RelayCustom{(ctx.screen_rect().height()-140.0).clamp(260.0,640.0)}else{460.0}).show(ui,|ui|{
             let previous_provider=self.quota.provider;
             let mut group=connection_group(self.quota.provider);
             ui.add_enabled_ui(self.quota.connect_target.is_none()&&self.quota.api_connecting.is_none()&&self.quota.kiro_connecting.is_none()&&self.quota.workbuddy_connecting.is_none()&&self.quota.deepseek_connecting.is_none()&&self.quota.gemini_connecting.is_none()&&self.quota.doubao_connecting.is_none()&&self.quota.login.is_none(),|ui|{
@@ -667,35 +677,47 @@ impl App {
                 }).response});
             });
             if group!=connection_group(previous_provider){self.quota.provider=group;}
-            ui.add_enabled_ui(self.quota.connect_target.is_none()&&self.quota.api_connecting.is_none()&&self.quota.kiro_connecting.is_none(),|ui|{
+            ui.add_enabled_ui((self.quota.connect_target.is_none()||group==Provider::NewApi)&&self.quota.api_connecting.is_none()&&self.quota.kiro_connecting.is_none(),|ui|{
                 if group==Provider::ZCode{
                     let mut use_key=self.quota.provider==Provider::Glm;
                     ui.horizontal(|ui|{ui.label("连接方式");ui.selectable_value(&mut use_key,false,"本机 ZCode");ui.selectable_value(&mut use_key,true,"套餐 API Key");});
                     self.quota.provider=if use_key{Provider::Glm}else{Provider::ZCode};
-                }else if group==Provider::NewApi{
+                }else if group==Provider::NewApi&&!self.quota.relay_user_token{
                     ui.collapsing("高级设置",|ui|{
                         settings_control_row(ui,"站点类型",76.0,|ui|{egui::ComboBox::from_id_salt("relay-protocol").selected_text(if self.quota.relay_manual{self.quota.provider.name()}else{"自动识别（推荐）"}).show_ui(ui,|ui|{
                             ui.selectable_value(&mut self.quota.relay_manual,false,"自动识别（推荐）");
-                            for p in [Provider::NewApi,Provider::OneApi,Provider::Sub2Api]{if ui.selectable_label(self.quota.relay_manual&&self.quota.provider==p,p.name()).clicked(){self.quota.relay_manual=true;self.quota.provider=p;}}
+                            for p in [Provider::RelayGeneral,Provider::NewApi,Provider::Sub2Api,Provider::RelayCustom,Provider::OneApi]{if ui.selectable_label(self.quota.relay_manual&&self.quota.provider==p,p.name()).clicked(){self.quota.relay_manual=true;self.quota.provider=p;}}
                         }).response});
                     });
                 }
             });
             if previous_provider!=self.quota.provider{
+                self.quota.relay_user_token=false;self.quota.relay_user_id.clear();
+                self.quota.relay_script=if self.quota.provider==Provider::RelayCustom{quota::relay::script::DEFAULT_SCRIPT.into()}else{String::new()};self.quota.relay_access_token.clear();
                 self.quota.doubao_cookie.clear();
                 self.quota.api_key.clear();self.quota.deepseek_key.clear();self.quota.note.clear();
                 if !(previous_provider.relay()&&self.quota.provider.relay()){self.quota.source.clear();}
             }
+            if self.quota.provider==Provider::NewApi{
+                ui.add_enabled_ui(self.quota.api_connecting.is_none(),|ui|{
+                    let previous=self.quota.relay_user_token;
+                    ui.horizontal_wrapped(|ui|{ui.label("连接方式");ui.selectable_value(&mut self.quota.relay_user_token,false,"API Key");ui.selectable_value(&mut self.quota.relay_user_token,true,"用户 Token（账户余额）");});
+                    if previous!=self.quota.relay_user_token{self.quota.api_key.clear();self.quota.relay_user_id.clear();self.quota.note.clear();}
+                });
+            }
             settings_control_row(ui,"备注",56.0,|ui|{ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.alias).vertical_align(egui::Align::Center).hint_text("例如：个人、工作、备用"))});
             if self.quota.provider.api_key(){
                 let provider=self.quota.provider;
-                ui.label("仅查询额度；API Key 保存在 Windows 凭据管理器，不写入配置或缓存。");
+                let user_token=provider==Provider::NewApi&&self.quota.relay_user_token;
+                let custom=provider==Provider::RelayCustom;
+                ui.label(if custom{"查询脚本和凭据由 Windows 加密保存在本机。"}else{"仅查询额度；凭据保存在 Windows 凭据管理器，不写入配置或缓存。"});
                 ui.add_enabled_ui(self.quota.api_connecting.is_none(),|ui|{
                     if provider.relay(){
                         if self.quota.connect_target.is_some(){ui.label(format!("使用已保存的 {} 接口",provider.name()));}
-                        else if !self.quota.relay_manual{ui.label("自动识别站点类型");}
-                        ui.label("填写站点网站地址和 API Key，读取站点提供的额度。");
+                        else if !self.quota.relay_manual&&!user_token{ui.label("自动识别站点类型");}
+                        ui.label(if custom{"支持粘贴 CC Switch 的 request / extractor 查询脚本。"}else if user_token{"填写 New API 站点个人设置中的 Access Token 和用户 ID，查询账户余额。"}else{"填写站点网站地址和 API Key，读取站点提供的额度。"});
                         ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.source).hint_text("https://你的站点地址（可含子目录）"));
+                        if user_token{settings_control_row(ui,"用户 ID",64.0,|ui|{ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.relay_user_id).hint_text("站点个人资料中的数字 ID"))});}
                     }else if matches!(provider,Provider::MiniMax|Provider::Glm){
                         if !matches!(self.quota.source.as_str(),"cn"|"global"){self.quota.source="cn".into();}
                         ui.horizontal(|ui|{
@@ -707,10 +729,18 @@ impl App {
                         });
                         ui.label(if provider==Provider::Glm{"请使用 Coding Plan 套餐 Key，非标准 API Key；本机 ZCode 登录无需填写密钥。"}else{"读取 MiniMax Coding Plan；按量 API 余额暂不包含。"});
                     }else{ui.label("查询 OpenCode Go 套餐使用率，不查询 Zen 按量余额。");}
-                    ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.api_key).password(true).hint_text("粘贴 API Key"));
-                    if ui.add_enabled(!self.quota.api_key.trim().is_empty()&&(!provider.relay()||!self.quota.source.trim().is_empty()),egui::Button::new("验证并连接")).clicked(){
+                    ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.api_key).password(true).hint_text(if custom{"API Key（脚本需要时填写）"}else if user_token{"粘贴用户 Access Token（非 API Key）"}else{"粘贴 API Key"}));
+                    if custom{
+                        ui.collapsing("其他脚本变量（可选）",|ui|{
+                            ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.relay_access_token).password(true).hint_text("Access Token"));
+                            ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.relay_user_id).hint_text("用户 ID"));
+                        });
+                        ui.label("查询脚本");
+                        ui.add_sized([ui.available_width(),180.0],egui::TextEdit::multiline(&mut self.quota.relay_script).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
+                    }
+                    if ui.add_enabled((custom||!self.quota.api_key.trim().is_empty())&&(!provider.relay()||!self.quota.source.trim().is_empty())&&(!user_token||!self.quota.relay_user_id.trim().is_empty())&&(!custom||!self.quota.relay_script.trim().is_empty()),egui::Button::new("验证并连接")).clicked(){
                         self.quota.note.clear();let source=self.quota.source.trim().into();let alias=self.quota.alias.clone();let key=std::mem::take(&mut self.quota.api_key);
-                        self.quota.api_connecting=Some(if provider.relay()&&self.quota.connect_target.is_none()&&!self.quota.relay_manual{quota::api::Connect::start_auto(source,alias,key)}else{quota::api::Connect::start(provider,source,alias,key)});
+                        self.quota.api_connecting=Some(if custom{quota::api::Connect::start_custom(source,alias,quota::relay::script::Credential{script:self.quota.relay_script.clone(),api_key:key,access_token:std::mem::take(&mut self.quota.relay_access_token),user_id:self.quota.relay_user_id.clone()})}else if user_token{quota::api::Connect::start_new_api_user(source,alias,key,self.quota.relay_user_id.clone())}else if provider.relay()&&!self.quota.relay_manual{quota::api::Connect::start_auto(source,alias,key)}else{quota::api::Connect::start(provider,source,alias,key)});
                     }
                 });
                 if self.quota.api_connecting.is_some(){ui.horizontal(|ui|{ui.spinner();ui.label("正在验证额度…");if ui.button("取消").clicked(){self.quota.api_connecting=None;self.quota.note="已取消，未保存密钥".into();}});ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));}

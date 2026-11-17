@@ -1,6 +1,6 @@
 [package]
 name = "daozai"
-version = "0.6.64"
+version = "0.6.65"
 edition = "2021"
 license = "MIT"
 description = "岛仔：Windows 顶部的桌面伙伴与信息岛"
@@ -50,12 +50,14 @@ url = "2"
 chrono = "0.4"
 chrono-tz = "0.10"
 rrule = "0.14.0"
+rquickjs = "0.8"
 
 # Linux 下 winit 至少要一个后端才能编译（只用于开发/录制，正式目标是 Windows）。
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "x11"] }
 
 [target.'cfg(windows)'.dependencies]
+ureq = { version = "2.12", default-features = false, features = ["native-tls"] }
 tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 clipboard-win = "5.4.3"
 wgpu = { version = "24", default-features = false, features = ["dx12"] }

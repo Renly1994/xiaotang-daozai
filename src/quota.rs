@@ -36,12 +36,12 @@ impl Discovery {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini, ZCode, WorkBuddy, DeepSeek, OpenCodeGo, MiniMax, Glm, NewApi, OneApi, Sub2Api, Kiro, Doubao }
+pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini, ZCode, WorkBuddy, DeepSeek, OpenCodeGo, MiniMax, Glm, NewApi, OneApi, Sub2Api, Kiro, Doubao, RelayGeneral, RelayCustom }
 impl Provider {
-    pub const ALL: [Self; 16] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini, Self::ZCode, Self::WorkBuddy, Self::DeepSeek, Self::OpenCodeGo, Self::MiniMax, Self::Glm, Self::NewApi, Self::OneApi, Self::Sub2Api, Self::Kiro, Self::Doubao];
-    pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini",Self::ZCode=>"ZCode",Self::WorkBuddy=>"WorkBuddy",Self::DeepSeek=>"DeepSeek",Self::OpenCodeGo=>"OpenCode Go",Self::MiniMax=>"MiniMax",Self::Glm=>"GLM",Self::NewApi=>"New API",Self::OneApi=>"One API",Self::Sub2Api=>"Sub2API",Self::Kiro=>"Kiro",Self::Doubao=>"豆包"} }
-    pub fn api_key(self)->bool{matches!(self,Self::OpenCodeGo|Self::MiniMax|Self::Glm|Self::NewApi|Self::OneApi|Self::Sub2Api)}
-    pub fn relay(self)->bool{matches!(self,Self::NewApi|Self::OneApi|Self::Sub2Api)}
+    pub const ALL: [Self; 18] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini, Self::ZCode, Self::WorkBuddy, Self::DeepSeek, Self::OpenCodeGo, Self::MiniMax, Self::Glm, Self::NewApi, Self::OneApi, Self::Sub2Api, Self::Kiro, Self::Doubao, Self::RelayGeneral, Self::RelayCustom];
+    pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini",Self::ZCode=>"ZCode",Self::WorkBuddy=>"WorkBuddy",Self::DeepSeek=>"DeepSeek",Self::OpenCodeGo=>"OpenCode Go",Self::MiniMax=>"MiniMax",Self::Glm=>"GLM",Self::NewApi=>"New API",Self::OneApi=>"One API",Self::Sub2Api=>"Sub2API",Self::Kiro=>"Kiro",Self::Doubao=>"豆包",Self::RelayGeneral=>"通用余额",Self::RelayCustom=>"自定义查询"} }
+    pub fn api_key(self)->bool{matches!(self,Self::OpenCodeGo|Self::MiniMax|Self::Glm)||self.relay()}
+    pub fn relay(self)->bool{matches!(self,Self::NewApi|Self::OneApi|Self::Sub2Api|Self::RelayGeneral|Self::RelayCustom)}
     pub fn balance(self)->bool{matches!(self,Self::WorkBuddy|Self::DeepSeek)||self.relay()}
     fn parse(s: &str) -> Option<Self> {if s.eq_ignore_ascii_case("grokbot"){return Some(Self::GrokBot);}if s.eq_ignore_ascii_case("doubao"){return Some(Self::Doubao);}Self::ALL.into_iter().find(|p|p.name().eq_ignore_ascii_case(s))}
 }
@@ -324,7 +324,7 @@ pub struct Event {pub id:String,pub result:Result<Snapshot,String>}
 #[derive(Default)]
 struct Pending {accounts:Option<Vec<Account>>,running:bool,cooldowns:HashMap<(String,Option<String>,PathBuf),(Instant,String)>}
 type PendingAccounts = std::sync::Arc<std::sync::Mutex<Pending>>;
-fn service_group(provider:Provider)->usize{match provider{Provider::DeepSeek=>1,Provider::WorkBuddy=>2,Provider::OpenCodeGo=>3,Provider::MiniMax=>4,Provider::Glm=>5,Provider::NewApi=>6,Provider::OneApi=>7,Provider::Sub2Api=>8,Provider::Kiro=>9,_=>0}}
+fn service_group(provider:Provider)->usize{match provider{Provider::DeepSeek=>1,Provider::WorkBuddy=>2,Provider::OpenCodeGo=>3,Provider::MiniMax=>4,Provider::Glm=>5,Provider::NewApi|Provider::RelayGeneral|Provider::RelayCustom=>6,Provider::OneApi=>7,Provider::Sub2Api=>8,Provider::Kiro=>9,_=>0}}
 struct Worker {pending:PendingAccounts,wake:mpsc::SyncSender<()>}
 pub struct Service {
     workers:HashMap<usize,Worker>,

@@ -7,19 +7,21 @@ use super::{Snapshot, Window};
 use serde_json::Value;
 use std::io::Read;
 use std::time::{Duration,Instant};
+#[path="relay_script.rs"]
+pub mod script;
 
 pub const AUTO_TIMEOUT:Duration=Duration::from_secs(15);
 const PROBE_TIMEOUT:Duration=Duration::from_secs(5);
-const MAX_PROBE_REQUESTS:usize=4;
+const MAX_PROBE_REQUESTS:usize=5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind { NewApi, OneApi, Sub2Api }
+pub enum Kind { NewApi, OneApi, Sub2Api, General }
 impl Kind {
-    fn name(self) -> &'static str { match self { Self::NewApi => "New API", Self::OneApi => "兼容计费接口", Self::Sub2Api => "Sub2API" } }
+    fn name(self) -> &'static str { match self { Self::NewApi => "New API", Self::OneApi => "兼容计费接口", Self::Sub2Api => "Sub2API",Self::General=>"通用余额" } }
 }
 
 #[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub enum Scope { #[default] Unknown, Account, Subscription, Key }
+pub enum Scope { #[default] Unknown, Account, Subscription, Key, Reported }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Amount {
@@ -68,7 +70,7 @@ impl Quota {
 impl Amount {
     fn displayable(&self)->bool{
         !self.unlimited&&self.remaining.is_some_and(f64::is_finite)&&match self.scope{
-            Scope::Account=>true,Scope::Subscription=>self.limit.is_some_and(|n|n.is_finite()&&n>0.0),_=>false,
+            Scope::Account|Scope::Reported=>true,Scope::Subscription=>self.limit.is_some_and(|n|n.is_finite()&&n>0.0),_=>false,
         }
     }
     pub fn remaining_text(&self)->String{
@@ -114,8 +116,8 @@ fn amount(label:&str,unit:&str,remaining:Option<f64>,limit:Option<f64>,used:Opti
 }
 
 pub fn parse_new_api(v:&Value)->Result<Snapshot,String> {
-    if v["code"]!=true || !v["error"].is_null() { return Err("站点未返回有效的令牌额度".into()); }
-    let d=&v["data"];
+    if (v["code"]!=true&&v["object"]!="token_usage")||v["code"]==false||v["success"]==false||!v["error"].is_null() { return Err("站点未返回有效的令牌额度".into()); }
+    let d=if v["object"]=="token_usage"{v}else{&v["data"]};
     if d["object"]!="token_usage" { return Err("该站点版本不支持 New API 令牌额度接口".into()); }
     if !d["unit"].is_null()&&d["unit"]!="quota"{return Err("站点额度单位与 New API 令牌协议不一致".into());}
     let unlimited=d["unlimited_quota"].as_bool().ok_or("站点未返回令牌限额状态")?;
@@ -129,6 +131,27 @@ pub fn parse_new_api(v:&Value)->Result<Snapshot,String> {
         amounts.push(amount("账户额度","站点配额",Some(required(u,"total_available")?),None,Some(nonnegative(u,"total_used")?),false,Scope::Account));
     }
     Ok(snapshot(Kind::NewApi,amounts,expiry(&d["expires_at"]),windows))
+}
+
+pub fn parse_new_api_user(v:&Value,status:&Value)->Result<Snapshot,String>{
+    if v["success"]!=true||!v["error"].is_null(){return Err("无法读取账户余额，请核对用户 Token、用户 ID 和查询权限".into());}
+    let d=&v["data"];let remaining=required(d,"quota")?;let used=nonnegative(d,"used_quota")?;
+    // 账户配额按站点公开配置换算；未提供有效配置时保留原始单位。
+    let conversion=(||{
+        if status["success"]!=true{return None;}
+        let s=&status["data"];let per=numeric(&s["quota_per_unit"]).filter(|n|*n>0.0)?;
+        let display=s["quota_display_type"].as_str().or_else(||s["display_in_currency"].as_bool().map(|b|if b{"USD"}else{"TOKENS"}))?;
+        let (rate,unit)=match display{
+            "USD"=>(1.0,"USD"),
+            "CNY"=>(numeric(&s["usd_exchange_rate"])? ,"CNY"),
+            "CUSTOM"=>(numeric(&s["custom_currency_exchange_rate"])? ,s["custom_currency_symbol"].as_str().filter(|s|!s.is_empty()&&s.chars().count()<=12&&!s.chars().any(char::is_control))?),
+            _=>return None,
+        };
+        let factor=rate/per;
+        (rate>0.0&&factor.is_finite()&&factor>0.0&&(remaining*factor).is_finite()&&(used*factor).is_finite()).then_some((factor,unit))
+    })();
+    let (factor,unit)=conversion.unwrap_or((1.0,"站点配额"));
+    Ok(snapshot(Kind::NewApi,vec![amount(if conversion.is_some(){"账户余额"}else{"账户额度"},unit,Some(remaining*factor),None,Some(used*factor),false,Scope::Account)],None,vec![]))
 }
 
 pub fn parse_one_api(subscription:&Value,usage:&Value)->Result<Snapshot,String> {
@@ -147,7 +170,14 @@ pub fn parse_one_api(subscription:&Value,usage:&Value)->Result<Snapshot,String> 
 }
 
 pub fn parse_sub2api(v:&Value)->Result<Snapshot,String> {
-    if v["isValid"]!=true || !v["error"].is_null() { return Err("站点未返回有效的 Sub2API 额度".into()); }
+    if v["isValid"]==false||(!v["isValid"].is_null()&&!v["isValid"].is_boolean())||v["success"]==false||!v["error"].is_null() { return Err("站点未返回有效的 Sub2API 额度".into()); }
+    if v["mode"].is_null(){
+        let mut result=serde_json::json!({"planName":"API Key 额度","unit":v["unit"].as_str().or(v["quota"]["unit"].as_str()).unwrap_or("USD")});
+        if let Some(n)=numeric(&v["remaining"]).filter(|n|*n>=0.0){result["remaining"]=serde_json::json!(n);}
+        if numeric(&v["quota"]["limit"]).is_some_and(|n|n>0.0){result["total"]=v["quota"]["limit"].clone();result["used"]=v["quota"]["used"].clone();}
+        if v["remaining"].is_null()&&v["quota"].is_null(){return Err("站点未返回 Sub2API 额度字段".into());}
+        return script::parse_result(&result,"Sub2API");
+    }
     if !v["unit"].is_null()&&v["unit"]!="USD"{return Err("站点返回了未知的额度单位".into());}
     let mut amounts=vec![];let mut windows=vec![];
     match v["mode"].as_str() {
@@ -202,8 +232,21 @@ pub fn parse_sub2api(v:&Value)->Result<Snapshot,String> {
         _=>return Err("该站点版本不支持当前 Sub2API 额度协议".into()),
     }
     if amounts.is_empty(){return Err("站点未返回可用的额度明细".into());}
+    if v["mode"]=="quota_limited"{
+        if let Some(remaining)=numeric(&v["remaining"]).filter(|n|*n>=0.0){amounts.insert(0,amount("API Key 剩余额度","USD",Some(remaining),None,None,false,Scope::Reported));}
+    }
     let expires=expiry(&v["expires_at"]).or_else(||expiry(&v["subscription"]["expires_at"]));
     Ok(snapshot(Kind::Sub2Api,amounts,expires,windows))
+}
+
+pub fn parse_general(v:&Value)->Result<Snapshot,String>{
+    if v["is_active"]==false||v["success"]==false||v["isValid"]==false||!v["error"].is_null(){return Err("站点未返回可用余额，请核对账号与权限".into());}
+    let remaining=required(v,"balance")?;
+    let unit=v["unit"].as_str().unwrap_or("USD");script::validate_unit(unit)?;
+    Ok(snapshot(Kind::General,vec![amount("账户余额",unit,Some(remaining),None,None,false,Scope::Account)],None,vec![]))
+}
+fn endpoint(base:&str,path:&str)->String{
+    let base=if path=="/v1/usage"{base.strip_suffix("/v1").unwrap_or(base)}else{base};format!("{base}{path}")
 }
 
 fn response_error(status:u16)->(String,u64) {
@@ -223,7 +266,13 @@ fn query(agent:&ureq::Agent,url:&str,key:&str,timeout:Option<Duration>)->Result<
     // Callers must supply the application's timeout-bounded, redirects(0) agent.
     let request=agent.get(url).set("Authorization",&format!("Bearer {key}")).set("Accept","application/json");
     let request=if let Some(timeout)=timeout{request.timeout(timeout)}else{request};
-    let response=request.call().map_err(|e|match e{
+    read_response(request)
+}
+fn read_response(request:ureq::Request)->Result<Value,ProbeError>{
+    read_response_result(request.call())
+}
+fn read_response_result(response:Result<ureq::Response,ureq::Error>)->Result<Value,ProbeError>{
+    let response=response.map_err(|e|match e{
         ureq::Error::Status(s,_)=>if matches!(s,404|405){ProbeError::Unsupported(response_error(s))}else{ProbeError::Stop(response_error(s))},
         _=>ProbeError::Stop(("无法连接额度站点，请检查网络与地址".into(),30)),
     })?;
@@ -235,6 +284,22 @@ fn query(agent:&ureq::Agent,url:&str,key:&str,timeout:Option<Duration>)->Result<
     serde_json::from_slice(&raw).map_err(|_|ProbeError::Unsupported(("站点未返回有效的 JSON 额度响应".into(),30)))
 }
 fn get(agent:&ureq::Agent,url:&str,key:&str)->Result<Value,(String,u64)>{query(agent,url,key,None).map_err(ProbeError::detail)}
+
+pub fn request_new_api_user(agent:&ureq::Agent,base_url:&str,token:&str,user_id:&str,cancelled:impl Fn()->bool)->Result<Snapshot,(String,u64)>{
+    if cancelled(){return Err(("已取消连接".into(),0));}
+    let base=validate_base_url(base_url).map_err(|e|(e,0))?;let token=token.trim();let user_id=user_id.trim();
+    if token.is_empty()||token.len()>8192||token.chars().any(|c|c.is_whitespace()||c.is_control()){return Err(("请输入有效的用户 Access Token".into(),0));}
+    let id=user_id.parse::<u64>().ok().filter(|id|*id>0).ok_or(("请输入有效的数字用户 ID".into(),0))?;
+    let value=read_response(agent.get(&format!("{base}/api/user/self")).set("Authorization",&format!("Bearer {token}")).set("New-Api-User",&id.to_string()).set("Accept","application/json")).map_err(|e|{
+        let (message,wait)=e.detail();if message.contains("401"){("用户认证失败（401），请核对 Access Token 和用户 ID；API Key 无法读取账户余额".into(),wait)}else{(message.replace("API Key","用户 Token"),wait)}
+    })?;
+    let snapshot=parse_new_api_user(&value,&Value::Null).map_err(|e|(e,60))?;
+    if value["data"]["id"].as_u64().is_some_and(|actual|actual!=id){return Err(("站点返回的用户 ID 与填写值不一致，请核对账号".into(),0));}
+    if cancelled(){return Err(("已取消连接".into(),0));}
+    let status=read_response(agent.get(&format!("{base}/api/status")).set("Accept","application/json").timeout(PROBE_TIMEOUT)).ok();
+    if cancelled(){return Err(("已取消连接".into(),0));}
+    match status{Some(status)=>parse_new_api_user(&value,&status).map_err(|e|(e,60)),None=>Ok(snapshot)}
+}
 
 fn detect_with(mut query:impl FnMut(&str,Duration)->Result<Value,ProbeError>,cancelled:impl Fn()->bool,budget:Duration)->Result<(Kind,Snapshot),(String,u64)>{
     let deadline=Instant::now()+budget;let mut requests=0;
@@ -250,11 +315,12 @@ fn detect_with(mut query:impl FnMut(&str,Duration)->Result<Value,ProbeError>,can
         Ok(Some(value))
     };
     // 优先专用额度协议；兼容计费接口不证明站点品牌，也不证明账户或 Key 范围。
-    for (kind,path) in [(Kind::NewApi,"/api/usage/token/"),(Kind::Sub2Api,"/v1/usage"),(Kind::OneApi,"/dashboard/billing/subscription")] {
+    for (kind,path) in [(Kind::General,"/user/balance"),(Kind::NewApi,"/api/usage/token/"),(Kind::Sub2Api,"/v1/usage"),(Kind::OneApi,"/dashboard/billing/subscription")] {
         let Some(value)=next(path)?else{continue;};
         let result=match kind{
-            Kind::NewApi if value["data"]["object"]=="token_usage"=>parse_new_api(&value),
-            Kind::Sub2Api if value.get("mode").is_some()=>parse_sub2api(&value),
+            Kind::General if value.get("balance").is_some()=>parse_general(&value),
+            Kind::NewApi if value["data"]["object"]=="token_usage"||value["object"]=="token_usage"=>parse_new_api(&value),
+            Kind::Sub2Api if value.get("mode").is_some()||value.get("remaining").is_some()||value.get("quota").is_some()=>parse_sub2api(&value),
             Kind::OneApi if value["object"]=="billing_subscription"=>{
                 let usage=next("/dashboard/billing/usage")?.ok_or_else(||("计费额度明细不完整，请核对站点版本或在高级设置中选择类型".into(),60))?;
                 parse_one_api(&value,&usage)
@@ -268,7 +334,7 @@ fn detect_with(mut query:impl FnMut(&str,Duration)->Result<Value,ProbeError>,can
 pub fn detect_cancellable(agent:impl Fn(Duration)->ureq::Agent,base_url:&str,key:&str,cancelled:impl Fn()->bool)->Result<(Kind,Snapshot),(String,u64)>{
     let base=validate_base_url(base_url).map_err(|e|(e,0))?;let key=key.trim();
     if key.is_empty()||key.len()>8192||key.chars().any(|c|c.is_whitespace()||c.is_control()){return Err(("请输入有效的 API Key".into(),0));}
-    detect_with(|path,timeout|query(&agent(timeout),&format!("{base}{path}"),key,Some(timeout)),cancelled,AUTO_TIMEOUT)
+    detect_with(|path,timeout|query(&agent(timeout),&endpoint(&base,path),key,Some(timeout)),cancelled,AUTO_TIMEOUT)
 }
 /// 已保存的协议直接查询；刷新和手动指定类型均不自动切换协议。
 pub fn request_cancellable(agent:&ureq::Agent,kind:Kind,base_url:&str,key:&str,cancelled:impl Fn()->bool)->Result<Snapshot,(String,u64)> {
@@ -277,6 +343,7 @@ pub fn request_cancellable(agent:&ureq::Agent,kind:Kind,base_url:&str,key:&str,c
     let key=key.trim();
     if key.is_empty() || key.len()>8192 || key.chars().any(|c|c.is_whitespace()||c.is_control()) {return Err(("请输入有效的 API Key".into(),0));}
     let result=match kind {
+        Kind::General=>parse_general(&get(agent,&format!("{base}/user/balance"),key)?),
         Kind::NewApi=>parse_new_api(&get(agent,&format!("{base}/api/usage/token/"),key)?),
         Kind::OneApi=>{
             let subscription=get(agent,&format!("{base}/dashboard/billing/subscription"),key)?;
@@ -284,7 +351,7 @@ pub fn request_cancellable(agent:&ureq::Agent,kind:Kind,base_url:&str,key:&str,c
             let usage=get(agent,&format!("{base}/dashboard/billing/usage"),key)?;
             parse_one_api(&subscription,&usage)
         }
-        Kind::Sub2Api=>parse_sub2api(&get(agent,&format!("{base}/v1/usage"),key)?),
+        Kind::Sub2Api=>parse_sub2api(&get(agent,&endpoint(&base,"/v1/usage"),key)?),
     };
     result.map_err(|e|(e,60))
 }
@@ -292,6 +359,80 @@ pub fn request_cancellable(agent:&ureq::Agent,kind:Kind,base_url:&str,key:&str,c
 #[cfg(test)]
 mod tests {
     use super::*;use serde_json::json;
+    #[test]
+    fn cc_switch_general_balance_is_detected_with_an_api_key(){
+        let (_,snapshot)=detect_with(|path,_|if path=="/user/balance"{Ok(json!({"is_active":true,"balance":1.1}))}else{Err(unsupported())},||false,AUTO_TIMEOUT).unwrap();
+        assert_eq!(snapshot.relay.unwrap().compact(),"1.1 USD");
+    }
+    #[test]
+    fn cc_switch_sub2api_uses_reported_remaining_without_requiring_mode(){
+        let snapshot=parse_sub2api(&json!({"isValid":true,"remaining":8,"unit":"USD","quota":{"limit":10,"used":2}})).unwrap();
+        assert_eq!(snapshot.relay.unwrap().compact(),"8 USD");
+    }
+    #[test]
+    fn new_api_user_balance_preserves_zero_negative_and_missing_values(){
+        for remaining in [0,-87919,550000]{
+            let value=json!({"success":true,"data":{"quota":remaining,"used_quota":86089298}});
+            let snapshot=parse_new_api_user(&value,&Value::Null).unwrap();assert!(snapshot.windows.is_empty());
+            let q=snapshot.relay.unwrap();let amount=q.primary().unwrap();
+            assert!(matches!(amount.scope,Scope::Account));assert_eq!(amount.remaining,Some(remaining as f64));
+            assert_eq!(amount.used,Some(86089298.0));assert_eq!(amount.unit,"站点配额");
+        }
+        for value in [json!({"success":false,"message":"sensitive-token"}),json!({"success":true,"data":{"used_quota":0}}),json!({"success":true,"data":{"quota":0}}),json!({"success":true,"data":{"quota":"1.1","used_quota":0}}),json!({"success":true,"data":{"quota":1,"used_quota":-1}})]{
+            let error=parse_new_api_user(&value,&Value::Null).unwrap_err();assert!(!error.contains("sensitive-token"));
+        }
+    }
+    #[test]
+    fn new_api_user_money_uses_site_units_and_exchange_rates(){
+        let value=json!({"success":true,"data":{"quota":550000,"used_quota":1000000}});
+        for (settings,want) in [
+            (json!({"quota_per_unit":500000,"quota_display_type":"USD"}),"1.1 USD"),
+            (json!({"quota_per_unit":1000000,"quota_display_type":"USD"}),"0.55 USD"),
+            (json!({"quota_per_unit":500000,"quota_display_type":"CNY","usd_exchange_rate":7}),"7.7 CNY"),
+            (json!({"quota_per_unit":500000,"quota_display_type":"CUSTOM","custom_currency_exchange_rate":2,"custom_currency_symbol":"积分"}),"2.2 积分"),
+            (json!({"quota_per_unit":500000,"display_in_currency":true}),"1.1 USD"),
+            (json!({"quota_per_unit":500000,"display_in_currency":false}),"550000 站点配额"),
+            (json!({"quota_per_unit":0,"quota_display_type":"USD"}),"550000 站点配额"),
+            (json!({"quota_per_unit":500000,"quota_display_type":"CNY"}),"550000 站点配额"),
+            (json!({"quota_per_unit":500000,"quota_display_type":"UNKNOWN"}),"550000 站点配额"),
+        ]{
+            let snapshot=parse_new_api_user(&value,&json!({"success":true,"data":settings})).unwrap();assert_eq!(snapshot.relay.unwrap().compact(),want);
+        }
+        let status=json!({"success":true,"data":{"quota_per_unit":500000,"quota_display_type":"USD"}});
+        let tiny=parse_new_api_user(&json!({"success":true,"data":{"quota":1,"used_quota":0}}),&status).unwrap();
+        assert_eq!(tiny.relay.unwrap().primary().unwrap().remaining,Some(0.000002));
+        assert_eq!(parse_new_api_user(&value,&json!({"success":false,"data":status["data"]})).unwrap().relay.unwrap().compact(),"550000 站点配额");
+    }
+    #[test]
+    fn new_api_user_errors_never_probe_token_routes_or_expose_credentials(){
+        for status in [401,403,302,429,500,200]{
+            let calls=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));let count=calls.clone();
+            let agent=ureq::AgentBuilder::new().redirects(0).middleware(move|request:ureq::Request,_:ureq::MiddlewareNext|{
+                assert!(request.url().ends_with("/api/user/self"));count.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+                ureq::Response::new(status,"Error",r#"{"success":false,"message":"sensitive-body"}"#)
+            }).build();
+            let error=request_new_api_user(&agent,"https://relay.example/prefix","synthetic-user-token","42",||false).unwrap_err().0;
+            assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed),1);assert!(!error.contains("sensitive-body")&&!error.contains("synthetic-user-token"));
+            if status==401{assert!(error.contains("用户 ID"));}
+        }
+    }
+    #[test]
+    fn new_api_user_status_failure_keeps_raw_account_balance(){
+        let agent=ureq::AgentBuilder::new().middleware(|request:ureq::Request,_:ureq::MiddlewareNext|{
+            if request.url().ends_with("/api/user/self"){ureq::Response::new(200,"OK",r#"{"success":true,"data":{"quota":550000,"used_quota":1000000}}"#)}else{ureq::Response::new(404,"Not Found","")}
+        }).build();
+        assert_eq!(request_new_api_user(&agent,"https://relay.example","synthetic","42",||false).unwrap().relay.unwrap().compact(),"550000 站点配额");
+    }
+    #[test]
+    fn new_api_user_rejects_bad_inputs_mismatched_identity_and_cancellation(){
+        let agent=ureq::AgentBuilder::new().middleware(|_:ureq::Request,_:ureq::MiddlewareNext|panic!("无效输入不应发送请求")).build();
+        for (base,token,id) in [("http://relay.example","synthetic","42"),("https://relay.example","bad\nkey","42"),("https://relay.example","","42"),("https://relay.example","synthetic","0"),("https://relay.example","synthetic","invalid")]{assert!(request_new_api_user(&agent,base,token,id,||false).is_err());}
+        assert!(request_new_api_user(&agent,"https://relay.example","synthetic","42",||true).is_err());
+        let agent=ureq::AgentBuilder::new().middleware(|request:ureq::Request,_:ureq::MiddlewareNext|{
+            assert!(request.url().ends_with("/api/user/self"));ureq::Response::new(200,"OK",r#"{"success":true,"data":{"id":43,"quota":1,"used_quota":0}}"#)
+        }).build();
+        assert!(request_new_api_user(&agent,"https://relay.example","synthetic","42",||false).unwrap_err().0.contains("不一致"));
+    }
     fn serve_once(response:Vec<u8>,delay:std::time::Duration)->(String,std::thread::JoinHandle<String>){
         use std::{io::{Read,Write},net::TcpListener};
         let listener=TcpListener::bind("127.0.0.1:0").unwrap();let url=format!("http://{}/api/usage/token/",listener.local_addr().unwrap());
@@ -347,7 +488,7 @@ mod tests {
     fn auto_prefers_key_quota_and_keeps_account_quota_separate(){
         let mut paths=vec![];let mut value=new_fixture();value["data"]["user_quota"]=json!({"total_available":12,"total_used":8});
         let (kind,snapshot)=detect_with(|path,timeout|{assert!(timeout<=PROBE_TIMEOUT);paths.push(path.to_owned());Ok(value.clone())},||false,AUTO_TIMEOUT).unwrap();
-        assert_eq!(kind,Kind::NewApi);assert_eq!(paths,["/api/usage/token/"]);
+        assert_eq!(kind,Kind::NewApi);assert_eq!(paths,["/user/balance","/api/usage/token/"]);
         let q=snapshot.relay.unwrap();assert_eq!(q.amounts[0].label,"令牌额度");assert_eq!(q.amounts[0].remaining,Some(250000.0));
         assert_eq!(q.amounts[1].label,"账户额度");assert_eq!(q.amounts[1].remaining,Some(12.0));assert!(q.amounts.iter().all(|a|a.unit=="站点配额"));
     }
@@ -355,11 +496,11 @@ mod tests {
     fn auto_falls_back_to_sub2api_before_compatible_billing(){
         let mut paths=vec![];
         let (kind,snapshot)=detect_with(|path,_|{paths.push(path.to_owned());if path=="/v1/usage"{Ok(json!({"isValid":true,"mode":"unrestricted","unit":"USD","balance":7}))}else{Err(unsupported())}},||false,AUTO_TIMEOUT).unwrap();
-        assert_eq!(kind,Kind::Sub2Api);assert_eq!(paths,["/api/usage/token/","/v1/usage"]);
+        assert_eq!(kind,Kind::Sub2Api);assert_eq!(paths,["/user/balance","/api/usage/token/","/v1/usage"]);
         let q=snapshot.relay.unwrap();assert_eq!(q.amounts[0].label,"账户余额");assert_eq!(q.compact(),"7 USD");assert!(snapshot.windows.is_empty());
     }
     #[test]
-    fn auto_billing_uses_at_most_four_requests_and_does_not_invent_scope_or_currency(){
+    fn auto_billing_uses_at_most_five_requests_and_does_not_invent_scope_or_currency(){
         let mut paths=vec![];
         let (kind,snapshot)=detect_with(|path,_|{paths.push(path.to_owned());match path{
             "/dashboard/billing/subscription"=>Ok(json!({"object":"billing_subscription","hard_limit_usd":100})),
@@ -373,7 +514,7 @@ mod tests {
     fn auto_stops_on_broken_recognized_quota_instead_of_accepting_a_different_balance(){
         for value in [json!({"code":true,"data":{"object":"token_usage"}}),json!({"code":false,"message":"sk-sensitive"}),json!({"success":false}),json!({"error":{"message":"sk-sensitive"}})] {
             let mut calls=0;let error=detect_with(|_,_|{calls+=1;Ok(value.clone())},||false,AUTO_TIMEOUT).unwrap_err().0;
-            assert_eq!(calls,1);assert!(!error.contains("sk-sensitive"));
+            assert_eq!(calls,if value["data"]["object"]=="token_usage"{2}else{1});assert!(!error.contains("sk-sensitive"));
         }
     }
     #[test]
@@ -382,15 +523,15 @@ mod tests {
         assert!(detect_with(|_,_|Ok(value.clone()),||false,AUTO_TIMEOUT).unwrap_err().0.contains("单位"));
         for value in [json!({"isValid":true,"mode":"quota_limited","quota":{"unit":"CNY","limit":10,"used":1,"remaining":9}}),json!({"isValid":true,"mode":"quota_limited","rate_limits":[{"window":"1d","unit":"requests","limit":10,"used":1,"remaining":9}]})] {
             let mut calls=0;let error=detect_with(|path,_|{calls+=1;if path=="/v1/usage"{Ok(value.clone())}else{Err(unsupported())}},||false,AUTO_TIMEOUT).unwrap_err().0;
-            assert!(error.contains("单位"));assert_eq!(calls,2);
+            assert!(error.contains("单位"));assert_eq!(calls,3);
         }
         let error=detect_with(|path,_|if path.ends_with("subscription"){Ok(json!({"object":"billing_subscription","hard_limit_usd":10}))}else{Err(unsupported())},||false,AUTO_TIMEOUT).unwrap_err().0;
         assert!(error.contains("不完整"));
     }
     #[test]
     fn auto_unknown_shapes_never_become_zero_balances(){
-        let mut calls=0;let error=detect_with(|_,_|{calls+=1;Ok(json!({"balance":0}))},||false,AUTO_TIMEOUT).unwrap_err().0;
-        assert_eq!(calls,3);assert!(error.contains("高级设置"));
+        let mut calls=0;let error=detect_with(|_,_|{calls+=1;Ok(json!({"unrecognized":0}))},||false,AUTO_TIMEOUT).unwrap_err().0;
+        assert_eq!(calls,4);assert!(error.contains("高级设置"));
         let mut value=new_fixture();value["data"]["unlimited_quota"]=json!(true);
         let (_,snapshot)=detect_with(|_,_|Ok(value.clone()),||false,AUTO_TIMEOUT).unwrap();assert_eq!(snapshot.relay.unwrap().amounts[0].remaining,None);
     }
@@ -432,7 +573,7 @@ mod tests {
             }).build()
         },"https://relay.example/tenant/v1","synthetic-prefix-key",||false).unwrap();
         assert_eq!(kind,Kind::Sub2Api);assert_eq!(snapshot.relay.unwrap().compact(),"7 USD");
-        assert_eq!(*calls.lock().unwrap(),["https://relay.example/tenant/v1/api/usage/token/","https://relay.example/tenant/v1/v1/usage"]);
+        assert_eq!(*calls.lock().unwrap(),["https://relay.example/tenant/v1/user/balance","https://relay.example/tenant/v1/api/usage/token/","https://relay.example/tenant/v1/usage"]);
     }
     #[test] fn new_api_preserves_units_and_expiry_is_not_reset(){
         let s=parse_new_api(&new_fixture()).unwrap();assert_eq!(s.windows[0].remaining,50.0);assert_eq!(s.windows[0].reset,None);

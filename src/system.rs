@@ -208,43 +208,141 @@ pub fn idle_seconds() -> f64 {
         }
     }
 }
-pub fn fullscreen() -> Option<crate::display_layout::Bounds> {
-    unsafe {
-        let hwnd = GetForegroundWindow();
-        if hwnd.0.is_null() {
-            return None;
-        }
-        let mut pid = 0;
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid == windows::Win32::System::Threading::GetCurrentProcessId() {
-            return None;
-        }
-        // 桌面与资源管理器桌面窗口不能当成全屏游戏。
-        let mut cls = [0u16; 64];
-        let n = GetClassNameW(hwnd, &mut cls);
-        let cls = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
-        if matches!(cls.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd") {
-            return None;
-        }
-        let mut r = RECT::default();
-        if GetWindowRect(hwnd, &mut r).is_err() {
-            return None;
-        }
-        let mut info = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        if !GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut info).as_bool()
-        {
-            return None;
-        }
-        let covers=r.left <= info.rcMonitor.left
-            && r.top <= info.rcMonitor.top
-            && r.right >= info.rcMonitor.right
-            && r.bottom >= info.rcMonitor.bottom;
-        covers.then_some(crate::display_layout::Bounds {left:info.rcMonitor.left,top:info.rcMonitor.top,right:info.rcMonitor.right,bottom:info.rcMonitor.bottom})
+/// 前台窗口在全屏判定里需要的信息。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Foreground {
+    hwnd: isize,
+    pid: u32,
+    /// 最终所有者窗口（没有所有者时是它自己）。
+    root_owner: isize,
+    /// 会在任务栏单独显示按钮的普通程序窗口（不是工具窗口、对话框或浮动面板）。
+    app_window: bool,
+}
+
+/// 前台从全屏窗口切到别的窗口时，是否仍按原来的全屏处理（岛仔保持隐藏）。
+///
+/// 3ds Max、Photoshop 这类软件全屏（或最大化后盖满整块屏幕）时，插件面板、浮动工具条、
+/// 属性对话框都是同一个程序的附属窗口；每点一下前台就在它们和主窗口之间来回切，
+/// 过去岛仔会跟着「出现 → 消失」闪一次。只要原来的全屏窗口还盖着屏幕，
+/// 而新的前台是它的附属窗口（被它拥有，或同一程序里不单独占任务栏的窗口），就继续隐藏。
+/// 切到另一个程序、或同一程序里另开的普通窗口（如浏览器的新窗口）时照常显示。
+fn keeps_fullscreen(last: Foreground, still_covers: bool, now: Option<Foreground>) -> bool {
+    if !still_covers { return false; }
+    match now {
+        // 激活切换的瞬间前台可能是空的，不当成离开全屏。
+        None => true,
+        Some(now) => now.hwnd == last.hwnd || now.root_owner == last.hwnd || (now.pid == last.pid && !now.app_window),
     }
 }
+
+unsafe fn foreground_info(hwnd: HWND) -> Foreground {
+    let mut pid = 0;
+    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    let root = GetAncestor(hwnd, GA_ROOTOWNER);
+    let root_owner = if root.0.is_null() { hwnd.0 as isize } else { root.0 as isize };
+    let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    let owned = !GetWindow(hwnd, GW_OWNER).unwrap_or_default().0.is_null();
+    let app_window = ex & WS_EX_APPWINDOW.0 as isize != 0 || (!owned && ex & WS_EX_TOOLWINDOW.0 as isize == 0);
+    Foreground { hwnd: hwnd.0 as isize, pid, root_owner, app_window }
+}
+
+/// 窗口盖满它所在的整块屏幕时返回该屏幕范围。
+unsafe fn covering_monitor(hwnd: HWND) -> Option<crate::display_layout::Bounds> {
+    if !IsWindow(hwnd).as_bool() || !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+        return None;
+    }
+    let mut r = RECT::default();
+    if GetWindowRect(hwnd, &mut r).is_err() {
+        return None;
+    }
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut info).as_bool()
+    {
+        return None;
+    }
+    let covers=r.left <= info.rcMonitor.left
+        && r.top <= info.rcMonitor.top
+        && r.right >= info.rcMonitor.right
+        && r.bottom >= info.rcMonitor.bottom;
+    covers.then_some(crate::display_layout::Bounds {left:info.rcMonitor.left,top:info.rcMonitor.top,right:info.rcMonitor.right,bottom:info.rcMonitor.bottom})
+}
+
+pub fn fullscreen() -> Option<crate::display_layout::Bounds> {
+    use std::sync::Mutex;
+    // 上一次判定为全屏的窗口：前台切到它的附属窗口时沿用（见 `keeps_fullscreen`）。
+    static LAST: Mutex<Option<Foreground>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        let now = (!hwnd.0.is_null()).then(|| foreground_info(hwnd));
+        if let Some(info) = now {
+            // 岛仔自己的窗口（设置窗口等）不算全屏，也不沿用。
+            if info.pid == windows::Win32::System::Threading::GetCurrentProcessId() {
+                *last = None;
+                return None;
+            }
+            // 桌面与资源管理器桌面窗口不能当成全屏游戏。
+            let mut cls = [0u16; 64];
+            let n = GetClassNameW(hwnd, &mut cls);
+            let cls = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
+            if matches!(cls.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd") {
+                *last = None;
+                return None;
+            }
+            if let Some(bounds) = covering_monitor(hwnd) {
+                *last = Some(info);
+                return Some(bounds);
+            }
+        }
+        if let Some(previous) = *last {
+            let bounds = covering_monitor(HWND(previous.hwnd as *mut _));
+            if keeps_fullscreen(previous, bounds.is_some(), now) {
+                return bounds;
+            }
+        }
+        *last = None;
+        None
+    }
+}
+
+#[cfg(test)]
+mod fullscreen_follow_tests {
+    use super::*;
+
+    const MAX: Foreground = Foreground { hwnd: 100, pid: 7, root_owner: 100, app_window: true };
+
+    #[test]
+    fn plugin_panels_and_dialogs_of_the_fullscreen_app_keep_the_island_hidden() {
+        // 被主窗口拥有的插件面板 / 对话框
+        let owned = Foreground { hwnd: 200, pid: 7, root_owner: 100, app_window: false };
+        assert!(keeps_fullscreen(MAX, true, Some(owned)));
+        // 同一程序里不占任务栏的浮动工具窗口（没有设所有者）
+        let tool = Foreground { hwnd: 201, pid: 7, root_owner: 201, app_window: false };
+        assert!(keeps_fullscreen(MAX, true, Some(tool)));
+        // 插件放在独立进程里、但窗口挂在主窗口下面
+        let other_process = Foreground { hwnd: 202, pid: 9, root_owner: 100, app_window: false };
+        assert!(keeps_fullscreen(MAX, true, Some(other_process)));
+        // 激活切换瞬间前台为空
+        assert!(keeps_fullscreen(MAX, true, None));
+    }
+
+    #[test]
+    fn switching_to_another_app_or_leaving_fullscreen_shows_the_island() {
+        let other_app = Foreground { hwnd: 300, pid: 9, root_owner: 300, app_window: true };
+        assert!(!keeps_fullscreen(MAX, true, Some(other_app)), "切到别的程序时照常显示");
+        // 同一程序新开的普通窗口（如浏览器的第二个窗口）也照常显示
+        let second_window = Foreground { hwnd: 301, pid: 7, root_owner: 301, app_window: true };
+        assert!(!keeps_fullscreen(MAX, true, Some(second_window)));
+        // 原来的全屏窗口已经还原、最小化或关闭
+        let owned = Foreground { hwnd: 200, pid: 7, root_owner: 100, app_window: false };
+        assert!(!keeps_fullscreen(MAX, false, Some(owned)));
+        assert!(!keeps_fullscreen(MAX, false, None));
+    }
+}
+
 pub(crate) fn is_browser_process(name:&str)->bool {
     ["chrome.exe","msedge.exe","firefox.exe","brave.exe","vivaldi.exe","opera.exe",
         "arc.exe","zen.exe","chromium.exe","librewolf.exe","floorp.exe","waterfox.exe",
@@ -473,7 +571,11 @@ fn connect_inner(ctx:eframe::egui::Context,filter:crate::messenger::Notification
                     let (version,body)=baseline.observe(number,created,client,tracked,body);
                     current.insert(number,version);
                     if let Some(body)=body{
-                        let target=client.filter(|client|client.adapter().capture==crate::messenger::Capture::SystemToast).and_then(|client|accounts.target(client,number,created));
+                        let target=client.filter(|client|client.adapter().capture==crate::messenger::Capture::SystemToast).map(|client|(client,accounts.target(client,number,created)))
+                            .and_then(|(client,target)|{
+                                if target.is_none(){crate::messenger::windows::trace(format!("通知 {id}·创建 {created} 未能绑定 {} 账号",client.name()));}
+                                target
+                            });
                         if !body.trim().is_empty(){messages.push((created,app,id,body,target));}
                     }
                 }

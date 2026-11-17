@@ -97,7 +97,7 @@ fn endpoint(cfg: &Config) -> Result<url::Url, Failure> {
 /// 一次同步内的连接状态：服务器要求时完成设备策略握手，之后的请求带上策略标识。
 struct Session<'a> { agent: ureq::Agent, cfg: &'a Config, password: &'a str, policy: Option<String>, provisioned: bool }
 impl<'a> Session<'a> {
-    fn new(cfg: &'a Config, password: &'a str) -> Self { Self { agent: super::agent(), cfg, password, policy: None, provisioned: false } }
+    fn new(cfg: &'a Config, password: &'a str) -> Result<Self, Failure> { Ok(Self { agent: super::agent()?, cfg, password, policy: None, provisioned: false }) }
     /// 发送命令；遇到 449 或 142–144 时先握手再重试一次。
     fn send(&mut self, name: &str, root: &Node) -> Result<Node, Failure> {
         match self.raw(name, root) {
@@ -150,11 +150,11 @@ fn command(agent: &ureq::Agent, cfg: &Config, password: &str, name: &str, root: 
     if let Some(key) = policy { request = request.set("X-MS-PolicyKey", key); }
     let response = request.send_bytes(&encode(root)).map_err(|e| match e {
             ureq::Error::Status(code, _) => Failure::status(cfg.provider, code),
-            _ => Failure::transport("Exchange"),
+            error => Failure::transport(&error),
         })?;
     if response.status() != 200 { return Err(Failure::status(cfg.provider, response.status())); }
     let mut bytes = Vec::new();
-    response.into_reader().take(16 * 1024 * 1024 + 1).read_to_end(&mut bytes).map_err(|_| Failure::transport("Exchange"))?;
+    response.into_reader().take(16 * 1024 * 1024 + 1).read_to_end(&mut bytes).map_err(|error| Failure::transport(&error))?;
     if bytes.len() > 16 * 1024 * 1024 { return Err(Failure::text(format!("{}单次返回的日程过多，无法完整同步", cfg.provider.label()))); }
     decode(&bytes)
 }
@@ -223,7 +223,7 @@ fn sync_folder(session: &mut Session, id: &str, label: &str) -> Result<std::coll
 
 pub(super) fn fetch(cfg: &Config, password: &str, lo: DateTime<Utc>, hi: DateTime<Utc>) -> Result<Fetched, Failure> {
     let label = cfg.provider.label();
-    let mut session = Session::new(cfg, password);
+    let mut session = Session::new(cfg, password)?;
     let folders = session.send("FolderSync", &node(FOLDER, 0x16, "", vec![node(FOLDER, 0x12, "0", vec![])]))?;
     check_status(&folders, FOLDER, 0x0c, label)?;
     let changes = folders.child(FOLDER, 0x0e).ok_or_else(invalid)?;
@@ -357,7 +357,7 @@ mod tests {
     #[ignore="只读检查已连接企业微信返回的文件夹类型及日程数量，不输出凭据或正文"]
     fn live_wecom_folder_diagnosis(){
         let cfg=super::super::load_configs().into_iter().find(|c|c.provider==Provider::WeCom).expect("需要已连接的企业微信");
-        let password=super::super::secrets::load(&cfg).unwrap();let agent=super::super::agent();
+        let password=super::super::secrets::load(&cfg).unwrap();let agent=super::super::agent().unwrap();
         let folders=command(&agent,&cfg,&password,"FolderSync",&node(FOLDER,0x16,"",vec![node(FOLDER,0x12,"0",vec![])]),None).unwrap();
         check_status(&folders,FOLDER,0x0c,"企业微信").unwrap();
         for (i,folder) in folders.child(FOLDER,0x0e).unwrap().children.iter().enumerate(){

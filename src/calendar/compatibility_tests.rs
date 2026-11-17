@@ -102,7 +102,7 @@ fn mixed_caldav_response_preserves_readable_events_and_reports_resource_errors()
         write!(socket,"HTTP/1.1 207 Result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}",xml.len()).unwrap();
     });
     let config=Config{provider:Provider::DingTalk,username:"mock".into(),href:None,server:Some(base.clone())};
-    let result=fetch_collection(&agent(),&config,"mock",&base,"2026-11-01T00:00:00Z".parse().unwrap(),"2026-12-01T00:00:00Z".parse().unwrap());worker.join().unwrap();
+    let result=fetch_collection(&agent().unwrap(),&config,"mock",&base,"2026-11-01T00:00:00Z".parse().unwrap(),"2026-12-01T00:00:00Z".parse().unwrap());worker.join().unwrap();
     let fetched=result.unwrap();assert_eq!(fetched.events.len(),1);assert_eq!(fetched.events[0].uid,"good");
     assert_eq!((fetched.report.failed,fetched.report.invalid,fetched.report.status),(1,1,Some(403)));
 }

@@ -8,21 +8,25 @@ pub(crate) const ADAPTER:NativeAdapter=NativeAdapter{paths,main_frame,accounts:S
 fn main_frame(class:&str,style:u32,extended:u32)->bool{matches!(class,"Chrome_WidgetWin_1"|"TXGuiFoundation") && frame_style(class,style,extended)}
 fn open(unread:Unread,paths:&[String],_:bool)->Result<(),OpenError>{unsafe{
     let window=HWND(unread.window as *mut _);
-    if unread.window==0 || !IsWindow(window).as_bool() || window_pid(window)!=unread.pid{return Err(OpenError::Unavailable);}
+    if unread.window==0 || !IsWindow(window).as_bool() || window_pid(window)!=unread.pid{wake_step("提醒窗口已不属于该账号");return Err(OpenError::Unavailable);}
     let target=if usable_main_frame(window,unread.source) && matches(window,paths){Some(window)}else{visible_main_window_of(unread.pid,unread.source,paths)};
     if let Some(target)=target{
+        wake_step(format!("切前台 {}",describe_window(target)));
         if IsIconic(target).as_bool(){let _=ShowWindowAsync(target,SW_RESTORE);}
-        if SetForegroundWindow(target).as_bool(){return Ok(());}
-    }
+        if SetForegroundWindow(target).as_bool(){wake_step("系统已接受");return Ok(());}
+        wake_step("系统拒绝切前台");
+    }else{wake_step("没有可见的 QQ 主窗口");}
     if class_name(window)=="Electron_NotifyIconHostWindow" && matches(window,paths){
         let icons=host_icons(&[(unread.pid,window)],unread.pid);
         if let [(_,id)]=icons.as_slice(){
+            wake_step(format!("点击 QQ 托盘图标 {id}"));
             for event in [WM_LBUTTONDOWN,WM_LBUTTONUP,WM_LBUTTONDBLCLK,WM_LBUTTONUP]{
-                PostMessageW(window,WM_APP+1,WPARAM(*id as usize),LPARAM(event as isize)).map_err(|_|OpenError::Failed("QQ 托盘暂时无法响应".into()))?;
+                PostMessageW(window,WM_APP+1,WPARAM(*id as usize),LPARAM(event as isize)).map_err(|_|{wake_step("托盘消息发送失败");OpenError::Failed("QQ 托盘暂时无法响应".into())})?;
             }
             return Ok(());
         }
-    }
+        wake_step(format!("托盘宿主窗口里有 {} 个该账号的图标，无法确定点哪个",icons.len()));
+    }else{wake_step(format!("提醒窗口不是 QQ 托盘宿主（{}）",class_name(window)));}
     Err(OpenError::Unavailable)
 }}
 
@@ -100,6 +104,20 @@ pub(crate) fn accounts(paths:&[String])->Option<Vec<Target>>{unsafe{
 mod tests{
     use super::*;
     #[test]
+    fn qq_wake_records_why_neither_window_nor_tray_could_be_used(){unsafe{
+        let window=CreateWindowExW(WINDOW_EX_STYLE(0),w!("STATIC"),w!(""),WS_POPUP,0,0,10,10,None,None,None,None).unwrap();
+        let paths=[normalized(&std::env::current_exe().unwrap().to_string_lossy())];
+        take_wake_steps();
+        let result=open(Unread{source:Messenger::Qq,pid:std::process::id(),window:window.0 as isize},&paths,true);
+        let steps=take_wake_steps();
+        let _=DestroyWindow(window);
+        assert_eq!(result,Err(OpenError::Unavailable));
+        assert_eq!(steps,["没有可见的 QQ 主窗口".to_string(),"提醒窗口不是 QQ 托盘宿主（Static）".to_string()],"依次记录切前台和托盘两条路为什么都走不通");
+        take_wake_steps();
+        let gone=open(Unread{source:Messenger::Qq,pid:std::process::id(),window:0},&paths,true);
+        assert_eq!((gone,take_wake_steps()),(Err(OpenError::Unavailable),vec!["提醒窗口已不属于该账号".to_string()]));
+    }}
+    #[test]
     fn qq_single_tray_account_ignores_its_auxiliary_main_windows(){unsafe{
         use windows::Win32::{Foundation::LRESULT,System::LibraryLoader::GetModuleHandleW,UI::Shell::*};
         unsafe extern "system" fn proc(h:HWND,m:u32,w:WPARAM,l:LPARAM)->LRESULT{DefWindowProcW(h,m,w,l)}
@@ -139,4 +157,33 @@ mod tests{
         assert_eq!(one.unwrap().len(),1);assert!(before);assert!(!after,"已经绑定的 QQ 目标在出现同进程多主窗口后也不能继续猜测唤起");
         assert!(ambiguous.is_none(),"同进程多个 QQ 主窗口不能随便拿第一个当成唯一账号");
     }}
+    #[test]
+    #[ignore="需要本机正在运行 QQ，仅用于现场诊断"]
+    fn live_probe(){
+        unsafe{
+            use windows::Win32::Foundation::BOOL;
+            let paths=paths();println!("paths={paths:?}");
+            struct S<'a>{paths:&'a [String],hosts:Vec<HWND>,mains:Vec<HWND>}
+            unsafe extern "system" fn visit(hwnd:HWND,data:LPARAM)->BOOL{
+                let search=&mut *(data.0 as *mut S);
+                let class=class_name(hwnd);
+                let tray=class=="Electron_NotifyIconHostWindow";
+                let main=client_main_frame(Messenger::Qq,&class,GetWindowLongW(hwnd,GWL_STYLE)as u32,GetWindowLongW(hwnd,GWL_EXSTYLE)as u32) && GetWindow(hwnd,GW_OWNER).is_err();
+                if (tray||main) && matches(hwnd,search.paths){
+                    println!("候选 {} {:#x} pid {} 样式 0x{:08X}/0x{:08X}",if tray{"托盘宿主"}else{"主窗口"},hwnd.0 as usize,window_pid(hwnd),GetWindowLongW(hwnd,GWL_STYLE)as u32,GetWindowLongW(hwnd,GWL_EXSTYLE)as u32);
+                    if tray{search.hosts.push(hwnd);}else{search.mains.push(hwnd);}
+                }
+                true.into()
+            }
+            let mut search=S{paths:&paths,hosts:Vec::new(),mains:Vec::new()};
+            let _=EnumWindows(Some(visit),LPARAM((&mut search as *mut S)as isize));
+            for &host in &search.hosts{
+                let icons=host_icons(&[(window_pid(host),host)],window_pid(host));
+                println!("宿主 {:#x} pid {} 图标 {:?}",host.0 as usize,window_pid(host),icons);
+            }
+            println!("accounts = {:?}",accounts(&paths));
+            println!("parent_processes 数量 {}",parent_processes().len());
+        }
+    }
+
 }

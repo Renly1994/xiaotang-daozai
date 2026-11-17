@@ -481,7 +481,7 @@ fn request_path(agent: &Agent, url: &Url) -> String {
 }
 
 fn is_header_sensitive(header: &Header) -> bool {
-    header.is_name("Authorization") || header.is_name("Cookie")
+    header.is_name("Authorization") || header.is_name("Cookie") || header.is_name("X-QW-Api-Key")
 }
 
 struct PreludeBuilder {
@@ -555,6 +555,17 @@ impl fmt::Display for PreludeBuilder {
 mod tests {
     use super::*;
     use crate::{AgentBuilder, Proxy};
+
+    #[test]
+    fn qweather_api_key_is_redacted_from_request_logging() {
+        let header = Header::new("X-QW-Api-Key", "fake-test-key");
+        assert!(is_header_sensitive(&header));
+        let mut prelude = PreludeBuilder::new();
+        prelude.write_sensitive_header(header.name(), header.value().unwrap()).unwrap();
+        assert!(String::from_utf8_lossy(prelude.as_slice()).contains("fake-test-key"));
+        assert!(!prelude.to_string().contains("fake-test-key"));
+        assert!(prelude.to_string().contains("***"));
+    }
 
     fn request_line(agent: &Agent, url: &str) -> String {
         let url = Url::parse(url).unwrap();

@@ -1,18 +1,48 @@
 //! Windows 音量混合器中的播放器音量；只操作匹配的应用会话。
-use std::time::{Duration, Instant};
+use std::{sync::{mpsc,Arc,Mutex},time::{Duration, Instant}};
 
+type Job=Box<dyn FnOnce()+Send>;
+
+/// 音量混合器的读写都放到这一个独立线程里。枚举音频设备在个别声卡、蓝牙或虚拟声卡驱动上
+/// 可能长时间不返回，不能拖住歌曲信息采样（否则岛上一直「暂无音乐」）或播放控制。
+/// 线程卡住时队列很快填满，之后的音量操作直接放弃，不再新开线程。
+fn submit(job:Job)->bool {
+    static WORKER:Mutex<Option<mpsc::SyncSender<Job>>>=Mutex::new(None);
+    let mut worker=WORKER.lock().unwrap_or_else(|e|e.into_inner());
+    if worker.is_none(){
+        let (tx,rx)=mpsc::sync_channel::<Job>(2);
+        if crate::resources::VOLUME.spawn(move||{while let Ok(job)=rx.recv(){job();}}).is_none(){return false;}
+        *worker=Some(tx);
+    }
+    worker.as_ref().is_some_and(|tx|tx.try_send(job).is_ok())
+}
+
+/// 在音量线程上执行并最多等 2 秒；超时按失败处理。
+fn run(job:impl FnOnce(Instant)->bool+Send+'static)->bool {
+    let (tx,rx)=mpsc::sync_channel(1);
+    let deadline=Instant::now()+Duration::from_secs(2);
+    if !submit(Box::new(move||{let _=tx.send(Instant::now()<deadline && job(deadline));})){return false;}
+    rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).unwrap_or(false)
+}
+
+type Latest=Arc<Mutex<Option<(String,Option<(u32,bool)>)>>>;
+
+/// 采样线程用：只取音量线程上次读到的结果，从不等待。
 #[derive(Default)]
 pub(crate) struct Reader {
     source: String,
     at: Option<Instant>,
-    value: Option<(u32, bool)>,
+    latest: Latest,
 }
 impl Reader {
     pub fn poll(&mut self, source:&str)->Option<(u32,bool)> {
+        if source.is_empty(){self.source.clear();self.at=None;return None;}
         if self.source!=source || self.at.is_none_or(|at|at.elapsed()>=Duration::from_millis(500)) {
-            self.source=source.into();self.at=Some(Instant::now());self.value=read(source);
+            self.source=source.into();self.at=Some(Instant::now());
+            let (latest,source)=(self.latest.clone(),source.to_string());
+            submit(Box::new(move||{let value=read(&source);*latest.lock().unwrap_or_else(|e|e.into_inner())=Some((source,value));}));
         }
-        self.value
+        self.latest.lock().unwrap_or_else(|e|e.into_inner()).as_ref().filter(|(read,_)|read==source).and_then(|(_,value)|*value)
     }
 }
 
@@ -20,7 +50,8 @@ fn executable(source:&str)->Option<String> {
     let source=source.to_lowercase();
     match source.as_str() {
         "kugou"=>Some("kugou.exe".into()),
-        "qqmusic"=>Some("qqmusic.exe".into()),
+        // QQ 音乐 22.82 起系统媒体会话的身份名改为 Tencent.QQMusic。
+        "qqmusic"|"tencent.qqmusic"=>Some("qqmusic.exe".into()),
         "spotify"=>Some("spotify.exe".into()),
         "汽水音乐"=>Some("sodamusic.exe".into()),
         _ if source.ends_with(".exe") && !source.contains(['\\','/'])=>Some(source),
@@ -91,22 +122,27 @@ pub fn read(source:&str)->Option<(u32,bool)> {
 
 #[cfg(windows)]
 pub fn set_volume(source:&str,percent:u32)->bool {
-    apply(source,|session|unsafe {
+    let source=source.to_string();
+    run(move|deadline|apply(&source,deadline,|session|unsafe {
         session.SetMasterVolume(percent.min(100) as f32/100.0,std::ptr::null()).is_ok()
-            && session.SetMute(false,std::ptr::null()).is_ok()
-    })
+            && Instant::now()<deadline && session.SetMute(false,std::ptr::null()).is_ok()
+    }))
 }
 
 #[cfg(windows)]
 pub fn set_mute(source:&str,muted:bool)->bool {
-    apply(source,|session|unsafe{session.SetMute(muted,std::ptr::null()).is_ok()})
+    let source=source.to_string();
+    run(move|deadline|apply(&source,deadline,|session|unsafe{session.SetMute(muted,std::ptr::null()).is_ok()}))
 }
 
 #[cfg(windows)]
-fn apply(source:&str,change:impl Fn(&windows::Win32::Media::Audio::ISimpleAudioVolume)->bool)->bool {
+fn apply(source:&str,deadline:Instant,change:impl Fn(&windows::Win32::Media::Audio::ISimpleAudioVolume)->bool)->bool {
     let sessions=platform::sessions(source);
     let mut success=!sessions.is_empty();
-    for session in &sessions{success=change(session) && success;}
+    for session in &sessions{
+        if Instant::now()>=deadline{return false;}
+        success=change(session) && success;
+    }
     success
 }
 
@@ -122,9 +158,30 @@ mod tests {
     use super::*;
     #[test]
     fn player_names_require_an_exact_executable_or_packaged_identity(){
-        for (source,exe) in [("QQMusic.exe","qqmusic.exe"),("kugou","kugou.exe"),("汽水音乐","sodamusic.exe")]{assert_eq!(executable(source).as_deref(),Some(exe));}
+        for (source,exe) in [("QQMusic.exe","qqmusic.exe"),("Tencent.QQMusic","qqmusic.exe"),("kugou","kugou.exe"),("汽水音乐","sodamusic.exe")]{assert_eq!(executable(source).as_deref(),Some(exe));}
         for source in ["","music","QQMusic.exe.bak",r"C:\QQMusic.exe","SpotifyAB.SpotifyMusic_123!Spotify"]{assert_eq!(executable(source),None);}
     }
+    #[test]
+    fn stuck_audio_driver_does_not_block_song_sampling(){
+        let (release,wait)=mpsc::channel::<()>();let (entered,started)=mpsc::channel();
+        assert!(submit(Box::new(move||{let _=entered.send(());let _=wait.recv_timeout(Duration::from_secs(10));})));
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        let mut reader=Reader::default();let start=Instant::now();
+        for i in 0..20 {assert_eq!(reader.poll(&format!("daozai-stuck-{i}.exe")),None);}
+        assert!(start.elapsed()<Duration::from_millis(200),"音量线程卡住时，采样线程不能跟着等待");
+        drop(release);
+    }
+
+    #[test]
+    fn expired_write_is_discarded_when_the_worker_resumes(){
+        let (release,wait)=mpsc::channel::<()>();
+        assert!(submit(Box::new(move||{let _=wait.recv_timeout(Duration::from_secs(10));})));
+        let (ran,observed)=mpsc::channel();
+        assert!(!run(move|_|{let _=ran.send(());true}));
+        drop(release);
+        assert_eq!(observed.recv_timeout(Duration::from_secs(3)),Err(mpsc::RecvTimeoutError::Disconnected));
+    }
+
     #[test]
     fn unknown_player_cannot_change_system_volume(){
         assert_eq!(read("daozai-missing-player.exe"),None);

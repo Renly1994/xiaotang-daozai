@@ -78,7 +78,14 @@ impl App {
             bar.interact_pointer_pos().or_else(||ctx.input(|i|i.pointer.interact_pos()))
                 .map(|pointer|((c.to_local(pointer).x-bx)/bw).clamp(0.0,1.0) as f64*np.duration)
         }else{None};
-        let position=seek_position.unwrap_or(np.position);
+        // 松手后播放器的新位置要等下一轮采样才回来（QQ 音乐尤其慢），先用目标值顶着，否则滑块会先弹回旧位置再跳过去。
+        let pending_position=self.music_seek_ui.as_ref().filter(|(_,title)|*title==np.title).map(|(target,_)|*target);
+        // 切到上一首 / 下一首后先本地归零：新歌位置要等下一轮采样，否则会拿旧歌进度配新歌名停一下。
+        let restart=self.music_restart_at.filter(|at|self.t<at+1.5).map(|at|(self.t-at).max(0.0));
+        let position=seek_position.or(pending_position).unwrap_or_else(||match restart {
+            Some(fresh) if np.position>fresh+1.0=>fresh,
+            _=>np.position,
+        });
         let frac=if np.duration>0.0 {(position/np.duration).clamp(0.0,1.0) as f32}else{0.0};
         let (time_y,time_size,right)=if with_lyrics {(100.0,10.0,220.0)}else{(97.0,15.0,375.0)};
         c.text(44.0,time_y,&mmss(position),time_size,W::Regular,tc,H::Left);
@@ -104,7 +111,11 @@ impl App {
         if bh>0.01 {c.faded(bh).circle(bx+bw*frac,by,4.5,theme::WHITE);}
         }
         if bar.clicked() || bar.drag_stopped() {
-            if let Some(position)=seek_position {cmds.push(Cmd::Media(Transport::Seek(position)));}
+            if let Some(position)=seek_position {
+                self.music_seek_ui=Some((position,np.title.clone()));
+                self.music_seek_quiet_until=self.t+2.5;
+                cmds.push(Cmd::Media(Transport::Seek(position)));
+            }
         }
 
         let y=118.0;
@@ -138,9 +149,9 @@ impl App {
             }
         }
         if has {
-            if previous.clicked() {cmds.push(Cmd::Media(Transport::Prev));}
+            if previous.clicked() {self.music_restart_at=Some(self.t);self.music_seek_ui=None;cmds.push(Cmd::Media(Transport::Prev));}
             if play.clicked() {cmds.push(Cmd::Media(Transport::Toggle));}
-            if next.clicked() {cmds.push(Cmd::Media(Transport::Next));}
+            if next.clicked() {self.music_restart_at=Some(self.t);self.music_seek_ui=None;cmds.push(Cmd::Media(Transport::Next));}
         }
         if lyrics_button.on_hover_text(if self.show_lyrics {"隐藏歌词"}else{"显示歌词"}).clicked() {
             if !has {self.say("先放一首歌吧");}
@@ -365,12 +376,12 @@ impl App {
             if sit {
                 self.settings.sit_remind = !self.settings.sit_remind;
                 self.settings.save();
-                if self.settings.sit_remind { self.sit_alerted = self.t; }
+                self.confirm_health_reminder(crate::extras::HealthReminder::Sit);
                 self.say(if self.settings.sit_remind { "久坐提醒已打开" } else { "久坐提醒已关闭" });
             } else {
                 self.water.remind = !self.water.remind;
                 self.water.save();
-                self.last_reminder = self.t;
+                self.confirm_health_reminder(crate::extras::HealthReminder::Water);
                 self.say(if self.water.remind { "喝水提醒已打开" } else { "喝水提醒已关闭" });
             }
         }
@@ -424,14 +435,21 @@ impl App {
     fn water_body(&mut self, c: &Card, env: &Env) {
         let pct = self.water.percent();
         let liters = self.water_ml / 1000.0;
-        let ww = c.text(44.0, 61.0, &format!("{liters:.1}"), size::HERO, W::Bold, theme::WHITE, H::Left);
-        c.text(44.0 + ww + 5.0, 60.0, &format!("/ {:.1} L", self.water.goal_ml as f32 / 1000.0), 11.0, W::Semibold, theme::GRAY, H::Left);
+        let pending=self.health_pending[crate::extras::HealthReminder::Water as usize];
+        if pending {
+            c.text(44.0,59.0,"待喝水",24.0,W::Bold,theme::BLUE,H::Left);
+        }else{
+            let ww = c.text(44.0, 61.0, &format!("{liters:.1}"), size::HERO, W::Bold, theme::WHITE, H::Left);
+            c.text(44.0 + ww + 5.0, 60.0, &format!("/ {:.1} L", self.water.goal_ml as f32 / 1000.0), 11.0, W::Semibold, theme::GRAY, H::Left);
+        }
 
         // 今天 · 3% · 下次 08:07
         let mut x = 44.0;
         x += c.text(x, 77.0, "今天 · ", size::SMALL, W::Regular, theme::GRAY, H::Left);
         x += c.text(x, 77.0, &format!("{pct:.0}%"), size::SMALL, W::Bold, theme::BLUE, H::Left);
-        if self.water.percent()>=100.0 {
+        if pending {
+            c.text(x,77.0," · 待确认",size::SMALL,W::Regular,theme::BLUE,H::Left);
+        } else if self.water.percent()>=100.0 {
             c.text(x,77.0," · 已达标",size::SMALL,W::Regular,theme::GRAY,H::Left);
         } else if self.water.remind && self.lunch_now(env) {
             c.text(x, 77.0, " · 午休中", size::SMALL, W::Regular, theme::GRAY, H::Left);
@@ -489,7 +507,7 @@ impl App {
 
     /// 久坐：与喝水同一版式，但只讲一件事——「还有多久该起来」。
     /// 左边大数字是倒计时，状态行补充已坐多久和几点提醒；右侧环是到下次提醒的进度，环心是椅子，
-    /// 到点后变黄。
+    /// 提醒后保持待处理，确认或起身后才重新计时。
     fn sit_body(&mut self, c: &Card, env: &Env) {
         let on = self.settings.sit_remind;
         let sat = self.sat_minutes();
@@ -498,33 +516,36 @@ impl App {
         let lunch = self.lunch_now(env);
         let in_hours = self.remind_window(env);
         let left = ((self.sit_due() - self.t).max(0.0) / 60.0).ceil() as u32;
-        let waiting = on && in_hours && left == 0;
-        let overdue = waiting && !focusing;
-        let counting = on && in_hours && left > 0;
-        // 进度 = 距下一次提醒走了多少；提醒过一次后从头再走，和大数字的倒计时一致。
+        let pending = on && self.health_pending[crate::extras::HealthReminder::Sit as usize];
+        let counting = on && !pending && left > 0;
+        // 待处理时进度停在满环，确认后从零开始。
         let frac = if on { (1.0 - (self.sit_due() - self.t) / (goal as f64 * 60.0)).clamp(0.0, 1.0) as f32 }
             else { (sat as f32 / goal as f32).clamp(0.0, 1.0) };
-        let fill = if overdue { theme::YELLOW } else { theme::SIT_GREEN };
+        let fill = theme::SIT_GREEN;
 
-        if overdue {
-            c.text(44.0, 59.0, "该起身了", 24.0, W::Bold, theme::YELLOW, H::Left);
+        if pending {
+            c.text(44.0, 59.0, "待活动", 24.0, W::Bold, fill, H::Left);
+        } else if counting {
+            let ww = c.text(44.0, 61.0, &left.to_string(), size::HERO, W::Bold, theme::WHITE, H::Left);
+            c.text(44.0 + ww + 5.0, 60.0, "分钟后提醒", 11.0, W::Semibold, theme::GRAY, H::Left);
         } else {
-            let (num, unit) = if counting { (left, "分钟后提醒") } else { (sat, "分钟 · 已坐") };
-            let ww = c.text(44.0, 61.0, &num.to_string(), size::HERO, W::Bold, theme::WHITE, H::Left);
-            c.text(44.0 + ww + 5.0, 60.0, unit, 11.0, W::Semibold, theme::GRAY, H::Left);
+            c.text(44.0,59.0,if on{"等待提醒"}else{"已关闭"},24.0,W::Bold,theme::GRAY,H::Left);
         }
 
         // 已坐 25 分钟 · 10:45 提醒
-        let tail = if !on { "久坐提醒已关".to_string() }
+        let tail = if pending { "确认提醒或起身后重新计时".to_string() }
+            else if !on { "久坐提醒已关闭".to_string() }
             else if lunch { "午休中不提醒".to_string() }
             else if !in_hours { format!("{:02}:00–{:02}:00 外不提醒", self.settings.water_start, self.settings.water_end) }
-            else if waiting && focusing { "专注结束后再提醒".to_string() }
-            else if overdue { "起来走走再回来".to_string() }
+            else if !counting && focusing { "专注结束后再提醒".to_string() }
             else { format!("{} 提醒", Self::clock_after(env, self.sit_due() - self.t)) };
         let mut x = 44.0;
-        x += c.text(x, 77.0, "已坐 ", size::SMALL, W::Regular, theme::GRAY, H::Left);
-        x += c.text(x, 77.0, &format!("{sat} 分钟"), size::SMALL, W::Bold, fill, H::Left);
-        c.text(x, 77.0, &format!(" · {tail}"), size::SMALL, W::Regular, if overdue { theme::YELLOW } else { theme::GRAY }, H::Left);
+        if !pending && counting {
+            x += c.text(x, 77.0, "已坐 ", size::SMALL, W::Regular, theme::GRAY, H::Left);
+            x += c.text(x, 77.0, &format!("{sat} 分钟"), size::SMALL, W::Bold, fill, H::Left);
+            x += c.text(x,77.0," · ",size::SMALL,W::Regular,theme::GRAY,H::Left);
+        }
+        c.text(x, 77.0, &tail, size::SMALL, W::Regular, theme::GRAY, H::Left);
         c.fill(44.0, 84.0, 151.0, 3.5, 1.75, Color32::from_rgb(34, 34, 37));
         if frac > 0.0 {
             c.fill(44.0, 84.0, (151.0 * frac).max(3.5), 3.5, 1.75, fill);
@@ -533,14 +554,14 @@ impl App {
         let (b, bc) = capsule(c, 43.0, 98.0, 62.0, 25.0, "sit-stand", Color32::from_rgb(24, 84, 52), Color32::from_rgb(30, 104, 64));
         paint::chair(&bc, 55.5, 110.5, 0.36, Color32::from_rgb(150, 230, 180));
         bc.text(64.0, 114.0, "起身了", size::BODY, W::Semibold, Color32::from_rgb(220, 244, 228), H::Left);
-        if b.on_hover_text("久坐计时归零；锁屏（Win + L）也会归零").clicked() { self.stood_up(); }
+        if b.on_hover_text("确认已起身，重新计时").clicked() { self.stood_up(); }
 
         // 右侧：与喝水同一个环，环心是椅子。
         Self::progress_ring(c, 292.0, 78.0, 33.0, 6.0, frac, Color32::from_rgb(16, 48, 32), if on { fill } else { Color32::from_gray(90) });
         let (label, ink) = if !on { ("已关", theme::GRAY) }
-            else if overdue { ("动一动", theme::YELLOW) }
+            else if pending { ("动一动", fill) }
             else { ("坐着", Color32::from_gray(217)) };
-        paint::chair(c, 292.0, 76.0, 0.75, if !on { theme::GRAY } else if overdue { theme::YELLOW } else { theme::WHITE });
+        paint::chair(c, 292.0, 76.0, 0.75, if !on { theme::GRAY } else if pending { fill } else { theme::WHITE });
         c.text(292.0, 101.0, label, 10.5, W::Semibold, ink, H::Center);
     }
 

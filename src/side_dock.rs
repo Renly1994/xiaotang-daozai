@@ -27,8 +27,8 @@ pub(crate) enum SideItem {
 }
 
 impl SideItem {
-    fn height(self) -> f32 {
-        match self { Self::Clock => 32.0, Self::Weather => 40.0, Self::Battery => 20.0, Self::Music => 18.0, Self::Focus => 22.0, Self::Bell => 22.0, Self::Quota(_, h) => h }
+    fn height(self, clock_seconds: bool) -> f32 {
+        match self { Self::Clock => if clock_seconds {46.0}else{32.0}, Self::Weather => 40.0, Self::Battery => 20.0, Self::Music => 18.0, Self::Focus => 22.0, Self::Bell => 22.0, Self::Quota(_, h) => h }
     }
 }
 
@@ -38,7 +38,8 @@ impl App {
 
     /// 竖向胶囊里依次显示的内容。
     pub(crate) fn side_items(&self) -> Vec<SideItem> {
-        let mut items = vec![SideItem::Clock];
+        let mut items = Vec::new();
+        if self.settings.show_clock {items.push(SideItem::Clock);}
         if self.weather_pill().is_some() {items.push(SideItem::Weather);}
         if self.settings.show_battery && self.resident_power.0.is_some() { items.push(SideItem::Battery); }
         if self.media.is_music() { items.push(SideItem::Music); }
@@ -50,7 +51,7 @@ impl App {
 
     /// 收起时竖向胶囊的长度。
     pub(crate) fn side_bar_len(&self) -> f32 {
-        14.0 + self.side_items().iter().map(|i| i.height()).sum::<f32>()
+        14.0 + self.side_items().iter().map(|i| i.height(self.settings.clock_seconds)).sum::<f32>()
     }
 
     /// 收起态尺寸（屏幕宽 × 高）。极简模式是贴边的一小段竖线。
@@ -114,19 +115,22 @@ impl App {
     /// 竖向胶囊的内容。`c` 的原点是胶囊左上角。
     pub(crate) fn side_bar(&mut self, c: &Card, width: f32, height: f32, env: &Env) {
         let items = self.side_items();
-        let total: f32 = items.iter().map(|i| i.height()).sum();
+        let total: f32 = items.iter().map(|i| i.height(self.settings.clock_seconds)).sum();
         let cx = width / 2.0;
         let fitted=c.scaled(cx,height/2.0,((SIDE_H-24.0)/(total+14.0)).min(1.0));
         let c=&fitted;
         let mut y = (height - total) / 2.0;
         for item in items {
-            let h = item.height();
+            let h = item.height(self.settings.clock_seconds);
             let mid = y + h / 2.0;
             match item {
                 SideItem::Clock => {
-                    let (hour, minute) = side_clock(&self.settings.clock_text(&env.clock));
-                    c.text(cx, mid - 1.0, &hour, 13.5, W::Bold, theme::WHITE, H::Center);
-                    c.text(cx, mid + 13.0, &minute, 13.5, W::Bold, theme::WHITE, H::Center);
+                    let text=self.settings.clock_text(&env.clock);
+                    let (hour, minute) = side_clock(&text);
+                    let top=mid-if self.settings.clock_seconds {8.0}else{1.0};
+                    c.text(cx, top, &hour, 13.5, W::Bold, theme::WHITE, H::Center);
+                    c.text(cx, top + 14.0, &minute, 13.5, W::Bold, theme::WHITE, H::Center);
+                    if self.settings.clock_seconds {c.text(cx,top+28.0,text.rsplit(':').next().unwrap_or("--"),12.0,W::Bold,theme::GRAY,H::Center);}
                 }
                 SideItem::Weather => self.draw_side_weather(c,cx,mid),
                 SideItem::Battery => paint::battery(c, cx, mid, env.battery, env.charging, 0.72),

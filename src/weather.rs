@@ -122,6 +122,10 @@ fn parse_sun_times(value:&Value)->Option<SunTimes> {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
+    #[serde(default)]
+    pub condition: Option<String>,
+    #[serde(default)]
+    pub attributions: Vec<String>,
     pub place: String,
     #[serde(default)]
     pub position: Option<Position>,
@@ -148,6 +152,10 @@ pub struct Snapshot {
     pub at: i64,
 }
 
+impl Snapshot {
+    pub fn description(&self)->&str {self.condition.as_deref().unwrap_or_else(||describe(self.code))}
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Position {
     pub lat: f64, pub lon: f64, pub label: String,
@@ -163,36 +171,104 @@ impl Position {
 }
 
 fn json(response: ureq::Response) -> Result<Value, String> {
-    serde_json::from_reader(response.into_reader().take(1024 * 1024)).map_err(|_| "天气响应格式无效".to_string())
+    serde_json::from_reader(response.into_reader().take(1024 * 1024)).map_err(|_| "响应格式无效".to_string())
 }
 
-fn get(agent: &ureq::Agent, url: &url::Url) -> Result<Value, String> {
-    agent.get(url.as_str()).set("Accept", "application/json").call()
-        .map_err(|error| match error { ureq::Error::Status(code, _) => format!("服务返回 {code}"), _ => "网络不可用".to_string() })
-        .and_then(json)
+fn get(agent: &ureq::Agent, url: &url::Url, service: &str) -> Result<Value, String> {
+    get_with_proxy(agent,url,service,network_proxy().as_deref())
 }
 
-fn http_agent() -> ureq::Agent {
-    let mut builder=ureq::AgentBuilder::new().timeout(Duration::from_secs(12));
-    let proxy=["HTTPS_PROXY","https_proxy","ALL_PROXY","all_proxy","HTTP_PROXY","http_proxy"].iter()
-        .find_map(|key|std::env::var(key).ok().filter(|value|!value.is_empty())).or_else(crate::quota::system_proxy);
+fn get_with_proxy(agent: &ureq::Agent, url: &url::Url, service: &str, proxy: Option<&str>) -> Result<Value, String> {
+    match request(agent,url,service,"direct") {
+        Ok(value)=>Ok(value),
+        Err((error,retryable))=>{
+            if retryable {if let Some(proxy)=proxy {
+                return request(&http_agent_for(Some(proxy)),url,service,"proxy")
+                    .map_err(|(last,_)|format!("{service}：直连{error}；代理{last}"));
+            }}
+            Err(format!("{service}：{error}"))
+        }
+    }
+}
+
+fn request(agent: &ureq::Agent, url: &url::Url, service: &str, route: &str) -> Result<Value,(String,bool)> {
+    let start=std::time::Instant::now();
+    let mut detail="ok".to_string();
+    let result=agent.get(url.as_str()).set("Accept", "application/json").set("User-Agent",concat!("Daozai/",env!("CARGO_PKG_VERSION"))).call()
+        .map_err(|error| match error {
+            ureq::Error::Status(code, _) => {detail=format!("http_{code}");(format!("服务返回 {code}"),code>=500 || code==403 || code==408)},
+            ureq::Error::Transport(error) => {
+                let io_kind=std::error::Error::source(&error).and_then(|cause|cause.downcast_ref::<std::io::Error>()).map(|error|error.kind());
+                detail=format!("{:?}/{io_kind:?}",error.kind());
+                let message=match error.kind() {
+                    ureq::ErrorKind::Dns => "域名解析失败",
+                    ureq::ErrorKind::ProxyConnect => "代理连接失败",
+                    ureq::ErrorKind::ProxyUnauthorized => "代理认证失败",
+                    _ if io_kind==Some(std::io::ErrorKind::TimedOut) || io_kind==Some(std::io::ErrorKind::WouldBlock) => "请求超时",
+                    _ => "网络连接失败，请检查网络或代理",
+                };
+                (message.to_string(),true)
+            }
+        })
+        .and_then(|response|json(response).map_err(|error|{detail="invalid_response".into();(error,true)}));
+    if !cfg!(test) {
+        // 只记录环节、域名与错误类别，不记录查询参数、IP、坐标或代理地址。
+        crate::resources::append_log(&crate::model::config_dir().join("diagnostics"),"weather-network.log",
+            &format!("time={} stage={service} route={route} host={} elapsed_ms={} result={detail}",chrono::Utc::now().timestamp(),url.host_str().unwrap_or_default(),start.elapsed().as_millis()));
+    }
+    result
+}
+
+fn network_proxy() -> Option<String> {
+    ["HTTPS_PROXY","https_proxy","ALL_PROXY","all_proxy","HTTP_PROXY","http_proxy"].iter()
+        .find_map(|key|std::env::var(key).ok().filter(|value|!value.is_empty())).or_else(crate::quota::system_proxy)
+}
+
+fn http_agent_for(proxy: Option<&str>) -> ureq::Agent {
+    let mut builder=ureq::AgentBuilder::new().try_proxy_from_env(false).timeout_connect(Duration::from_secs(4)).timeout(Duration::from_secs(12));
     if let Some(proxy)=proxy.and_then(|value|ureq::Proxy::new(value).ok()){builder=builder.proxy(proxy);}
     builder.build()
 }
 
+fn http_agent() -> ureq::Agent {http_agent_for(None)}
+
 /// 按网络出口定位；国内常见出口能拿到中文城市名。
 pub fn locate(agent: &ureq::Agent) -> Result<Position, String> {
-    let url = url::Url::parse("https://ipwho.is/?lang=zh-CN").map_err(|_| "定位服务地址无效")?;
-    let value = get(agent, &url)?;
-    if !value["success"].as_bool().unwrap_or(false) { return Err("自动定位失败，请在设置里填写城市".into()); }
+    locate_with_sources(agent,&[("https://ipwho.is/?lang=zh-CN",false),("https://free.freeipapi.com/api/v1/json",true)],network_proxy().as_deref())
+}
+
+fn locate_with_sources(agent: &ureq::Agent, sources: &[(&str,bool)], proxy: Option<&str>) -> Result<Position,String> {
+    let mut retry=vec![true;sources.len()];
+    let mut last_error="自动定位暂不可用，请手动选择城市".to_string();
+    // 先尝试两个直连服务，再回退到已配置的代理，避免主服务故障时过早采用代理出口的位置。
+    for through_proxy in [false,true] {
+        if through_proxy && (proxy.is_none() || !retry.iter().any(|retry|*retry)) {break;}
+        let configured;
+        let client=if through_proxy {configured=http_agent_for(proxy);&configured}else{agent};
+        for (index,&(address,backup)) in sources.iter().enumerate() {
+            if !retry[index] {continue;}
+            let url=url::Url::parse(address).map_err(|_|"定位服务地址无效")?;
+            match request(client,&url,"自动定位",if through_proxy{"proxy"}else{"direct"}) {
+                Ok(value)=>{
+                    retry[index]=false;
+                    match parse_location(&value,backup) {Ok(position)=>return Ok(position),Err(error)=>last_error=error}
+                }
+                Err((error,retryable))=>{retry[index]=retryable;last_error=format!("自动定位：{error}");}
+            }
+        }
+    }
+    Err(last_error)
+}
+
+fn parse_location(value: &Value, backup: bool) -> Result<Position,String> {
+    if !backup && !value["success"].as_bool().unwrap_or(false) { return Err("自动定位失败，请在设置里填写城市".into()); }
     let lat = value["latitude"].as_f64().ok_or("定位结果缺少坐标")?;
     let lon = value["longitude"].as_f64().ok_or("定位结果缺少坐标")?;
-    let label = value["city"].as_str().filter(|s| !s.trim().is_empty())
-        .or_else(|| value["region"].as_str().filter(|s| !s.trim().is_empty()))
-        .or_else(|| value["country"].as_str().filter(|s| !s.trim().is_empty()))
-        .unwrap_or("当地").trim().to_string();
-    let region=value["region"].as_str().unwrap_or_default().trim();
-    let region=if region.is_empty() {"网络出口".into()} else {format!("{region} · 网络出口")};
+    let fields=if backup {["cityName","regionName","countryName"]}else{["city","region","country"]};
+    let label = fields.iter().find_map(|key|value[*key].as_str().filter(|s| !s.trim().is_empty()));
+    if backup && label.is_none() {return Err("定位结果缺少地区".into());}
+    let label=label.unwrap_or("当地").trim().to_string();
+    let region=value[fields[1]].as_str().unwrap_or_default().to_string();
     let position=Position { lat, lon, label, region };
     if !position.valid() {return Err("定位结果坐标无效".into());}
     Ok(position)
@@ -288,7 +364,7 @@ fn reverse_geocode(agent: &ureq::Agent, position: Position) -> Result<Position, 
         .append_pair("latitude", &format!("{:.5}", position.lat))
         .append_pair("longitude", &format!("{:.5}", position.lon))
         .append_pair("localityLanguage", "zh-CN");
-    let value = get(agent, &url)?;
+    let value = get(agent, &url, "反向地理编码")?;
     reverse_position(position, &value).ok_or_else(|| "反向地理编码没有返回城市名".into())
 }
 
@@ -415,7 +491,7 @@ pub fn search_cities(agent: &ureq::Agent, name: &str) -> Result<Vec<Position>, S
     for query in city_queries(name) {
         let mut url=url::Url::parse("https://geocoding-api.open-meteo.com/v1/search").map_err(|_|"定位服务地址无效")?;
         url.query_pairs_mut().append_pair("name",&query).append_pair("count","10").append_pair("language","zh").append_pair("format","json");
-        match get(agent,&url) {
+        match get(agent,&url,"城市搜索") {
             Ok(value)=>found.extend(city_candidates(&value)),
             Err(message)=>error=Some(message),
         }
@@ -461,7 +537,7 @@ fn fetch_forecast(agent: &ureq::Agent, position: Position) -> Result<Snapshot, S
         query.append_pair("timezone", "auto");
         query.append_pair("forecast_days", &FORECAST_DAYS.to_string());
     }
-    let mut snapshot=parse(&position.label, &get(agent, &url)?)?;
+    let mut snapshot=parse(&position.label, &get(agent, &url, "天气预报")?)?;
     snapshot.position=Some(position);
     Ok(snapshot)
 }
@@ -504,6 +580,7 @@ pub fn parse(place: &str, value: &Value) -> Result<Snapshot, String> {
     let hhmm = |list: Option<&Vec<Value>>| list.and_then(|items| items.get(0)).and_then(Value::as_str)
         .and_then(|s| s.get(11..16)).map(str::to_string);
     Ok(Snapshot {
+        condition:None,attributions:Vec::new(),
         place: place.to_string(),
         position: None,
         auto: false,
@@ -594,6 +671,8 @@ pub struct State {
     pub failures: u32,
     /// 自动定位结果与取得时间；3 小时内复用，不必每次刷新都查网络出口。
     located: Option<(Position, i64)>,
+    /// 定位时使用的代理；下次请求发现代理变化就重新定位，不增加常驻网络监听。
+    location_proxy: Option<String>,
     /// 上一次请求使用的城市。
     last_city: Option<String>,
     last_position: Option<Position>,
@@ -619,10 +698,7 @@ impl State {
         });
         state.cached.truncate(CACHE_LIMIT);
         state.snapshot=state.cached_for(city,state.active_position.as_ref()).cloned();
-        // 自动定位模式下，缓存里的坐标也可复用，启动时省一次出口定位。
-        if city.trim().is_empty() {
-            state.located=state.snapshot.as_ref().and_then(|s|s.position.clone().map(|p|(p,s.at)));
-        }
+        // 快照保留用于展示；其中没有定位时刻和代理信息，启动后重新确认网络出口。
         state.cache=Some(path);
         state
     }
@@ -700,7 +776,22 @@ impl State {
         enabled && (self.city_changed(city) || (self.stale(now) && t-self.last_start>=self.backoff())) && self.can_refresh(city,t)
     }
 
+    fn cached_location(&mut self, city: &str, now: i64, proxy: Option<&str>, manual: bool) -> Option<Position> {
+        if self.location_proxy.as_deref()!=proxy || manual && city.is_empty() {self.forget_location();}
+        self.location_proxy=proxy.map(str::to_owned);
+        self.located.as_ref().filter(|(p,at)|city.is_empty() && p.valid() && (0..LOCATE_TTL).contains(&(now-at))).map(|(p,_)|p.clone())
+    }
+
     pub fn refresh(&mut self, city: &str, t: f64) -> bool {
+        self.refresh_inner(city,t,false)
+    }
+
+    /// 用户主动刷新：自动定位模式下同时更新位置，仍遵守加载状态与冷却间隔。
+    pub fn refresh_manual(&mut self, city: &str, t: f64) -> bool {
+        self.refresh_inner(city,t,true)
+    }
+
+    fn refresh_inner(&mut self, city: &str, t: f64, manual: bool) -> bool {
         if !self.can_refresh(city,t) { return false; }
         let city = city.trim().to_string();
         let position=self.position_for(&city).cloned();
@@ -710,7 +801,8 @@ impl State {
         self.last_city = Some(city.clone());
         self.last_position=position.clone();
         let now=chrono::Utc::now().timestamp();
-        let located=self.located.as_ref().filter(|(p,at)|city.is_empty() && p.valid() && (0..LOCATE_TTL).contains(&(now-at))).map(|(p,_)|p.clone());
+        let proxy=network_proxy();
+        let located=self.cached_location(&city,now,proxy.as_deref(),manual);
         let (tx, rx) = mpsc::channel();
         let fresh_location=city.is_empty() && located.is_none();
         self.rx = Some((rx,fresh_location));
@@ -778,6 +870,198 @@ fn cache_matches(snapshot: &Snapshot, city: &str, position: Option<&Position>) -
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn local_weather_server(status: u16, body: &str) -> (url::Url,impl FnOnce()->bool) {
+        use std::io::Write;
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url=url::Url::parse(&format!("http://{}",listener.local_addr().unwrap())).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let response=format!("HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
+        let (stop,cancel)=mpsc::channel::<()>();
+        let worker=std::thread::spawn(move||{
+            loop {
+                if !matches!(cancel.try_recv(),Err(TryRecvError::Empty)){return false;}
+                if let Ok((mut stream,_))=listener.accept() {
+                    // Windows 接受的连接继承监听器的非阻塞状态，先等客户端发出请求。
+                    stream.set_nonblocking(false).unwrap();
+                    stream.set_read_timeout(Some(Duration::from_secs(12))).unwrap();
+                    if !matches!(stream.read(&mut [0;4096]),Ok(n) if n>0){return false;}
+                    return stream.write_all(response.as_bytes()).is_ok();
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        (url,move||{drop(stop);worker.join().unwrap()})
+    }
+
+    #[test]
+    fn direct_weather_success_does_not_depend_on_a_working_proxy(){
+        let (url,direct)=local_weather_server(200,"{\"ok\":true}");
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy=format!("http://{}",listener.local_addr().unwrap());drop(listener);
+        let result=get_with_proxy(&http_agent_for(None),&url,"天气预报",Some(&proxy));
+        let received=direct();
+        assert!(result.is_ok(),"失效代理不应阻断可用的直连：{result:?}");
+        assert!(received);
+    }
+
+    #[test]
+    fn direct_weather_default_client_ignores_a_stale_environment_proxy_when_direct_works(){
+        let _guard=crate::ui_tests::ENV_LOCK.lock().unwrap_or_else(|error|error.into_inner());
+        let (url,worker)=local_weather_server(200,"{\"ok\":true}");
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy=format!("http://{}",listener.local_addr().unwrap());drop(listener);
+        let previous=std::env::var_os("HTTPS_PROXY");std::env::set_var("HTTPS_PROXY",proxy);
+        let result=get(&http_agent(),&url,"天气预报");
+        match previous {Some(value)=>std::env::set_var("HTTPS_PROXY",value),None=>std::env::remove_var("HTTPS_PROXY")}
+        assert!(worker());assert_eq!(result.unwrap()["ok"],true);
+    }
+
+    #[test]
+    fn direct_weather_can_fall_back_to_an_existing_proxy(){
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url=url::Url::parse(&format!("http://{}",listener.local_addr().unwrap())).unwrap();drop(listener);
+        let (proxy,worker)=local_weather_server(200,"{\"ok\":true}");
+        let result=get_with_proxy(&http_agent_for(None),&url,"天气预报",Some(proxy.as_str()));
+        assert!(worker());assert_eq!(result.unwrap()["ok"],true);
+    }
+
+    #[test]
+    fn direct_weather_does_not_retry_invalid_unauthorized_or_rate_limited_requests_through_a_proxy(){
+        for status in [400,401,429] {
+            let (url,direct)=local_weather_server(status,"{}");
+            let (proxy,fallback)=local_weather_server(200,"{\"ok\":true}");
+            let result=get_with_proxy(&http_agent_for(None),&url,"天气预报",Some(proxy.as_str()));
+            let direct_received=direct();let proxy_received=fallback();
+            assert!(direct_received);assert!(!proxy_received,"服务拒绝或限流后不能通过切换代理重试");
+            assert!(result.unwrap_err().contains(&status.to_string()));
+        }
+    }
+
+    #[test]
+    fn direct_weather_keeps_proxy_fallback_for_blocked_or_unavailable_services(){
+        for status in [403,503] {
+            let (url,direct)=local_weather_server(status,"{}");
+            let (proxy,fallback)=local_weather_server(200,"{\"ok\":true}");
+            let result=get_with_proxy(&http_agent_for(None),&url,"天气预报",Some(proxy.as_str()));
+            assert!(direct());assert!(fallback());
+            assert_eq!(result.unwrap()["ok"],true);
+        }
+    }
+
+    #[test]
+    fn direct_weather_uses_backup_location_before_the_proxy_exit(){
+        let (primary,first)=local_weather_server(503,"{}");
+        let (backup,second)=local_weather_server(200,r#"{"latitude":30.27,"longitude":120.15,"cityName":"杭州","regionName":"浙江","countryName":"中国"}"#);
+        let (proxy,third)=local_weather_server(200,r#"{"success":true,"latitude":40.71,"longitude":-74.0,"city":"代理出口"}"#);
+        let result=locate_with_sources(&http_agent_for(None),&[(primary.as_str(),false),(backup.as_str(),true)],Some(proxy.as_str()));
+        let received=[first(),second(),third()];
+        assert_eq!(result.unwrap().label,"杭州");assert_eq!(received,[true,true,false]);
+    }
+
+    #[test]
+    fn direct_weather_primary_location_success_skips_the_backup(){
+        let (primary,first)=local_weather_server(200,r#"{"success":true,"latitude":30.27,"longitude":120.15,"city":"杭州"}"#);
+        let (backup,second)=local_weather_server(200,"{}");
+        let result=locate_with_sources(&http_agent_for(None),&[(primary.as_str(),false),(backup.as_str(),true)],None);
+        let received=[first(),second()];
+        assert_eq!(result.unwrap().label,"杭州");assert_eq!(received,[true,false]);
+    }
+
+    #[test]
+    fn direct_weather_location_keeps_proxy_fallback_after_both_direct_services_fail(){
+        let (primary,first)=local_weather_server(503,"{}");
+        let (backup,second)=local_weather_server(503,"{}");
+        let (proxy,third)=local_weather_server(200,r#"{"success":true,"latitude":30.27,"longitude":120.15,"city":"代理定位"}"#);
+        let result=locate_with_sources(&http_agent_for(None),&[(primary.as_str(),false),(backup.as_str(),true)],Some(proxy.as_str()));
+        let received=[first(),second(),third()];
+        assert_eq!(result.unwrap().label,"代理定位");assert_eq!(received,[true,true,true]);
+    }
+
+    #[test]
+    fn direct_weather_backup_location_requires_valid_coordinates(){
+        let value=json!({"latitude":30.27,"longitude":120.15,"cityName":"杭州","regionName":"浙江","countryName":"中国"});
+        let position=parse_location(&value,true).unwrap();
+        assert_eq!(position.label,"杭州");assert_eq!(position.region,"浙江");assert_eq!(position.lat,30.27);
+        for invalid in [json!({}),json!({"cityName":"杭州","latitude":999,"longitude":120.15}),json!({"cityName":"杭州","latitude":30.27}),
+            json!({"latitude":0,"longitude":0,"cityName":"","regionName":"","countryName":""})] {
+            assert!(parse_location(&invalid,true).is_err());
+        }
+        assert!(parse_location(&json!({"success":false,"latitude":30.27,"longitude":120.15,"city":"杭州"}),false).is_err());
+    }
+
+    #[test]
+    fn regression_weather_proxy_switch_relocates_without_shortening_the_normal_cache(){
+        let position=Position{lat:30.0,lon:120.0,label:"杭州".into(),region:String::new()};
+        let mut state=State{located:Some((position.clone(),1000)),..Default::default()};
+        assert_eq!(state.cached_location("",1100,None,false),Some(position.clone()));
+        assert!(state.cached_location("",1100,Some("http://127.0.0.1:7890"),false).is_none(),"开启代理后不能继续使用直连定位");
+        state.located=Some((position.clone(),1100));
+        assert_eq!(state.cached_location("",1200,Some("http://127.0.0.1:7890"),false),Some(position.clone()));
+        assert!(state.cached_location("",1200,None,false).is_none(),"关闭代理后不能保留代理出口的位置");
+        state.located=Some((position,1200));
+        assert!(state.cached_location("",1200+LOCATE_TTL,None,false).is_none());
+    }
+
+    #[test]
+    fn regression_weather_manual_refresh_relocates_only_in_automatic_mode(){
+        let position=Position{lat:30.0,lon:120.0,label:"杭州".into(),region:String::new()};
+        let mut state=State{located:Some((position.clone(),1000)),..Default::default()};
+        assert!(state.cached_location("杭州",1100,None,true).is_none());
+        assert_eq!(state.cached_location("",1100,None,false),Some(position));
+        assert!(state.cached_location("",1100,None,true).is_none(),"手动刷新自动定位时应重新确认网络出口");
+    }
+
+    #[test]
+    fn manual_relocation_keeps_cooldowns_and_active_requests(){
+        let position=Position{lat:30.0,lon:120.0,label:"杭州".into(),region:String::new()};
+        let mut state=State{last_city:Some(String::new()),last_start:100.0,located:Some((position,1000)),..Default::default()};
+        assert!(!state.refresh_manual("",129.0));assert!(state.located.is_some());
+        state.error=Some("旧错误".into());
+        assert!(!state.refresh_manual("",219.0));assert!(state.located.is_some());
+        state.loading=true;
+        assert!(!state.refresh_manual("",1000.0));assert!(state.located.is_some());
+    }
+
+    #[test]
+    fn weather_requests_use_the_selected_proxy(){
+        use std::io::Write;
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy=format!("http://{}",listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let worker=std::thread::spawn(move||{
+            let start=std::time::Instant::now();
+            while start.elapsed()<Duration::from_secs(3) {
+                if let Ok((mut stream,_))=listener.accept() {
+                    stream.set_nonblocking(false).unwrap();
+                    stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+                    let mut request=[0;4096];let n=stream.read(&mut request).unwrap();
+                    let request=String::from_utf8_lossy(&request[..n]).into_owned();
+                    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}").unwrap();
+                    return request;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            panic!("天气请求未到达指定代理");
+        });
+        let url=url::Url::parse("http://127.0.0.1:1/weather").unwrap();
+        let result=get(&http_agent_for(Some(&proxy)),&url,"天气预报");
+        let request=worker.join().unwrap();
+        assert!(request.starts_with("GET http://127.0.0.1:1/weather "));
+        assert_eq!(result.unwrap()["ok"],true);
+    }
+
+    #[test]
+    fn regression_weather_errors_identify_the_failed_service(){
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url=url::Url::parse(&format!("http://{}",listener.local_addr().unwrap())).unwrap();
+        drop(listener);
+        let agent=ureq::AgentBuilder::new().try_proxy_from_env(false).timeout(Duration::from_secs(1)).build();
+        for service in ["自动定位","城市搜索","天气预报"] {
+            let error=get_with_proxy(&agent,&url,service,None).unwrap_err();
+            assert!(error.contains(service),"错误需要区分失败环节：{error}");
+        }
+    }
 
     #[test]
     fn weather_offline_auto_refresh_backs_off_and_recovers(){
@@ -1084,6 +1368,7 @@ mod tests {
 
 
     #[test]
+    #[test]
     #[cfg(windows)]
     #[ignore="按需联网核验系统定位与反向地理编码"]
     fn weather_reverse_probe(){
@@ -1113,15 +1398,27 @@ mod tests {
     }
 
     #[test]
+    #[ignore="按需联网验证主定位不可用时的备用定位与天气"]
+    fn weather_backup_live_probe(){
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let unavailable=format!("http://{}",listener.local_addr().unwrap());drop(listener);
+        let agent=http_agent();
+        let position=locate_with_sources(&agent,&[(unavailable.as_str(),false),("https://free.freeipapi.com/api/v1/json",true)],None).expect("备用定位直连失败");
+        let snapshot=fetch_forecast(&agent,position).expect("备用定位后的天气查询失败");
+        assert_eq!(snapshot.days.len(),FORECAST_DAYS);
+        println!("backup_place={} temp={} forecast_days={}",snapshot.place,snapshot.temp,snapshot.days.len());
+    }
+
+    #[test]
     #[ignore="按需联网核验本机定位与天气"]
     fn weather_local_probe(){
         let agent = http_agent();
         let auto = fetch(&agent, "").expect("自动定位失败");
         eprintln!("auto_place={} temp={:.1} code={} sunrise={:?} sunset={:?} days={:?}", auto.place, auto.temp, auto.code, auto.sunrise, auto.sunset,
             auto.days.iter().map(|d| (&d.label, d.high, d.low, d.rain)).collect::<Vec<_>>());
-        let candidates = search_cities(&agent, "杭州").expect("杭州搜索失败");
-        let city = candidates.iter().find(|p| p.label == "杭州市").or_else(|| candidates.first()).expect("杭州没有候选");
-        let named = fetch_at(&agent, &city.label, Some(city)).expect("按城市查询失败");
+        let candidates=search_cities(&agent,"杭州").expect("城市搜索失败");
+        let selected=candidates.iter().find(|p|p.label=="杭州" && p.region.contains("浙江")).expect("缺少浙江杭州候选");
+        let named = fetch_at(&agent, "杭州", Some(selected)).expect("按城市查询失败");
         println!("named_place={} temp={:.1}", named.place, named.temp);
     }
 

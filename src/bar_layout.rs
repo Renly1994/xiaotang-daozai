@@ -4,7 +4,7 @@ use crate::anim::{smoothstep, Spring};
 pub(crate) const CLOCK: usize = 0;
 pub(crate) const BATTERY: usize = 1;
 pub(crate) const QUOTA: usize = 2;
-/// 紧跟时钟的天气徽标；不参与用户排序，永远与时钟成组。
+/// 可独立排列的天气徽标。
 pub(crate) const WEATHER: usize = 5;
 pub(crate) fn quota_slot(position:usize)->usize {
     if position<3 {QUOTA+position} else {WIDTHS.len()+position-3}
@@ -17,9 +17,9 @@ pub(crate) const PET: usize = 9;
 pub(crate) const WEATHER_WIDTH: f32 = 38.0;
 const WIDTHS: [f32; 10] = [44.0,20.0,27.0,27.0,27.0,WEATHER_WIDTH,14.0,crate::focus_bar::WIDTH,20.0,32.0];
 
-pub(crate) const DEFAULT_ORDER: [usize;6]=[BATTERY,PET,CLOCK,QUOTA,MUSIC,FOCUS];
+pub(crate) const DEFAULT_ORDER: [usize;7]=[BATTERY,PET,CLOCK,WEATHER,QUOTA,MUSIC,FOCUS];
 pub(crate) fn valid_order(order:&[usize])->bool {
-    order.len()==6 && DEFAULT_ORDER.iter().all(|slot|order.iter().filter(|value|*value==slot).count()==1)
+    order.len()==DEFAULT_ORDER.len() && DEFAULT_ORDER.iter().all(|slot|order.iter().filter(|value|*value==slot).count()==1)
 }
 
 pub(crate) fn animations_enabled()->bool {
@@ -56,7 +56,6 @@ impl Layout {
                 CLOCK=>{
                     if pet {x[PET]=Some(place(&mut cursor,WIDTHS[PET]));}
                     x[slot]=Some(place(&mut cursor,WIDTHS[slot]));
-                    // 天气紧跟时钟，中间只留组件间距；排序时也与时钟成组移动。
                     if weather {x[WEATHER]=Some(place(&mut cursor,WIDTHS[WEATHER]));}
                 },
                 QUOTA if count>0=>{
@@ -84,13 +83,17 @@ impl Layout {
     }
     pub fn balance_tail(&mut self,position:usize,extra:f32){self.widen(quota_slot(position),extra);}
     pub fn widen_clock(&mut self, extra:f32) {self.widen(CLOCK,extra);}
+    pub fn hide_clock(&mut self) {
+        let Some(center)=self.x[CLOCK].take() else{return;};
+        let removed=self.widths[CLOCK]+12.0;
+        self.width=(self.width-removed).max(96.0);
+        for x in self.x.iter_mut().flatten() {*x+=if *x<center {removed/2.0}else{-removed/2.0};}
+    }
     pub fn reorder(&mut self,order:&[usize]) {
         if !valid_order(order){return;}
         let original=self.x.clone();let mut cursor=-self.width/2.0+16.0;
         for slot in order.iter().copied().chain(std::iter::once(BELL)) {
-            let slots:Vec<usize>=if slot==QUOTA{self.quota_slots().collect()}
-                else if slot==CLOCK&&self.x[WEATHER].is_some(){vec![CLOCK,WEATHER]}
-                else{vec![slot]};
+            let slots:Vec<usize>=if slot==QUOTA{self.quota_slots().collect()}else{vec![slot]};
             let left=slots.iter().filter_map(|&i|original[i].map(|x|x-self.widths[i]/2.0)).fold(f32::INFINITY,f32::min);
             let right=slots.iter().filter_map(|&i|original[i].map(|x|x+self.widths[i]/2.0)).fold(f32::NEG_INFINITY,f32::max);
             if !left.is_finite(){continue;}
@@ -144,8 +147,38 @@ impl Motion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hidden_clock_closes_its_gap_in_custom_orders(){
+        for reverse in [false,true] {for count in [0,5] {
+            let mut order=DEFAULT_ORDER.to_vec();if reverse {order.reverse();}
+            let mut layout=Layout::new(true,count,true,true,false,true,true);
+            layout.reorder(&order);layout.widen_clock(64.0);
+            let width=layout.width;let removed=layout.widths[CLOCK]+12.0;
+            layout.hide_clock();assert!(layout.x[CLOCK].is_none());
+            assert_eq!(layout.width,(width-removed).max(96.0));
+            let mut boxes:Vec<_>=layout.x.iter().enumerate().filter_map(|(i,x)|x.map(|x|(x-layout.widths[i]/2.0,x+layout.widths[i]/2.0))).collect();
+            boxes.sort_by(|a,b|a.0.total_cmp(&b.0));
+            assert!(boxes.windows(2).all(|p|p[1].0-p[0].1>=6.9),"关闭时间后相邻组件不应重叠");
+            let after=layout.x.clone();layout.hide_clock();assert_eq!(layout.x,after);
+        }}
+        let mut empty=Layout::new(false,0,false,false,false,false,false);
+        empty.hide_clock();assert_eq!(empty.width,96.0);assert!(empty.x.iter().all(Option::is_none));
+    }
+    #[test]
+    fn weather_can_be_reordered_independently_of_the_clock(){
+        let order=[WEATHER,FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY];
+        assert!(valid_order(&order),"天气应有独立的排列位置");
+        for quotas in 0..=5 {for enabled in [false,true] {
+            let mut layout=Layout::new(true,quotas,true,true,false,true,enabled);
+            layout.reorder(&order);layout.widen(WEATHER,18.0);layout.widen_clock(40.0);
+            let positions:Vec<_>=order.iter().filter_map(|slot|layout.x[*slot]).collect();
+            assert!(positions.windows(2).all(|pair|pair[0]<pair[1]));
+            let boxes:Vec<_>=order.iter().flat_map(|&slot|if slot==QUOTA{layout.quota_slots().collect()}else{vec![slot]}).filter_map(|slot|layout.x[slot].map(|x|(x-layout.widths[slot]/2.0,x+layout.widths[slot]/2.0))).collect();
+            assert!(boxes.windows(2).all(|pair|pair[1].0-pair[0].1>=6.9),"排序和加宽后组件不能重叠");
+        }}
+    }
     #[test] fn deepseek_balance_follows_more_and_never_overlaps(){
-        for order in [DEFAULT_ORDER,[FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY]] {for quotas in 1..=6 {for battery in [false,true]{
+        for order in [DEFAULT_ORDER,[FOCUS,MUSIC,QUOTA,CLOCK,WEATHER,PET,BATTERY]] {for quotas in 1..=6 {for battery in [false,true]{
             let mut layout=Layout::new(battery,quotas,true,true,false,true,false);layout.reorder(&order);layout.balance_tail(quotas-1,76.0);layout.widen_clock(40.0);
             let mut boxes:Vec<_>=layout.x.iter().enumerate().filter_map(|(i,x)|x.map(|x|{let width=layout.widths[i];(x-width/2.0,x+width/2.0)})).collect();boxes.sort_by(|a,b|a.0.total_cmp(&b.0));
             assert!(boxes.windows(2).all(|p|p[1].0-p[0].1>=6.9));assert!(boxes.last().unwrap().1<=layout.width/2.0-15.9);
@@ -154,7 +187,7 @@ mod tests {
     }
     #[test]
     fn clock_12h_keeps_components_separate_in_custom_orders(){
-        for order in [DEFAULT_ORDER,[FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY]] {
+        for order in [DEFAULT_ORDER,[FOCUS,MUSIC,QUOTA,CLOCK,WEATHER,PET,BATTERY]] {
             for quotas in 0..=5 {
                 let mut layout=Layout::new(true,quotas,true,true,false,true,false);
                 layout.reorder(&order);layout.widen_clock(40.0);
@@ -173,7 +206,7 @@ mod tests {
     fn custom_order_preserves_groups_and_hidden_positions(){
         assert!(!valid_order(&[0,0,2,6,7,9]));
         assert!(!valid_order(&[0,1,2]));
-        let order=[FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY];
+        let order=[FOCUS,MUSIC,QUOTA,CLOCK,WEATHER,PET,BATTERY];
         for battery in [false,true]{for count in 0..=5 {
             let mut layout=Layout::new(battery,count,true,true,false,true,false);
             let width=layout.width;layout.reorder(&order);
@@ -200,14 +233,14 @@ mod tests {
         }}}}}}}
     }
     #[test]
-    fn weather_sits_after_the_clock_and_follows_it_in_custom_orders(){
-        for order in [DEFAULT_ORDER,[FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY],[QUOTA,MUSIC,CLOCK,PET,FOCUS,BATTERY]] {
+    fn weather_defaults_after_the_clock_and_preserves_custom_spacing(){
+        for order in [DEFAULT_ORDER,[FOCUS,MUSIC,QUOTA,CLOCK,WEATHER,PET,BATTERY],[QUOTA,MUSIC,CLOCK,WEATHER,PET,FOCUS,BATTERY]] {
             for quotas in 0..=3 {for battery in [false,true] {
                 let mut layout=Layout::new(battery,quotas,true,true,false,true,true);
                 layout.reorder(&order);
                 let (clock,weather)=match (layout.x[CLOCK],layout.x[WEATHER]) {(Some(c),Some(w))=>(c,w),_=>panic!("时钟与天气都应就位：{layout:?}")};
                 assert!(weather>clock+22.0+6.9,"天气应紧跟时钟右侧：时钟 {clock}，天气 {weather}");
-                // reorder 后时钟与天气的相对距离保持成组前的间隔。
+                // 相邻排列的时钟与天气保持标准组件间距。
                 assert!((weather-clock-(38.0+44.0)/2.0-12.0).abs()<0.01);
                 let mut boxes:Vec<_>=layout.x.iter().enumerate().filter_map(|(i,x)|x.map(|x|(x-layout.widths[i]/2.0,x+layout.widths[i]/2.0))).collect();
                 boxes.sort_by(|a,b|a.0.total_cmp(&b.0));

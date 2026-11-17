@@ -543,7 +543,7 @@ fn paint_forecast(c: &Card, snapshot: &weather::Snapshot, t: f32, lift: f32, pre
     c.glow(66.0, 72.0, 56.0, paint::alpha(tint(kind), 0.16));
     icon_at(c, 66.0, 72.0, 46.0, kind, Some(t));
     paint_temp(c, 99.0, 82.0, &pill_temp_text(snapshot), 34.0, W::Bold, theme::WHITE, H::Left);
-    let desc = c.fit(weather::describe(snapshot.code), 12.0, W::Semibold, 104.0);
+    let desc = c.fit(snapshot.description(), 12.0, W::Semibold, 104.0);
     let desc_w = c.text(99.0, 100.0, &desc, 12.0, W::Semibold, theme::WHITE, H::Left);
     if let (Some(high), Some(low)) = (snapshot.high, snapshot.low) {
         let range = format!("{high:.0}° / {low:.0}°");
@@ -639,10 +639,36 @@ fn hero_colors(kind: Kind) -> (Color32, Color32) {
 }
 
 impl App {
+    fn weather_is_stale(&self,snapshot:&weather::Snapshot)->bool {
+        let (interval,failed)=if self.weather_source.displayed==crate::weather_source_ui::Provider::Qweather {(crate::qweather::CURRENT_INTERVAL,self.weather_source.runtime.current_refresh_failed())}else{(weather::INTERVAL,self.weather.failures>=2)};
+        failed&&chrono::Utc::now().timestamp()-snapshot.at>interval*2
+    }
+    fn weather_can_refresh(&self)->bool {
+        self.module_on(WEATHER_PAGE)&&if self.weather_source.displayed==crate::weather_source_ui::Provider::Qweather {self.weather_source.client.is_some()&&self.weather_source.runtime.can_refresh(chrono::Utc::now().timestamp())}else{self.weather.can_refresh(&self.settings.weather_city,self.t)}
+    }
+    fn weather_refresh(&mut self){
+        if !self.module_on(WEATHER_PAGE){return;}
+        if self.weather_source.displayed==crate::weather_source_ui::Provider::Qweather {if !cfg!(test){if let Some(client)=&self.weather_source.client {self.weather_source.runtime.refresh(client,chrono::Utc::now().timestamp(),true);}}}
+        else{self.weather.refresh_manual(&self.settings.weather_city,self.t);}
+    }
     /// 后台取数的轮询与自动刷新；数据过期就重新拉一次。
     pub(crate) fn weather_tick(&mut self) {
         let enabled=self.module_on(WEATHER_PAGE);
         if self.page!=WEATHER_PAGE {self.weather.picker_open=false;}
+        self.weather_source.poll(enabled);
+        if self.weather_source.displayed==crate::weather_source_ui::Provider::Qweather {
+            let now=chrono::Utc::now().timestamp();
+            if self.weather_source.runtime.poll(enabled,now) {
+                self.weather.snapshot=self.weather_source.runtime.snapshot();
+            }
+            if enabled&&!cfg!(test){if let Some(client)=&self.weather_source.client {self.weather_source.runtime.refresh(client,now,false);}}
+            if let Some(snapshot)=&mut self.weather.snapshot {
+                if let Some(sun)=&snapshot.sun_times {snapshot.day=now>=sun.sunrise&&now<sun.sunset;}
+            }
+            self.weather.loading=self.weather_source.runtime.loading();
+            self.weather.error=self.weather_source.runtime.error.map(|e|e.text().to_string()).or_else(||if self.weather_source.client.is_none(){Some("尚未配置和风凭据，请到天气设置填写并测试。".into())}else if self.weather_source.config.location.is_none(){Some("请先选择和风城市，和风暂不支持自动定位。".into())}else{None});
+            return;
+        }
         self.weather.poll(&self.settings.weather_city,enabled);
         if self.weather.should_refresh(&self.settings.weather_city,self.t,chrono::Utc::now().timestamp(),enabled) {
             // 单元测试仍执行模块开关与刷新判定，仅跳过实际联网。
@@ -660,6 +686,10 @@ impl App {
     /// 切换当前城市；`None` 为自动定位。立即换上缓存并保存设置，是否联网由刷新调度决定。
     pub(crate) fn switch_weather_city(&mut self, position: Option<weather::Position>) {
         if !self.module_on(WEATHER_PAGE) {return;}
+        if self.weather_source.displayed==crate::weather_source_ui::Provider::Qweather {
+            if let Some(location)=self.weather_source.config.saved.iter().find(|l|Some(&l.position)==position.as_ref()).cloned(){self.qweather_select_location(location);}
+            return;
+        }
         let city=position.as_ref().map(|p|p.label.clone()).unwrap_or_default();
         if self.settings.weather_city==city && self.settings.weather_position==position {self.weather.picker_open=false;return;}
         self.settings.weather_city=city.clone();
@@ -748,7 +778,7 @@ impl App {
                 (97.0,103.0,w+27.0,18.0)
             }
             None=>{
-                let label=if self.settings.weather_city.trim().is_empty() {"自动定位".to_string()} else {self.settings.weather_city.clone()};
+                let label=if self.weather_source.displayed==crate::weather_source_ui::Provider::Qweather {self.weather_source.config.location.as_ref().map(|l|l.position.label.clone()).unwrap_or_else(||"选择和风城市".into())}else if self.settings.weather_city.trim().is_empty() {"自动定位".to_string()} else {self.settings.weather_city.clone()};
                 let label=c.fit(&label,10.5,W::Regular,140.0);
                 let w=c.text_w(&label,10.5,W::Regular)+24.0;
                 let x=209.5-w/2.0;
@@ -769,7 +799,10 @@ impl App {
         if c.live && self.weather.picker_open && c.hit(0.0,0.0,419.0,WEATHER_H,"weather-picker-backdrop").clicked() {pick=Some(Pick::Close);}
         let mut rows:Vec<(Option<weather::Position>,String,String)>=vec![(None,"自动定位".into(),
             self.weather.cached_for("",None).map(|s|s.place.clone()).unwrap_or_else(||"Windows 定位优先".into()))];
-        for p in &self.settings.weather_saved {rows.push((Some(p.clone()),p.label.clone(),p.region.split(" · ").next().unwrap_or_default().to_string()));}
+        let qweather=self.weather_source.displayed==crate::weather_source_ui::Provider::Qweather;
+        if qweather {
+            rows.clear();for l in &self.weather_source.config.saved {let p=&l.position;rows.push((Some(p.clone()),p.label.clone(),p.region.clone()));}
+        }else{for p in &self.settings.weather_saved {rows.push((Some(p.clone()),p.label.clone(),p.region.split(" · ").next().unwrap_or_default().to_string()));}}
         let row=27.0;
         let h=rows.len() as f32*row+row+10.0;
         // 从地点行下方展开；城市多时整体上移，保证不超出页面底部。
@@ -781,14 +814,14 @@ impl App {
         p.fill(x-2.0,y+2.0,w+4.0,h+4.0,12.0,Color32::from_black_alpha(90));
         p.fill(x,y,w,h,11.0,Color32::from_rgb(30,30,34));
         p.stroke(x,y,w,h,11.0,0.8,Color32::from_white_alpha(22));
-        let current=self.settings.weather_position.clone();
+        let current=if qweather{self.weather_source.config.location.as_ref().map(|l|l.position.clone())}else{self.settings.weather_position.clone()};
         for (i,(position,label,detail)) in rows.iter().enumerate() {
             let ry=y+5.0+i as f32*row;
             let hit=p.hit(x+4.0,ry,w-8.0,row-1.0,("weather-picker-row",i)).on_hover_cursor(egui::CursorIcon::PointingHand);
             let selected=*position==current;
             let (hover,_)=p.hover_t(&hit);
             if selected || hover>0.0 {p.fill(x+4.0,ry,w-8.0,row-1.0,7.0,Color32::from_white_alpha(if selected{14}else{(hover*10.0) as u8}));}
-            let cached=self.weather.cached_for(position.as_ref().map(|p|p.label.as_str()).unwrap_or(""),position.as_ref());
+            let cached=if qweather{self.weather.snapshot.as_ref().filter(|s|s.position==*position)}else{self.weather.cached_for(position.as_ref().map(|p|p.label.as_str()).unwrap_or(""),position.as_ref())};
             match (position,cached) {
                 (_,Some(s)) => icon(&p,x+18.0,ry+13.0,14.0,weather::kind(s.code,s.day)),
                 (None,None) => location_glyph(&p,x+18.0,ry+13.5,theme::GRAY,Color32::from_rgb(30,30,34)),
@@ -807,7 +840,7 @@ impl App {
         let manage=p.hit(x+4.0,my+2.0,w-8.0,row-2.0,"weather-picker-manage").on_hover_cursor(egui::CursorIcon::PointingHand);
         let (hover,_)=p.hover_t(&manage);
         if hover>0.0 {p.fill(x+4.0,my+2.0,w-8.0,row-2.0,7.0,Color32::from_white_alpha((hover*10.0) as u8));}
-        let full=self.settings.weather_saved.len()>=weather::MAX_CITIES;
+        let full=if qweather{self.weather_source.config.saved.len()}else{self.settings.weather_saved.len()}>=weather::MAX_CITIES;
         p.text(x+18.0,my+19.0,"＋",11.0,W::Semibold,theme::GRAY,H::Center);
         p.text(x+32.0,my+19.0,if full{"管理城市"}else{"添加或管理城市"},11.0,W::Regular,theme::GRAY,H::Left);
         if manage.clicked() {pick=Some(Pick::Manage);}
@@ -820,10 +853,10 @@ impl App {
         }
     }
 
-    /// 常驻胶囊上的天气徽标：有快照、天气页可见且非极简时才占位。
+    /// 常驻天气开关开启、有快照、天气页可见且非极简时才占位。
     pub(crate) fn weather_pill(&self) -> Option<&crate::weather::Snapshot> {
         self.weather.snapshot.as_ref()
-            .filter(|_| self.module_on(WEATHER_PAGE) && !self.effective_minimal())
+            .filter(|_| self.settings.show_weather && self.module_on(WEATHER_PAGE) && !self.effective_minimal())
     }
 
     /// 温度文字比基础槽宽时需要补的宽度（负数会被调用方忽略）。
@@ -838,12 +871,12 @@ impl App {
         Some(chip - crate::bar_layout::WEATHER_WIDTH)
     }
 
-    /// 常驻胶囊的天气徽标：小图标 + 温度，紧跟时钟；点击进入天气页。
+    /// 常驻胶囊的天气徽标：小图标 + 温度；点击进入天气页。
     pub(crate) fn draw_pill_weather(&mut self, c: &Card, x: f32, layout: &crate::bar_layout::Layout) {
         let Some(snapshot) = self.weather_pill().cloned() else { return };
         self.paint_pill_weather(c, x, layout, &snapshot);
         let width = layout.widths[crate::bar_layout::WEATHER];
-        let tip = format!("{} · {}\n更新于 {} · Open-Meteo", snapshot.place, weather::describe(snapshot.code), weather::clock(snapshot.at));
+        let tip = format!("{} · {}\n更新于 {} · {}", snapshot.place, snapshot.description(), weather::clock(snapshot.at),self.weather_source.displayed.name());
         // 用 bar_tooltip：常驻胶囊上的提示不能用 on_hover_text，悬浮层会盖住指针、抢走点击。
         if crate::quota_ui::bar_tooltip(c.hit(x - width / 2.0, 1.0, width, 28.0, "weather-pill"), tip).clicked() {
             self.weather.solar_open=false;
@@ -854,14 +887,14 @@ impl App {
     pub(crate) fn draw_side_weather(&mut self,c:&Card,cx:f32,cy:f32) {
         let Some(snapshot)=self.weather_pill() else{return;};
         self.paint_side_weather(c,cx,cy,snapshot);
-        let tip=format!("{} · {}\n更新于 {} · Open-Meteo",snapshot.place,weather::describe(snapshot.code),weather::clock(snapshot.at));
+        let tip=format!("{} · {}\n更新于 {} · {}",snapshot.place,snapshot.description(),weather::clock(snapshot.at),self.weather_source.displayed.name());
         let response=crate::quota_ui::bar_tooltip(c.hit(cx-17.0,cy-19.0,34.0,38.0,"weather-side"),tip);
         if response.clicked(){self.weather.solar_open=false;self.show_page(WEATHER_PAGE);}
     }
 
     pub(crate) fn paint_side_weather(&self,c:&Card,cx:f32,cy:f32,snapshot:&weather::Snapshot) {
         icon(c,cx,cy-8.0,PILL_ICON,weather::kind(snapshot.code,snapshot.day));
-        let stale=chrono::Utc::now().timestamp()-snapshot.at>weather::INTERVAL*2;
+        let stale=self.weather_is_stale(snapshot);
         // 按墨迹水平居中，「°」与减号不会把数字挤偏。
         paint_temp(c,cx,cy+14.0,&pill_temp_text(snapshot),10.5,W::Bold,if stale{theme::GRAY}else{theme::WHITE},H::Center);
     }
@@ -880,8 +913,8 @@ impl App {
         let base = 21.0;
         let (_, mid) = temp_ink(c, &text, theme::size::PILL_CLOCK, W::Bold);
         icon(c, left + PILL_ICON / 2.0, base + mid, PILL_ICON, weather::kind(snapshot.code, snapshot.day));
-        // 超过半小时没更新就降为灰色，和额度徽标的过期处理一致。
-        let stale = chrono::Utc::now().timestamp() - snapshot.at > weather::INTERVAL * 2;
+        // 持续刷新失败且数据超过两个刷新周期才降为灰色。
+        let stale = self.weather_is_stale(snapshot);
         paint_temp(c, left + PILL_ICON + PILL_GAP, base, &text, theme::size::PILL_CLOCK, W::Bold, if stale { theme::GRAY } else { theme::WHITE }, H::Left);
     }
 
@@ -904,15 +937,29 @@ impl App {
 
     fn page_weather_body(&mut self, c: &Card, env: &Env, cmds: &mut Vec<Cmd>) {
         let loading = self.weather.loading;
-        let ready=self.weather.can_refresh(&self.settings.weather_city,self.t);
+        let ready=self.weather_can_refresh();
         c.text(326.0, 23.0, if loading { "更新中" } else if ready { "刷新" } else { "稍后刷新" }, 10.5, W::Regular, if ready { theme::GRAY } else { theme::DIM }, H::Center);
-        if c.hit(304.0, 8.0, 44.0, 21.0, "weather-refresh").on_hover_text("重新获取当地天气；请求间隔至少 30 秒，失败后至少 2 分钟").clicked() && ready {
-            self.weather.refresh(&self.settings.weather_city,self.t);
+        if c.hit(304.0, 8.0, 44.0, 21.0, "weather-refresh").on_hover_text("重新获取天气；自动模式会重新定位。请求间隔至少 30 秒，失败后至少 2 分钟").clicked() && ready {
+            self.weather_refresh();
         }
         let footer=WEATHER_H-4.0;
-        c.text(404.0,footer,"Open-Meteo",8.5,W::Regular,theme::DIM,H::Right);
-        if c.hit(348.0,footer-9.0,58.0,13.0,"weather-source").on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("天气数据来自 Open-Meteo，按 CC BY 4.0 授权").clicked() {
-            cmds.push(Cmd::OpenUrl("https://open-meteo.com/".into()));
+        let source=self.weather_source.displayed;
+        let source_label=if source==crate::weather_source_ui::Provider::Qweather{"QWeather"}else{source.name()};
+        let source_w=c.text(404.0,footer,source_label,10.0,W::Regular,theme::GRAY,H::Right);
+        if source==crate::weather_source_ui::Provider::Qweather {
+            let forecast_at=self.weather_source.runtime.stamps().1;
+            let label=if forecast_at>0{format!("预报 {}",weather::clock(forecast_at))}else{"预报未取得".into()};
+            c.text(120.0,footer,&label,8.5,W::Regular,if forecast_at==0||chrono::Utc::now().timestamp()-forecast_at>crate::qweather::DAILY_INTERVAL{WARN}else{theme::DIM},H::Left);
+            c.hit(116.0,footer-11.0,100.0,15.0,"qweather-forecast-stamp").on_hover_text(format!("预报上次获取：{}",crate::weather_source_ui::updated_at(forecast_at)));
+            let sources=self.weather.snapshot.as_ref().map(|s|s.attributions.join("\n")).unwrap_or_default();
+            c.text(24.0,footer,"数据归因 ⓘ",9.5,W::Regular,theme::GRAY,H::Left);
+            if c.hit(20.0,footer-12.0,86.0,16.0,"qweather-attributions").on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("天气服务由和风天气驱动\n{sources}\n降水概率：日夜较高值")).clicked(){
+                let link=self.weather.snapshot.as_ref().and_then(|s|s.attributions.iter().find(|s|url::Url::parse(s).is_ok_and(|u|u.scheme()=="https"))).map(String::as_str).unwrap_or("https://dev.qweather.com/docs/terms/attribution/");
+                cmds.push(Cmd::OpenUrl(link.into()));
+            }
+        }
+        if c.hit(404.0-source_w,footer-11.0,source_w,15.0,"weather-source").on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("天气数据来自{}，点击打开官网",source_label)).clicked() {
+            cmds.push(Cmd::OpenUrl(source.url().into()));
         }
 
         let Some(snapshot) = self.weather.snapshot.clone() else {
@@ -932,9 +979,11 @@ impl App {
         let offline = self.weather.error.is_some();
         let stamp = weather::clock(snapshot.at);
         let stale = offline || age > 3600;
-        c.text(344.0, footer, &stamp, 8.5, W::Regular, if stale { WARN } else { theme::DIM }, H::Right);
-        c.hit(312.0, footer-9.0, 32.0, 13.0, "weather-stamp").on_hover_text(format!(
-            "上次更新 {stamp}{}",
+        let stamp_x=394.0-source_w;
+        let stamp_label=if source==crate::weather_source_ui::Provider::Qweather{format!("实况 {stamp}")}else{stamp.clone()};
+        c.text(stamp_x, footer, &stamp_label, 8.5, W::Regular, if stale { WARN } else { theme::DIM }, H::Right);
+        c.hit(stamp_x-32.0, footer-9.0, 32.0, 13.0, "weather-stamp").on_hover_text(format!(
+            "上次更新 {}{}",if source==crate::weather_source_ui::Provider::Qweather{crate::weather_source_ui::updated_at(snapshot.at)}else{stamp.clone()},
             if offline { "，当前显示的是缓存" } else { "" }
         ));
 
@@ -1013,7 +1062,7 @@ impl App {
             c.text(35.0 + place_w + 8.0, 35.0, &c.fit(&position.region, 11.5, W::Regular, (width - 220.0 - place_w).max(40.0)), 11.5, W::Regular, faint, H::Left);
         }
         let temp_w = paint_temp(&c, 22.0, 88.0, &pill_temp_text(&snapshot), 46.0, W::Bold, theme::WHITE, H::Left) + 4.0;
-        c.text(28.0 + temp_w, 70.0, weather::describe(snapshot.code), 14.0, W::Semibold, theme::WHITE, H::Left);
+        c.text(28.0 + temp_w, 70.0, snapshot.description(), 14.0, W::Semibold, theme::WHITE, H::Left);
         if let (Some(high), Some(low)) = (snapshot.high, snapshot.low) {
             c.text(28.0 + temp_w, 89.0, &format!("最高 {high:.0}°  最低 {low:.0}°"), 11.5, W::Regular, soft, H::Left);
         }
@@ -1036,16 +1085,16 @@ impl App {
             x += w + 18.0;
         }
         // 右下：更新时间 + 圆形刷新按钮（加载中转圈）。
-        let ready = self.weather.can_refresh(&self.settings.weather_city, self.t);
+        let ready = self.weather_can_refresh();
         let (bx, by) = (width - 32.0, 124.0);
         let button = ui.interact(c.rect(bx - 13.0, by - 13.0, 26.0, 26.0), ui.id().with("weather-hero-refresh"), if ready { egui::Sense::click() } else { egui::Sense::hover() })
-            .on_hover_text(if ready { "刷新天气" } else { "刚刚刷新过，请稍后再试" });
+            .on_hover_text(if ready { "刷新天气；自动模式会重新定位" } else { "刚刚刷新过，请稍后再试" });
         let hover = ctx.animate_bool_with_time(button.id, ready && button.hovered(), 0.12);
         c.circle(bx, by, 13.0, Color32::from_white_alpha((34.0 + 40.0 * hover) as u8));
         let spin = if self.weather.loading { ctx.request_repaint(); ctx.input(|i| i.time) as f32 * 6.0 } else { 0.0 };
         paint::reset(&c.scaled(bx, by, 0.95), bx, by, spin, if ready || self.weather.loading { theme::WHITE } else { faint });
         c.text(bx - 20.0, 128.5, &format!("更新于 {}", weather::clock(snapshot.at)), 11.0, W::Regular, faint, H::Right);
-        if button.clicked() { self.weather.refresh(&self.settings.weather_city, self.t); }
+        if button.clicked() { self.weather_refresh(); }
     }
 
     pub(crate) fn weather_settings(&mut self, ui: &mut egui::Ui) {
@@ -1054,7 +1103,19 @@ impl App {
         let ctx=ui.ctx().clone();
         let accent=color(&ctx,Color32::from_rgb(96,164,255),Color32::from_rgb(34,108,220));
         ui.add_space(4.0);
+        self.weather_source_settings(ui);
+        ui.add_space(12.0);
+        if self.weather_source.selected==crate::weather_source_ui::Provider::Qweather {
+            if self.weather_source.displayed==self.weather_source.selected {self.weather_settings_hero(ui);ui.add_space(8.0);}
+            self.qweather_city_settings(ui);return;
+        }
+        if self.weather_source.displayed!=self.weather_source.selected {return;}
         self.weather_settings_hero(ui);
+        ui.add_space(5.0);
+        ui.horizontal_wrapped(|ui|{
+            ui.label(egui::RichText::new("天气数据来自").size(11.5).color(ui.visuals().weak_text_color()));
+            let source=self.weather_source.displayed;ui.hyperlink_to(source.name(),source.url());
+        });
         if let Some(error)=self.weather.error.clone() {
             ui.add_space(6.0);
             egui::Frame::new().fill(color(&ctx,Color32::from_rgb(64,44,24),Color32::from_rgb(255,240,224))).corner_radius(10.0)
@@ -1117,14 +1178,16 @@ impl App {
 
         settings_label(ui,"更新与数据");
         settings_card(ui,|ui|{
-            info_row(ui,"自动更新",|ui|{ui.label(egui::RichText::new("每 15 分钟").size(12.5).color(ui.visuals().weak_text_color()));});
+            info_row(ui,"自动更新",|ui|{ui.label(egui::RichText::new(if self.weather_source.displayed==crate::weather_source_ui::Provider::Qweather{"实况约 60 分钟 · 预报约 6 小时"}else{"每 15 分钟"}).size(12.5).color(ui.visuals().weak_text_color()));});
             ui.separator();
             info_row(ui,"离线时",|ui|{ui.label(egui::RichText::new("保留上次天气，温度转灰提示").size(12.5).color(ui.visuals().weak_text_color()));});
             ui.separator();
             info_row(ui,"数据来源",|ui|{
-                ui.hyperlink_to("CC BY 4.0","https://creativecommons.org/licenses/by/4.0/");
+                let source=self.weather_source.displayed;
+                if source==crate::weather_source_ui::Provider::OpenMeteo{ui.hyperlink_to("CC BY 4.0","https://creativecommons.org/licenses/by/4.0/");}
+                else{ui.hyperlink_to("来源说明","https://dev.qweather.com/docs/terms/attribution/");}
                 ui.label(egui::RichText::new("·").color(ui.visuals().weak_text_color()));
-                ui.hyperlink_to("Open-Meteo","https://open-meteo.com/");
+                ui.hyperlink_to(source.name(),source.url());
             });
             ui.separator();
             info_row(ui,"城市名",|ui|{
@@ -1145,7 +1208,7 @@ fn info_row(ui: &mut egui::Ui, title: &str, right: impl FnOnce(&mut egui::Ui)) {
 
 /// 城市列表的一行：单选圆点、缓存天气图标、名称与地区、缓存温度；可删除的行右侧带 ×。
 /// 返回 (点击整行, 点击删除)。
-fn city_row(ui: &mut egui::Ui, selected: bool, removable: bool, title: &str, detail: &str, cached: Option<&weather::Snapshot>, accent: Color32) -> (bool, bool) {
+pub(crate) fn city_row(ui: &mut egui::Ui, selected: bool, removable: bool, title: &str, detail: &str, cached: Option<&weather::Snapshot>, accent: Color32) -> (bool, bool) {
     use crate::settings_theme::color;
     let ctx = ui.ctx().clone();
     let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 48.0), egui::Sense::click());
@@ -1204,7 +1267,7 @@ fn city_row(ui: &mut egui::Ui, selected: bool, removable: bool, title: &str, det
 
 /// 城市搜索下拉的一项：定位标记 + 名称（粗）+ 行政区（灰），左对齐；
 /// 已选中的右侧打勾，已在列表里的标「已添加」。
-fn city_option(ui: &mut egui::Ui, position: &weather::Position, chosen: bool, saved: bool) -> egui::Response {
+pub(crate) fn city_option(ui: &mut egui::Ui, position: &weather::Position, chosen: bool, saved: bool) -> egui::Response {
     use crate::settings_theme::color;
     let ctx = ui.ctx().clone();
     let width = ui.available_width().max(220.0);
