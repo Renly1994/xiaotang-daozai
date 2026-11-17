@@ -21,6 +21,12 @@ pub fn selected<'a>(displays:&'a [Display],id:&str)->Option<&'a Display>{
         .or_else(||displays.iter().find(|d|d.primary)).or_else(||displays.first())
 }
 
+/// 多屏镜像的目标：排除交互主屏；未指定时使用实际选中的主屏。
+pub fn mirror_targets<'a>(displays:&'a [Display],id:&str)->Vec<&'a Display>{
+    let primary=selected(displays,id).map(|d|d.id.as_str()).unwrap_or("");
+    displays.iter().filter(|d|d.id!=primary).collect()
+}
+
 #[cfg(windows)]
 pub fn connected()->Vec<Display>{
     use windows::{core::PCWSTR,Win32::{Foundation::{BOOL,LPARAM,RECT},Graphics::Gdi::*,UI::WindowsAndMessaging::EDD_GET_DEVICE_INTERFACE_NAME}};
@@ -103,6 +109,22 @@ pub fn shift_slack(m:Bounds, scale:f32, half_extent:f32, offset:f32, dock:crate:
     let back=(center-half-low).max(0.0);
     let forth=(high-center-half).max(0.0);
     (back.floor() as i32,forth.floor() as i32)
+}
+
+#[cfg(test)]
+mod mirror_target_tests {
+    use super::*;
+    fn display(id:&str,primary:bool)->Display{
+        Display{id:id.into(),label:id.into(),bounds:Bounds{left:0,top:0,right:1920,bottom:1080},work_top:0,primary}
+    }
+    #[test]
+    fn mirror_excludes_the_interactive_display(){
+        let displays=[display("main",true),display("left",false),display("right",false)];
+        let ids=|list:Vec<&Display>|list.into_iter().map(|d|d.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(mirror_targets(&displays,"")),["left","right"],"未指定时排除主屏");
+        assert_eq!(ids(mirror_targets(&displays,"left")),["main","right"],"切到副屏后主屏也应镜像");
+        assert!(mirror_targets(&displays,"missing").iter().all(|d|d.id!="main"),"未连接的屏回退主屏后仍排除主屏");
+    }
 }
 
 #[cfg(test)]

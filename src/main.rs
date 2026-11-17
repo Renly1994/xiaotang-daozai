@@ -68,6 +68,9 @@ struct Shell {
     backdrop: Option<daozai::backdrop::Sampler>,
     #[cfg(windows)]
     native: Option<daozai::native::Window>,
+    /// 其余显示器的同步画面；镜像窗口鼠标穿透，交互仍在主窗口。
+    #[cfg(windows)]
+    mirrors: daozai::mirror::Mirrors,
     #[cfg(windows)]
     tray: Option<daozai::tray::Tray>,
     #[cfg(windows)]
@@ -215,6 +218,8 @@ impl Shell {
             #[cfg(windows)] backdrop:None,
             #[cfg(windows)]
             native: daozai::native::Window::new(cc),
+            #[cfg(windows)]
+            mirrors: daozai::mirror::Mirrors::new(),
             #[cfg(windows)]
             tray,
             #[cfg(windows)]
@@ -622,15 +627,39 @@ impl eframe::App for Shell {
         }
 
         #[cfg(windows)]
-        if let Some(native) = &mut self.native {
-            // 兼容渲染：读回的画面交给分层窗口，边缘保留抗锯齿。画面变化（或有其他输入）时才请求下一次读回，
-            // 读回完成本身触发的那一帧若画面没变就停下，静止时不会一直空转。
-            if native.wants_frames() {
+        {
+            // 兼容渲染需要读回画面；多屏镜像在任何渲染后端下都需要同一帧画面。
+            let mirror_on=self.app.settings.mirror_displays;
+            let native_wants=self.native.as_ref().is_some_and(|n|n.wants_frames());
+            if native_wants || mirror_on {
                 let (shot,other_input)=ctx.input(|i|(
                     i.events.iter().rev().find_map(|e|match e{egui::Event::Screenshot{image,..}=>Some(image.clone()),_=>None}),
                     i.events.iter().any(|e|!matches!(e,egui::Event::Screenshot{..})),
                 ));
-                let changed=shot.as_ref().is_some_and(|image|native.present_frame(image.size,image.as_raw()));
+                let mut changed=false;
+                if let (true,Some(image),Some(native))=(native_wants,shot.as_ref(),self.native.as_mut()) {
+                    changed|=native.present_frame(image.size,image.as_raw());
+                }
+                if mirror_on {
+                    if let Some(image)=shot.as_ref() {
+                        let frame=self.native.as_mut().map(|native|native.mirror_frame(image.size,image.as_raw()));
+                        if let Some(frame)=frame {
+                            let ppp=ctx.pixels_per_point();
+                            let region=out.region;
+                            let crop=(
+                                (region.min.x*ppp).round().max(0.0) as u32,
+                                (region.min.y*ppp).round().max(0.0) as u32,
+                                (region.width()*ppp).round().max(1.0) as u32,
+                                (region.height()*ppp).round().max(1.0) as u32,
+                            );
+                            changed|=self.mirrors.sync(
+                                &self.app.displays,&self.app.settings.display_id,&self.app.settings,
+                                ppp,self.app.placement_offset(),self.oled_shift,
+                                self.fullscreen,crop,image.size,frame.as_ref(),
+                            );
+                        }
+                    }
+                }
                 if shot.is_none() || changed || other_input {
                     // 拖动、悬停等有输入时满帧跟手；歌词滚动这类自己在动的画面约 30 帧/秒读回，
                     // 未到间隔就预约一次重绘，到时补上读回，动画停下时的最后一帧不会漏掉。
@@ -641,6 +670,10 @@ impl eframe::App for Shell {
                     }
                 }
             }
+        }
+
+        #[cfg(windows)]
+        if let Some(native) = &mut self.native {
             let r = |r: egui::Rect| (r.left(), r.top(), r.width(), r.height());
             // 保留主窗口的事件循环，避免全屏隐藏后设置窗口无法关闭或重新打开。
             let region=if self.hidden {(0.0,0.0,0.0,0.0)} else {r(out.region)};

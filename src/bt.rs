@@ -133,7 +133,120 @@ fn query(cache:&mut Cache) -> Result<Vec<Device>, ()> {
         }
     }
     devices.sort_by(|a,b|a.id.cmp(&b.id));
+
+    // WinRT 只暴露部分音频设备（例如本机 Hands-Free AG 耳机不在列表里）。
+    // 再按蓝牙电量属性扫一遍设备节点，把有电量的音频设备补进来。
+    if let Ok(extra)=battery_devices() {
+        for (id,name,level) in extra {
+            if devices.iter().any(|d|d.id==id) { continue; }
+            let kind=device_kind(&name,true,None);
+            devices.push(Device{id,name,battery:Some(level),kind});
+        }
+        devices.sort_by(|a,b|a.id.cmp(&b.id));devices.dedup_by(|a,b|a.id==b.id);
+    }
     Ok(cache.update(devices,Instant::now(),read_batteries))
+}
+
+/// 从设备管理器节点补出「有蓝牙电量」但 WinRT 没枚举到的设备。
+#[cfg(windows)]
+fn battery_devices()->Result<Vec<(String,String,u8)>,()> {
+    use windows::core::GUID;
+    use windows::Win32::Devices::DeviceAndDriverInstallation::*;
+    use windows::Win32::Devices::Properties::DEVPROPKEY;
+    use windows::Win32::Foundation::HWND;
+
+    // DEVPKEY_Bluetooth_Battery {104EA319-6EE2-4701-BD47-8DDBF425BBE5}, 2
+    const BATTERY: DEVPROPKEY = DEVPROPKEY { fmtid: GUID::from_u128(0x104ea319_6ee2_4701_bd47_8ddbf425bbe5), pid: 2 };
+    // DEVPKEY_Device_FriendlyName {A45C254E-DF1C-4EFD-8020-67D146A850E0}, 14
+    const FRIENDLY: DEVPROPKEY = DEVPROPKEY { fmtid: GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0), pid: 14 };
+    // DEVPKEY_Device_DeviceDesc，同一 fmtid，pid 2
+    const DESC: DEVPROPKEY = DEVPROPKEY { fmtid: GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0), pid: 2 };
+    let mut out=Vec::new();
+    unsafe {
+        let set=SetupDiGetClassDevsW(None,windows::core::PCWSTR::null(),HWND::default(),DIGCF_PRESENT|DIGCF_ALLCLASSES).map_err(|_|())?;
+        for i in 0..u32::MAX {
+            let mut data=SP_DEVINFO_DATA{cbSize:std::mem::size_of::<SP_DEVINFO_DATA>() as u32,..Default::default()};
+            if SetupDiEnumDeviceInfo(set,i,&mut data).is_err(){break;}
+            let Some(level)=byte_prop(set,&data,&BATTERY).filter(|b|*b<=100) else{continue;};
+            let Some(instance)=instance_id(set,&data) else{continue;};
+            let id=instance.rsplit('\\').next().unwrap_or(&instance).to_ascii_uppercase();
+            if id.is_empty(){continue;}
+            let name=string_prop(set,&data,&FRIENDLY).filter(|s|!s.trim().is_empty())
+                .or_else(||string_prop(set,&data,&DESC).filter(|s|!s.trim().is_empty()))
+                .or_else(||registry_string_prop(set,&data,SPDRP_FRIENDLYNAME).filter(|s|!s.trim().is_empty()))
+                .or_else(||registry_string_prop(set,&data,SPDRP_DEVICEDESC).filter(|s|!s.trim().is_empty()))
+                .unwrap_or_else(||instance.rsplit('\\').next().unwrap_or(&instance).to_string());
+            if name.trim().is_empty(){continue;}
+            out.push((id,name,level));
+        }
+        // 同一个蓝牙地址在设备管理器里有多个服务节点；电量可能在名字为空的节点上，
+        // 再从同地址的其他节点借一个可读名称（优先耳机/音箱，其次鼠标键盘）。
+        for i in 0..u32::MAX {
+            let mut data=SP_DEVINFO_DATA{cbSize:std::mem::size_of::<SP_DEVINFO_DATA>() as u32,..Default::default()};
+            if SetupDiEnumDeviceInfo(set,i,&mut data).is_err(){break;}
+            let Some(instance)=instance_id(set,&data) else{continue;};
+            let id=instance.rsplit('\\').next().unwrap_or(&instance).to_ascii_uppercase();
+            let Some(entry)=out.iter_mut().find(|(node,_,_)|*node==id) else{continue;};
+            let name=string_prop(set,&data,&FRIENDLY).filter(|s|!s.trim().is_empty())
+                .or_else(||string_prop(set,&data,&DESC).filter(|s|!s.trim().is_empty()))
+                .or_else(||registry_string_prop(set,&data,SPDRP_FRIENDLYNAME).filter(|s|!s.trim().is_empty()))
+                .or_else(||registry_string_prop(set,&data,SPDRP_DEVICEDESC).filter(|s|!s.trim().is_empty()));
+            if let Some(name)=name {
+                if name_rank(&name)>name_rank(&entry.1) {entry.1=name;}
+            }
+        }
+        let _=SetupDiDestroyDeviceInfoList(set);
+    }
+    Ok(out)
+}
+
+#[cfg(windows)]
+fn name_rank(name:&str)->u8 {
+    use DeviceKind::*;
+    match device_kind(name,true,None) {
+        Bone|Earbuds|Headphones|Speaker=>3,
+        Mouse|Keyboard|Gamepad|Phone=>2,
+        Other=>1,
+    }
+}
+
+/// 设备节点的注册表属性比 DEVPROP 更容易拿到耳机名称。
+#[cfg(windows)]
+unsafe fn registry_string_prop(
+    set: windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO,
+    data: &windows::Win32::Devices::DeviceAndDriverInstallation::SP_DEVINFO_DATA,
+    prop: windows::Win32::Devices::DeviceAndDriverInstallation::SETUP_DI_REGISTRY_PROPERTY,
+)->Option<String>{
+    use windows::Win32::Devices::DeviceAndDriverInstallation::SetupDiGetDeviceRegistryPropertyW;
+    let mut ty=0u32;
+    let mut size=0u32;
+    SetupDiGetDeviceRegistryPropertyW(set,data,prop,Some(&mut ty),None,Some(&mut size)).ok()?;
+    if ty!=1 || size==0 || size>4096{return None;} // REG_SZ
+    let mut buf=vec![0u8;size as usize];
+    SetupDiGetDeviceRegistryPropertyW(set,data,prop,Some(&mut ty),Some(buf.as_mut_slice()),None).ok()?;
+    let words:Vec<u16>=buf.chunks_exact(2).take(size as usize/2).map(|p|u16::from_le_bytes([p[0],p[1]])).collect();
+    let end=words.iter().position(|c|*c==0).unwrap_or(words.len());
+    Some(String::from_utf16_lossy(&words[..end]))
+}
+
+#[cfg(windows)]
+unsafe fn string_prop(
+    set: windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO,
+    data: &windows::Win32::Devices::DeviceAndDriverInstallation::SP_DEVINFO_DATA,
+    key: &windows::Win32::Devices::Properties::DEVPROPKEY,
+)->Option<String>{
+    use windows::Win32::Devices::DeviceAndDriverInstallation::SetupDiGetDevicePropertyW;
+    use windows::Win32::Devices::Properties::DEVPROPTYPE;
+    const STRING: DEVPROPTYPE = DEVPROPTYPE(0x12); // DEVPROP_TYPE_STRING
+    let mut ty=DEVPROPTYPE::default();let mut size=0u32;
+    SetupDiGetDevicePropertyW(set,data,key,&mut ty,None,Some(&mut size),0).ok()?;
+    if ty!=STRING || size==0 || size>4096{return None;}
+    let mut buf=vec![0u8;size as usize];
+    SetupDiGetDevicePropertyW(set,data,key,&mut ty,Some(&mut buf),Some(&mut size),0).ok()?;
+    let units=size as usize/2;
+    let words:Vec<u16>=buf.chunks_exact(2).take(units).map(|p|u16::from_le_bytes([p[0],p[1]])).collect();
+    let end=words.iter().position(|c|*c==0).unwrap_or(words.len());
+    Some(String::from_utf16_lossy(&words[..end]))
 }
 
 #[cfg(windows)]

@@ -15,6 +15,8 @@ pub(crate) const BELL: usize = 8;
 pub(crate) const PET: usize = 9;
 /// 天气徽标的基础槽宽；温度文字更长时由 `widen` 补足。
 pub(crate) const WEATHER_WIDTH: f32 = 38.0;
+/// 蓝牙电量角标替换天气时占用的槽宽。
+pub(crate) const BT_WIDTH: f32 = 68.0;
 const WIDTHS: [f32; 10] = [44.0,20.0,27.0,27.0,27.0,WEATHER_WIDTH,14.0,crate::focus_bar::WIDTH,20.0,32.0];
 
 pub(crate) const DEFAULT_ORDER: [usize;7]=[BATTERY,PET,CLOCK,WEATHER,QUOTA,MUSIC,FOCUS];
@@ -82,6 +84,12 @@ impl Layout {
         self.widths[slot]+=extra;self.width+=extra;
     }
     pub fn balance_tail(&mut self,position:usize,extra:f32){self.widen(quota_slot(position),extra);}
+    /// 蓝牙角标占用原天气槽位：保留天气在排序中的位置，只把宽度放大到角标所需。
+    pub fn widen_for_bt(&mut self){
+        if self.x[WEATHER].is_none(){return;}
+        let extra=BT_WIDTH-self.widths[WEATHER];
+        self.widen(WEATHER,extra);
+    }
     pub fn widen_clock(&mut self, extra:f32) {self.widen(CLOCK,extra);}
     pub fn hide_clock(&mut self) {
         let Some(center)=self.x[CLOCK].take() else{return;};

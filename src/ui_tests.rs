@@ -1329,6 +1329,15 @@ fn island_position_drag_clamps_to_existing_limits_and_stays_resident(){
 }
 
 #[test]
+fn mirror_displays_setting_persists(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    assert!(h.app.settings.mirror_displays,"默认开启多屏同步，单屏用户无感知");
+    h.app.settings.mirror_displays=false;h.app.settings.save();
+    assert!(!crate::model::Settings::load().mirror_displays,"多屏开关必须写入配置");
+}
+
+#[test]
 fn island_position_drag_below_a_top_bar_switches_edges_like_the_bare_screen(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     use crate::model::{Dock,Settings};
@@ -8906,5 +8915,40 @@ fn bt_battery_badge_visual_check(){
             let image=image::RgbaImage::from_raw(raster.w as u32,raster.h as u32,rgba).unwrap();
             image::imageops::crop_imm(&image,200,0,880,380).to_image().save(dest.join("bt-badge-expanded.png")).unwrap();
         }
+    }
+}
+
+#[test]
+fn bt_badge_shows_in_collapsed_state(){
+    use crate::bt::{Device,DeviceKind};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let preview=std::env::var_os("DAOZAI_BT_PREVIEW_DIR").map(std::path::PathBuf::from);
+    let mut raster=preview.as_ref().map(|_|feature_raster());
+    let mut h=H::new();h.app.settings.pet=false;h.app.settings.island_lyrics=false;
+    h.app.weather.snapshot=Some(crate::weather::Snapshot{temp:24.0,code:0,day:true,place:"测试".into(),..Default::default()});
+    let devices=vec![Device{id:"AA".into(),name:"Buds".into(),battery:Some(100),kind:DeviceKind::Earbuds}];
+    // 不 hover，收起态；跑足够帧让弹簧稳定
+    for _ in 0..120 {
+        h.t+=1.0/60.0;
+        let env=Env{t:h.t,clock:"22:00:00".into(),today:"2026-11-17".into(),date:"11月17日 周二".into(),cursor:None,bt_ready:true,bt:devices.clone(),..Default::default()};
+        let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(crate::app::CANVAS_W,WIN_H))),time:Some(h.t),focused:true,..Default::default()};
+        let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx,|ui|{h.app.frame(ui,Rect::from_min_size(ui.max_rect().min,Vec2::new(WIN_W,WIN_H)),&env);});});
+        if let Some(raster)=raster.as_mut(){raster.update_textures(&output.textures_delta);}
+        let _=output;
+    }
+    // 收起态最后一帧检查
+    let env=Env{t:h.t,clock:"22:00:00".into(),today:"2026-11-17".into(),date:"11月17日 周二".into(),cursor:None,bt_ready:true,bt:devices.clone(),..Default::default()};
+    let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(crate::app::CANVAS_W,WIN_H))),time:Some(h.t),focused:true,..Default::default()};
+    let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx,|ui|{h.app.frame(ui,Rect::from_min_size(ui.max_rect().min,Vec2::new(WIN_W,WIN_H)),&env);});});
+    let texts=output.shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Text(t)=>Some(t.galley.text().to_string()),_=>None}).collect::<Vec<_>>().join(" ");
+    assert!(!h.app.open,"测试前提：应处于收起态");
+    assert!(texts.contains("100%"),"收起态应显示蓝牙电量角标，实际文本：{texts}");
+    assert!(!texts.contains("24°"),"蓝牙角标应替换天气，而不是和天气并列显示");
+    if let (Some(dir),Some(raster))=(preview.as_ref(),raster.as_mut()) {
+        raster.update_textures(&output.textures_delta);
+        raster.buf.fill([0.20,0.24,0.32,1.0]);raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);
+        let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+        let image=image::RgbaImage::from_raw(raster.w as u32,raster.h as u32,rgba).unwrap();
+        image::imageops::crop_imm(&image,40,0,800,80).to_image().save(dir.join("bt-badge-collapsed.png")).unwrap();
     }
 }

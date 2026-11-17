@@ -29,9 +29,9 @@ pub(crate) fn pick_device<'a>(devices: &'a [crate::bt::Device]) -> Option<&'a cr
 }
 
 impl Card<'_> {
-    /// 在顶栏右上角画蓝牙电量角标：设备图标 + 电量条 + 百分比。
-    /// 返回是否实际绘制（供测试与命中判断）。
-    pub(crate) fn bt_battery_badge(&self, env: &Env) -> bool {
+    /// 在指定右边界画蓝牙电量角标：设备图标 + 电量条 + 百分比。
+    /// `right` 是百分比文字的右对齐边界；`y` 是垂直中心。
+    pub(crate) fn bt_battery_badge_at(&self, env: &Env, right: f32, y: f32) -> bool {
         let Some(device) = pick_device(&env.bt) else { return false };
         let Some(level) = device.battery else { return false };
         let color = battery_color(level);
@@ -39,20 +39,25 @@ impl Card<'_> {
         let pct = format!("{level}%");
         let pct_w = self.text_w(&pct, 10.5, W::Semibold);
         // 布局从右往左：[百分比][电量条][图标]
-        let pct_x = RIGHT - pct_w;
+        let pct_x = right - pct_w;
         let bar_w = 22.0;
         let bar_x = pct_x - bar_w - 6.0;
         let icon_cx = bar_x - 12.0;
 
-        self.circle(icon_cx, CENTER_Y, 10.0, Color32::from_gray(38));
-        crate::extras::device_icon(self, device.kind, icon_cx - 7.5, CENTER_Y - 7.5, 15.0);
+        self.circle(icon_cx, y, 10.0, Color32::from_gray(38));
+        crate::extras::device_icon(self, device.kind, icon_cx - 7.5, y - 7.5, 15.0);
 
-        self.fill(bar_x, CENTER_Y - 3.0, bar_w, 6.0, 3.0, Color32::from_gray(60));
+        self.fill(bar_x, y - 3.0, bar_w, 6.0, 3.0, Color32::from_gray(60));
         let filled = bar_w * level as f32 / 100.0;
-        if filled > 0.0 { self.fill(bar_x, CENTER_Y - 3.0, filled, 6.0, 3.0, color); }
+        if filled > 0.0 { self.fill(bar_x, y - 3.0, filled, 6.0, 3.0, color); }
 
-        self.text(RIGHT, CENTER_Y + 3.5, &pct, 10.5, W::Semibold, color, H::Right);
+        self.text(right, y + 3.5, &pct, 10.5, W::Semibold, color, H::Right);
         true
+    }
+
+    /// 展开态顶栏右上角（设置齿轮左侧）的便捷封装。
+    pub(crate) fn bt_battery_badge(&self, env: &Env) -> bool {
+        self.bt_battery_badge_at(env, RIGHT, CENTER_Y)
     }
 }
 

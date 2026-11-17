@@ -216,6 +216,37 @@ impl Layered {
         self.size = (0, 0);
     }
 
+    /// 把一帧交给显示在任意物理坐标的分层窗口（多屏镜像用）。画面没变返回 Ok(false)。
+    pub fn present_at(&mut self, dst_pos: POINT, size: [usize; 2], rgba: &[u8]) -> windows::core::Result<bool> {
+        let (w, h) = (size[0] as i32, size[1] as i32);
+        if rgba.len() != size[0] * size[1] * 4 { return Ok(false); }
+        let hash = image_hash(size, rgba);
+        if self.last == Some(hash) { return Ok(false); }
+        if !self.ensure_bitmap(w, h) { return Err(windows::core::Error::from_win32()); }
+        unsafe {
+            let dst = std::slice::from_raw_parts_mut(self.bits, rgba.len());
+            for (out, p) in dst.chunks_exact_mut(4).zip(rgba.chunks_exact(4)) {
+                out[0] = p[2]; out[1] = p[1]; out[2] = p[0]; out[3] = p[3];
+            }
+            let _ = GdiFlush();
+            let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
+            let (src, sz) = (POINT::default(), SIZE { cx: w, cy: h });
+            UpdateLayeredWindow(self.display, None, Some(&dst_pos), Some(&sz), self.dc, Some(&src), COLORREF(0), Some(&blend), ULW_ALPHA)?;
+            let _ = ShowWindow(self.display, SW_SHOWNOACTIVATE);
+        }
+        self.last = Some(hash);
+        Ok(true)
+    }
+
+    /// 隐藏镜像窗口；再次显示时忽略缓存的画面，强制重新提交一帧。
+    pub fn hide(&mut self) {
+        unsafe { let _ = ShowWindow(self.display, SW_HIDE); }
+        self.last = None;
+    }
+
+    /// 目标屏幕、缩放或位置变化后，强制下一帧重新提交画面。
+    pub fn invalidate(&mut self) { self.last = None; }
+
     /// 把一帧（RGBA，已预乘）交给显示窗口。画面没变返回 Ok(false)；
     /// 尺寸与岛仔窗口当前大小不符（读回之后窗口又改了大小）时跳过，等下一帧。
     pub fn present(&mut self, owner: HWND, size: [usize; 2], rgba: &[u8]) -> windows::core::Result<bool> {

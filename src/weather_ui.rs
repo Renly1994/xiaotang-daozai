@@ -938,11 +938,14 @@ impl App {
     fn page_weather_body(&mut self, c: &Card, env: &Env, cmds: &mut Vec<Cmd>) {
         let loading = self.weather.loading;
         let ready=self.weather_can_refresh();
-        c.text(326.0, 23.0, if loading { "更新中" } else if ready { "刷新" } else { "稍后刷新" }, 10.5, W::Regular, if ready { theme::GRAY } else { theme::DIM }, H::Center);
-        if c.hit(304.0, 8.0, 44.0, 21.0, "weather-refresh").on_hover_text("重新获取天气；自动模式会重新定位。请求间隔至少 30 秒，失败后至少 2 分钟").clicked() && ready {
+        let footer=WEATHER_H-4.0;
+        // 刷新入口放在页脚：顶栏右上角留给蓝牙电量角标，避免两者重叠。
+        let refresh_label=if loading { "更新中" } else if ready { "刷新" } else { "稍后刷新" };
+        let refresh_w=c.text(214.0,footer,refresh_label,10.0,W::Regular,if ready{theme::GRAY}else{theme::DIM},H::Center);
+        if c.hit(214.0-refresh_w/2.0,footer-11.0,refresh_w,15.0,"weather-refresh")
+            .on_hover_text("重新获取天气；自动模式会重新定位。请求间隔至少 30 秒，失败后至少 2 分钟").clicked() && ready {
             self.weather_refresh();
         }
-        let footer=WEATHER_H-4.0;
         let source=self.weather_source.displayed;
         let source_label=if source==crate::weather_source_ui::Provider::Qweather{"QWeather"}else{source.name()};
         let source_w=c.text(404.0,footer,source_label,10.0,W::Regular,theme::GRAY,H::Right);

@@ -10,6 +10,7 @@
 //! - 原版没有可用的 Esc 收起入口（§2.5），这里也不注册键盘钩子。
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -536,6 +537,11 @@ impl Window {
                 false
             }
         }
+    }
+
+    /// 多屏镜像用的画面：兼容渲染没有 alpha 时套上同一份岛体轮廓遮罩。
+    pub fn mirror_frame<'a>(&'a mut self, size: [usize; 2], rgba: &'a [u8]) -> Cow<'a, [u8]> {
+        if self.outline.active { Cow::Borrowed(self.outline.apply(size, rgba)) } else { Cow::Borrowed(rgba) }
     }
 
     pub fn logical_origin(&self,scale:f32)->Option<eframe::egui::Pos2>{
