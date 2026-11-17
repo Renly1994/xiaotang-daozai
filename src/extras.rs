@@ -1413,6 +1413,8 @@ impl App {
                             ui.separator();
                             setting_row(ui,"天气","收起时显示天气图标和温度，点击打开天气页",&mut self.settings.show_weather);
                             ui.separator();
+                            setting_row(ui,"蓝牙电量","展开时在顶栏右上角显示已连接耳机的电量；无设备自动隐藏",&mut self.settings.show_bt_battery);
+                            ui.separator();
                             setting_row(ui,"岛上歌词","收起时显示歌词，无歌词时显示封面和歌名",&mut self.settings.island_lyrics);
                         });
                         settings_label(ui,"功能页面");

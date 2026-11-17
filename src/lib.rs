@@ -17,6 +17,7 @@ pub mod messenger;
 pub mod child_process;
 mod settings_window;
 pub mod bt;
+mod bt_battery;
 pub mod calendar;
 mod calendar_ui;
 mod local_calendar;

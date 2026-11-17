@@ -457,7 +457,11 @@ impl eframe::App for Shell {
             } else {
                 self.backdrop=None;
             }
-            if self.app.settings.bluetooth_notifications {
+            // 蓝牙扫描在「连接提醒」或「顶栏电量角标」任一开启时运行；
+            // 两者都关才真正停止后台线程。
+            let bt_needed=self.app.settings.bluetooth_notifications
+                || self.app.settings.show_bt_battery;
+            if bt_needed {
                 if self.bt_rx.is_none() {self.bt_rx=Some(daozai::bt::spawn());}
             } else {
                 self.bt_rx=None;

@@ -8879,3 +8879,32 @@ fn every_module_settings_tab_maps_to_its_page(){
     }
     pages.sort();assert_eq!(pages,(0..crate::app::PAGE_NAMES.len()).collect::<Vec<_>>(),"每个功能页面各有一个设置分页");
 }
+
+/// 顶栏右上角蓝牙电量角标视觉自查：注入合成设备，导出展开态画面。
+#[test]
+#[ignore]
+fn bt_battery_badge_visual_check(){
+    use crate::bt::{Device,DeviceKind};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_BT_PREVIEW_DIR").expect("需指定预览目录"));std::fs::create_dir_all(&dest).unwrap();
+    let devices=vec![
+        Device{id:"AA".into(),name:"Baseus Bass WM01s".into(),battery:Some(70),kind:DeviceKind::Earbuds},
+    ];
+    let mut h=H::new();h.app.settings.pet=false;h.app.settings.island_lyrics=false;h.app.show_page(0);
+    let mut raster=feature_raster();
+    for frame in 0..90 {
+        h.t+=1.0/60.0;let cursor=Some(H::local(300.0,60.0));
+        let env=Env{t:h.t,clock:"19:55:00".into(),today:"2026-11-17".into(),date:"11月17日 周二".into(),cursor,bt_ready:true,bt:devices.clone(),..Default::default()};
+        let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(crate::app::CANVAS_W,WIN_H))),time:Some(h.t),focused:true,events:vec![egui::Event::PointerMoved(cursor.unwrap())],viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};
+        let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx,|ui|{h.app.frame(ui,Rect::from_min_size(ui.max_rect().min,Vec2::new(WIN_W,WIN_H)),&env);});});
+        raster.update_textures(&output.textures_delta);
+        if frame==89 {
+            let texts=output.shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Text(t)=>Some(t.galley.text()),_=>None}).collect::<Vec<_>>().join(" ");
+            assert!(texts.contains("70%"),"展开态顶栏应显示 70% 电量角标，实际文本：{texts}");
+            raster.buf.fill([0.20,0.24,0.32,1.0]);raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);
+            let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+            let image=image::RgbaImage::from_raw(raster.w as u32,raster.h as u32,rgba).unwrap();
+            image::imageops::crop_imm(&image,200,0,880,380).to_image().save(dest.join("bt-badge-expanded.png")).unwrap();
+        }
+    }
+}

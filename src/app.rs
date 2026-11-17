@@ -2875,6 +2875,12 @@ impl App {
         if reveal > 0.0 {
             base.faded(reveal).text(hd + (1.0 - reveal) * 10.0, 22.5, &env.date, size::DATE, W::Regular, Color32::from_rgb(210, 210, 214), H::Left);
         }
+        // 蓝牙耳机电量角标：展开态顶栏右上角、设置齿轮左侧常驻显示。
+        // 只在展开过渡基本完成时出现，避免和收起态的歌词/药丸内容打架。
+        if self.settings.show_bt_battery && reveal > 0.55 && !self.is_editing() {
+            let c = base.faded(smoothstep(0.55, 0.95, reveal));
+            c.bt_battery_badge(env);
+        }
         if self.open && reveal>0.95 && p>0.98 && !self.is_editing() && !self.drag_hot {
             if let Some(screen)=env.screen {
                 // 中间的日期时间区不占用两侧的新增、刷新和设置按钮。
