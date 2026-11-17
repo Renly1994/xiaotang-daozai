@@ -12,9 +12,9 @@ use windows::Win32::Media::Audio::{eConsole, eRender, IMMDevice, IMMDeviceEnumer
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
 };
-use windows::Win32::System::Threading::{GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, GetLastInputInfo, LASTINPUTINFO,
+    GetKeyState, GetLastInputInfo, LASTINPUTINFO, SetActiveWindow, keybd_event, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::UI::Notifications::Management::{
@@ -208,141 +208,43 @@ pub fn idle_seconds() -> f64 {
         }
     }
 }
-/// 前台窗口在全屏判定里需要的信息。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Foreground {
-    hwnd: isize,
-    pid: u32,
-    /// 最终所有者窗口（没有所有者时是它自己）。
-    root_owner: isize,
-    /// 会在任务栏单独显示按钮的普通程序窗口（不是工具窗口、对话框或浮动面板）。
-    app_window: bool,
-}
-
-/// 前台从全屏窗口切到别的窗口时，是否仍按原来的全屏处理（岛仔保持隐藏）。
-///
-/// 3ds Max、Photoshop 这类软件全屏（或最大化后盖满整块屏幕）时，插件面板、浮动工具条、
-/// 属性对话框都是同一个程序的附属窗口；每点一下前台就在它们和主窗口之间来回切，
-/// 过去岛仔会跟着「出现 → 消失」闪一次。只要原来的全屏窗口还盖着屏幕，
-/// 而新的前台是它的附属窗口（被它拥有，或同一程序里不单独占任务栏的窗口），就继续隐藏。
-/// 切到另一个程序、或同一程序里另开的普通窗口（如浏览器的新窗口）时照常显示。
-fn keeps_fullscreen(last: Foreground, still_covers: bool, now: Option<Foreground>) -> bool {
-    if !still_covers { return false; }
-    match now {
-        // 激活切换的瞬间前台可能是空的，不当成离开全屏。
-        None => true,
-        Some(now) => now.hwnd == last.hwnd || now.root_owner == last.hwnd || (now.pid == last.pid && !now.app_window),
-    }
-}
-
-unsafe fn foreground_info(hwnd: HWND) -> Foreground {
-    let mut pid = 0;
-    GetWindowThreadProcessId(hwnd, Some(&mut pid));
-    let root = GetAncestor(hwnd, GA_ROOTOWNER);
-    let root_owner = if root.0.is_null() { hwnd.0 as isize } else { root.0 as isize };
-    let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-    let owned = !GetWindow(hwnd, GW_OWNER).unwrap_or_default().0.is_null();
-    let app_window = ex & WS_EX_APPWINDOW.0 as isize != 0 || (!owned && ex & WS_EX_TOOLWINDOW.0 as isize == 0);
-    Foreground { hwnd: hwnd.0 as isize, pid, root_owner, app_window }
-}
-
-/// 窗口盖满它所在的整块屏幕时返回该屏幕范围。
-unsafe fn covering_monitor(hwnd: HWND) -> Option<crate::display_layout::Bounds> {
-    if !IsWindow(hwnd).as_bool() || !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
-        return None;
-    }
-    let mut r = RECT::default();
-    if GetWindowRect(hwnd, &mut r).is_err() {
-        return None;
-    }
-    let mut info = MONITORINFO {
-        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-        ..Default::default()
-    };
-    if !GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut info).as_bool()
-    {
-        return None;
-    }
-    let covers=r.left <= info.rcMonitor.left
-        && r.top <= info.rcMonitor.top
-        && r.right >= info.rcMonitor.right
-        && r.bottom >= info.rcMonitor.bottom;
-    covers.then_some(crate::display_layout::Bounds {left:info.rcMonitor.left,top:info.rcMonitor.top,right:info.rcMonitor.right,bottom:info.rcMonitor.bottom})
-}
-
 pub fn fullscreen() -> Option<crate::display_layout::Bounds> {
-    use std::sync::Mutex;
-    // 上一次判定为全屏的窗口：前台切到它的附属窗口时沿用（见 `keeps_fullscreen`）。
-    static LAST: Mutex<Option<Foreground>> = Mutex::new(None);
-    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
     unsafe {
         let hwnd = GetForegroundWindow();
-        let now = (!hwnd.0.is_null()).then(|| foreground_info(hwnd));
-        if let Some(info) = now {
-            // 岛仔自己的窗口（设置窗口等）不算全屏，也不沿用。
-            if info.pid == windows::Win32::System::Threading::GetCurrentProcessId() {
-                *last = None;
-                return None;
-            }
-            // 桌面与资源管理器桌面窗口不能当成全屏游戏。
-            let mut cls = [0u16; 64];
-            let n = GetClassNameW(hwnd, &mut cls);
-            let cls = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
-            if matches!(cls.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd") {
-                *last = None;
-                return None;
-            }
-            if let Some(bounds) = covering_monitor(hwnd) {
-                *last = Some(info);
-                return Some(bounds);
-            }
+        if hwnd.0.is_null() {
+            return None;
         }
-        if let Some(previous) = *last {
-            let bounds = covering_monitor(HWND(previous.hwnd as *mut _));
-            if keeps_fullscreen(previous, bounds.is_some(), now) {
-                return bounds;
-            }
+        let mut pid = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == windows::Win32::System::Threading::GetCurrentProcessId() {
+            return None;
         }
-        *last = None;
-        None
+        // 桌面与资源管理器桌面窗口不能当成全屏游戏。
+        let mut cls = [0u16; 64];
+        let n = GetClassNameW(hwnd, &mut cls);
+        let cls = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
+        if matches!(cls.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd") {
+            return None;
+        }
+        let mut r = RECT::default();
+        if GetWindowRect(hwnd, &mut r).is_err() {
+            return None;
+        }
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut info).as_bool()
+        {
+            return None;
+        }
+        let covers=r.left <= info.rcMonitor.left
+            && r.top <= info.rcMonitor.top
+            && r.right >= info.rcMonitor.right
+            && r.bottom >= info.rcMonitor.bottom;
+        covers.then_some(crate::display_layout::Bounds {left:info.rcMonitor.left,top:info.rcMonitor.top,right:info.rcMonitor.right,bottom:info.rcMonitor.bottom})
     }
 }
-
-#[cfg(test)]
-mod fullscreen_follow_tests {
-    use super::*;
-
-    const MAX: Foreground = Foreground { hwnd: 100, pid: 7, root_owner: 100, app_window: true };
-
-    #[test]
-    fn plugin_panels_and_dialogs_of_the_fullscreen_app_keep_the_island_hidden() {
-        // 被主窗口拥有的插件面板 / 对话框
-        let owned = Foreground { hwnd: 200, pid: 7, root_owner: 100, app_window: false };
-        assert!(keeps_fullscreen(MAX, true, Some(owned)));
-        // 同一程序里不占任务栏的浮动工具窗口（没有设所有者）
-        let tool = Foreground { hwnd: 201, pid: 7, root_owner: 201, app_window: false };
-        assert!(keeps_fullscreen(MAX, true, Some(tool)));
-        // 插件放在独立进程里、但窗口挂在主窗口下面
-        let other_process = Foreground { hwnd: 202, pid: 9, root_owner: 100, app_window: false };
-        assert!(keeps_fullscreen(MAX, true, Some(other_process)));
-        // 激活切换瞬间前台为空
-        assert!(keeps_fullscreen(MAX, true, None));
-    }
-
-    #[test]
-    fn switching_to_another_app_or_leaving_fullscreen_shows_the_island() {
-        let other_app = Foreground { hwnd: 300, pid: 9, root_owner: 300, app_window: true };
-        assert!(!keeps_fullscreen(MAX, true, Some(other_app)), "切到别的程序时照常显示");
-        // 同一程序新开的普通窗口（如浏览器的第二个窗口）也照常显示
-        let second_window = Foreground { hwnd: 301, pid: 7, root_owner: 301, app_window: true };
-        assert!(!keeps_fullscreen(MAX, true, Some(second_window)));
-        // 原来的全屏窗口已经还原、最小化或关闭
-        let owned = Foreground { hwnd: 200, pid: 7, root_owner: 100, app_window: false };
-        assert!(!keeps_fullscreen(MAX, false, Some(owned)));
-        assert!(!keeps_fullscreen(MAX, false, None));
-    }
-}
-
 pub(crate) fn is_browser_process(name:&str)->bool {
     ["chrome.exe","msedge.exe","firefox.exe","brave.exe","vivaldi.exe","opera.exe",
         "arc.exe","zen.exe","chromium.exe","librewolf.exe","floorp.exe","waterfox.exe",
@@ -571,11 +473,7 @@ fn connect_inner(ctx:eframe::egui::Context,filter:crate::messenger::Notification
                     let (version,body)=baseline.observe(number,created,client,tracked,body);
                     current.insert(number,version);
                     if let Some(body)=body{
-                        let target=client.filter(|client|client.adapter().capture==crate::messenger::Capture::SystemToast).map(|client|(client,accounts.target(client,number,created)))
-                            .and_then(|(client,target)|{
-                                if target.is_none(){crate::messenger::windows::trace(format!("通知 {id}·创建 {created} 未能绑定 {} 账号",client.name()));}
-                                target
-                            });
+                        let target=client.filter(|client|client.adapter().capture==crate::messenger::Capture::SystemToast).and_then(|client|accounts.target(client,number,created));
                         if !body.trim().is_empty(){messages.push((created,app,id,body,target));}
                     }
                 }
@@ -604,11 +502,222 @@ pub fn pick_files() -> Result<Vec<std::path::PathBuf>> {
     pick_files_for("添加文件到置物架",true)
 }
 
+/// 选择一个文件夹（返回 None = 用户取消）。
+pub fn pick_folder(title:&str) -> Result<Option<std::path::PathBuf>> {
+    unsafe {
+        use windows::Win32::UI::Shell::*;
+        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_ALL)?;
+        // 只让选文件夹，且必须是已存在的文件系统路径。
+        dialog.SetOptions(FOS_FORCEFILESYSTEM | FOS_PICKFOLDERS | FOS_PATHMUSTEXIST)?;
+        dialog.SetTitle(&HSTRING::from(title))?;
+        if let Err(e) = dialog.Show(None) {
+            if e.code().0 as u32 == 0x800704c7 { return Ok(None); } // 用户取消
+            return Err(e);
+        }
+        let item = dialog.GetResult()?;
+        let ptr = item.GetDisplayName(SIGDN_FILESYSPATH)?;
+        let text = ptr.to_string()?;
+        windows::Win32::System::Com::CoTaskMemFree(Some(ptr.0 as _));
+        Ok(Some(text.into()))
+    }
+}
+
+/// 选择一个程序文件（返回 None = 用户取消）。
+pub fn pick_exe(title:&str) -> Result<Option<std::path::PathBuf>> {
+    unsafe {
+        use windows::Win32::UI::Shell::*;
+        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_ALL)?;
+        dialog.SetOptions(FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST)?;
+        dialog.SetTitle(&HSTRING::from(title))?;
+        // 默认只列 .exe，用户仍可在文件名框里输入其它路径。
+        let name: Vec<u16> = "程序 (*.exe)\0".encode_utf16().collect();
+        let spec: Vec<u16> = "*.exe\0".encode_utf16().collect();
+        let filters = [Common::COMDLG_FILTERSPEC {
+            pszName: windows::core::PCWSTR(name.as_ptr()),
+            pszSpec: windows::core::PCWSTR(spec.as_ptr()),
+        }];
+        let _ = dialog.SetFileTypes(&filters);
+        if let Err(e) = dialog.Show(None) {
+            if e.code().0 as u32 == 0x800704c7 { return Ok(None); }
+            return Err(e);
+        }
+        let item = dialog.GetResult()?;
+        let ptr = item.GetDisplayName(SIGDN_FILESYSPATH)?;
+        let text = ptr.to_string()?;
+        windows::Win32::System::Com::CoTaskMemFree(Some(ptr.0 as _));
+        Ok(Some(text.into()))
+    }
+}
+
+// —— 关闭其它应用的 Windows 通知横幅 ——
+// Windows 没有公开 API 改别人的通知设置；ShowBanner 是 HKCU 下的内部项，
+// 写 0 表示「不弹右下角横幅」，通知仍会进通知中心，岛仔照常读取。
+// 原值记在 banner-overrides.json，随时可以一键恢复；每次操作逐条写日志。
+const BANNER_ROOT:&str="SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Notifications\\Settings";
+const BANNER_VALUE:&str="ShowBanner";
+const BANNER_FILE:&str="banner-overrides.json";
+const BANNER_LOG:&str="notification-banner.log";
+
+fn banner_wide(text:&str)->Vec<u16>{text.encode_utf16().chain(Some(0)).collect()}
+fn banner_log_path()->std::path::PathBuf{crate::model::config_dir().join("diagnostics").join(BANNER_LOG)}
+
+fn banner_log(message:&str){
+    use std::io::Write as _;
+    let path=banner_log_path();
+    if let Some(dir)=path.parent(){let _=std::fs::create_dir_all(dir);}
+    // 别让它无限长：超过 256 KB 就从头写。
+    if std::fs::metadata(&path).is_ok_and(|meta|meta.len()>256*1024){let _=std::fs::write(&path,b"");}
+    if let Ok(mut file)=std::fs::OpenOptions::new().create(true).append(true).open(&path){
+        let stamp=chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        let _=writeln!(file,"{stamp} | {message}");
+    }
+}
+
+/// 设置页显示的上次结果；找不到就返回 None。
+pub fn banner_last_summary()->Option<String>{
+    let text=std::fs::read_to_string(banner_log_path()).ok()?;
+    text.lines().rev().find(|line|line.contains("| 汇总 |"))
+        .and_then(|line|line.split_once("| 汇总 |"))
+        .map(|(_,rest)|rest.trim().to_string())
+}
+
+pub fn open_banner_log()->std::result::Result<(),String>{
+    let path=banner_log_path();
+    if !path.exists(){
+        if let Some(dir)=path.parent(){let _=std::fs::create_dir_all(dir);}
+        let _=std::fs::write(&path,b"");
+    }
+    std::process::Command::new("explorer.exe").arg(&path).spawn().map(|_|())
+        .map_err(|error|format!("打开日志失败：{error}"))
+}
+
+fn win32_message(code:u32)->String{
+    format!("错误 {code}：{}",std::io::Error::from_raw_os_error(code as i32))
+}
+fn banner_value_text(value:Option<u32>)->String{
+    match value{
+        None=>"不存在（默认弹横幅）".to_string(),
+        Some(0)=>"0（原本已关）".to_string(),
+        Some(1)=>"1（原本弹横幅）".to_string(),
+        Some(v)=>v.to_string(),
+    }
+}
+
+#[derive(Default,serde::Serialize,serde::Deserialize)]
+struct BannerOverrides{entries:std::collections::BTreeMap<String,Option<u32>>}
+fn banner_file()->std::path::PathBuf{crate::model::config_dir().join(BANNER_FILE)}
+fn banner_load()->BannerOverrides{
+    std::fs::read(banner_file()).ok().and_then(|bytes|serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+}
+fn banner_save(state:&BannerOverrides)->std::result::Result<(),String>{
+    let bytes=serde_json::to_vec_pretty(state).map_err(|error|error.to_string())?;
+    std::fs::write(banner_file(),bytes).map_err(|error|format!("保存失败：{error}"))
+}
+
+/// None = 这个值原本不存在（默认会弹横幅）；Some(0) = 原本就关闭。
+fn banner_original(app:&str)->Option<u32>{
+    use windows::{core::PCWSTR,Win32::System::Registry::*};
+    let path=banner_wide(&format!("{BANNER_ROOT}\\{app}"));
+    let name=banner_wide(BANNER_VALUE);
+    let mut value=0u32;let mut size=std::mem::size_of::<u32>() as u32;
+    let rc=unsafe{RegGetValueW(HKEY_CURRENT_USER,PCWSTR(path.as_ptr()),PCWSTR(name.as_ptr()),
+        RRF_RT_REG_DWORD,None,Some((&mut value as *mut u32).cast()),Some(&mut size))};
+    (rc.0==0).then_some(value)
+}
+
+/// Some(v) 写值；None 删掉该值（回到默认弹横幅）。失败原因带 Windows 错误码与描述。
+fn banner_set(app:&str,value:Option<u32>)->std::result::Result<(),String>{
+    use windows::{core::PCWSTR,Win32::System::Registry::*};
+    let path=banner_wide(&format!("{BANNER_ROOT}\\{app}"));
+    let name=banner_wide(BANNER_VALUE);
+    let mut key=HKEY::default();
+    unsafe{
+        let opened=RegCreateKeyExW(HKEY_CURRENT_USER,PCWSTR(path.as_ptr()),0,PCWSTR::null(),
+            REG_OPTION_NON_VOLATILE,KEY_QUERY_VALUE|KEY_SET_VALUE,None,&mut key,None);
+        if opened.0!=0{return Err(format!("打不开通知设置（{}）",win32_message(opened.0)));}
+        let rc=match value{
+            Some(v)=>RegSetValueExW(key,PCWSTR(name.as_ptr()),0,REG_DWORD,Some(&v.to_le_bytes())),
+            None=>{
+                // 值不存在本来就是默认状态，删不掉也无所谓。
+                let _=RegDeleteValueW(key,PCWSTR(name.as_ptr()));
+                let _ = RegCloseKey(key);
+                return Ok(());
+            },
+        };
+        let _ = RegCloseKey(key);
+        if rc.0==0{Ok(())}else{Err(format!("写 ShowBanner 失败（{}）",win32_message(rc.0)))}
+    }
+}
+
+pub fn banner_overridden_count()->usize{banner_load().entries.len()}
+
+/// 只动岛仔应用列表里已勾选的应用；单个失败不影响后面的应用。返回 (成功数, 失败数)。
+pub fn close_notification_banners(apps:&[String])->std::result::Result<(usize,usize),String>{
+    let mut state=banner_load();
+    banner_log(&format!("开始 | 关闭横幅 | 待处理 {} 个",apps.len()));
+    let (mut ok,mut fail,mut skip)=(0,0,0);
+    for app in apps{
+        if app.trim().is_empty(){skip+=1;banner_log("跳过 | 应用名为空");continue;}
+        // 第一次记录原值；重复点「关闭」不能把原值覆盖成 0，否则恢复时还原不回去。
+        let original=match state.entries.get(app){Some(v)=>*v,None=>banner_original(app)};
+        match banner_set(app,Some(0)){
+            Ok(())=>{
+                state.entries.entry(app.clone()).or_insert(original);
+                ok+=1;
+                banner_log(&format!("成功 | {app} | {} -> 0",banner_value_text(original)));
+            },
+            Err(error)=>{fail+=1;banner_log(&format!("失败 | {app} | {error}"));},
+        }
+    }
+    let saved=match banner_save(&state){
+        Ok(())=>"状态文件已保存".to_string(),
+        Err(error)=>format!("状态文件保存失败：{error}"),
+    };
+    banner_log(&format!("| 汇总 | 关闭 | 成功={ok} 失败={fail} 跳过={skip} | {saved}"));
+    if saved.starts_with("状态文件保存失败"){return Err(saved);}
+    Ok((ok,fail))
+}
+
+/// 恢复失败的应用继续留在记录里，下次还能重试。返回 (成功数, 失败数)。
+pub fn restore_notification_banners()->std::result::Result<(usize,usize),String>{
+    let state=banner_load();
+    banner_log(&format!("开始 | 恢复横幅 | 待处理 {} 个",state.entries.len()));
+    let (mut ok,mut fail)=(0,0);
+    let mut remaining=BannerOverrides::default();
+    for (app,original) in &state.entries{
+        match banner_set(app,*original){
+            Ok(())=>{
+                ok+=1;
+                banner_log(&format!("成功 | {app} | 恢复为 {}",banner_value_text(*original)));
+            },
+            Err(error)=>{
+                fail+=1;
+                banner_log(&format!("失败 | {app} | {error}"));
+                remaining.entries.insert(app.clone(),*original);
+            },
+        }
+    }
+    let saved=match banner_save(&remaining){
+        Ok(())=>"状态文件已保存".to_string(),
+        Err(error)=>format!("状态文件保存失败：{error}"),
+    };
+    banner_log(&format!("| 汇总 | 恢复 | 成功={ok} 失败={fail} | {saved}"));
+    if saved.starts_with("状态文件保存失败"){return Err(saved);}
+    Ok((ok,fail))
+}
+
+/// 兜底：直接改注册表不一定立刻生效，给用户一个官方设置入口。
+pub fn open_notification_settings()->std::result::Result<(),String>{
+    std::process::Command::new("explorer.exe").arg("ms-settings:notifications")
+        .spawn().map(|_|()).map_err(|error|format!("打开设置失败：{error}"))
+}
+
 pub fn pick_files_for(title:&str,multiple:bool) -> Result<Vec<std::path::PathBuf>> {
     unsafe {
         use windows::Win32::UI::Shell::*;
         let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_ALL)?;
-        let mut options=FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST;
+        // 选 .lnk 时要拿快捷方式本身，不能让对话框把它解析成目标程序。
+        let mut options=FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_NODEREFERENCELINKS;
         if multiple{options|=FOS_ALLOWMULTISELECT;}
         dialog.SetOptions(options)?;
         dialog.SetTitle(&HSTRING::from(title))?;
@@ -832,6 +941,94 @@ mod tests {
     }
 }
 
+/// 把正在播放网页媒体的浏览器窗口带到前台。
+/// Chrome / Edge 的窗口标题就是当前活动标签的标题，先用媒体标题前几个字匹配；
+/// 匹配不到就激活 Z 序最前的浏览器窗口（EnumWindows 按 Z 序返回）。
+/// 只能定位到窗口，没法切换窗口里的非活动标签（扩展路线才做得到）。
+/// 把正在播放网页媒体的浏览器窗口带到前台。
+/// Chrome/Edge 的窗口标题就是当前活动标签标题，用媒体标题前 8 个字匹配窗口；
+/// 匹配不到就取 Z 序最前的浏览器窗口。只能定位窗口，切不了窗口内的非活动标签。
+pub(crate) fn focus_browser_tab(title:&str)->bool{
+    use windows::Win32::Foundation::{BOOL,LPARAM};
+    struct Found { hwnd:Option<isize>, matched:bool, needle:String, candidates:usize, detail:String }
+    unsafe extern "system" fn visit(hwnd:HWND,param:LPARAM)->BOOL{
+        if !IsWindowVisible(hwnd).as_bool(){return BOOL(1);}
+        let mut class=[0u16;64];let n=GetClassNameW(hwnd,&mut class);
+        if n<=0 || String::from_utf16_lossy(&class[..n as usize])!="Chrome_WidgetWin_1" {return BOOL(1);}
+        // 虚拟桌面 / 隐藏窗口不选。
+        let mut cloaked=0u32;
+        let _=windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(hwnd,
+            windows::Win32::Graphics::Dwm::DWMWA_CLOAKED,(&mut cloaked as *mut u32).cast(),4);
+        if cloaked!=0{return BOOL(1);}
+        let mut pid=0u32;GetWindowThreadProcessId(hwnd,Some(&mut pid));
+        let Ok(process)=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,false,pid)else{return BOOL(1)};
+        let mut path=[0u16;1024];let mut length=path.len() as u32;
+        let ok=QueryFullProcessImageNameW(process,PROCESS_NAME_WIN32,PWSTR(path.as_mut_ptr()),&mut length).is_ok();
+        let _=CloseHandle(process);
+        if !ok{return BOOL(1);}
+        let exe=std::path::Path::new(&String::from_utf16_lossy(&path[..length as usize]))
+            .file_name().and_then(|s|s.to_str()).unwrap_or("").to_string();
+        // Chrome_WidgetWin_1 是 Electron/CEF 通用类名：WorkBuddy、VS Code、QQ 都是。
+        // 不按进程名过滤就会激活当前前台的 Electron 应用，看起来像「点了没反应」。
+        if !is_browser_process(&exe){return BOOL(1);}
+        let mut text=[0u16;1024];let len=GetWindowTextW(hwnd,&mut text);
+        if len<=0{return BOOL(1);}
+        let window_title=String::from_utf16_lossy(&text[..len as usize]);
+        let state=&mut *(param.0 as *mut Found);
+        state.candidates+=1;
+        let hit=!state.needle.is_empty() && window_title.contains(state.needle.as_str());
+        if state.hwnd.is_none() || (hit && !state.matched){
+            state.hwnd=Some(hwnd.0 as isize);state.matched=hit;
+            state.detail=format!("{exe} | {window_title}");
+        }
+        BOOL(1)
+    }
+    let mut found=Found{hwnd:None,matched:false,needle:title.chars().take(8).collect(),candidates:0,detail:String::new()};
+    unsafe{let _=EnumWindows(Some(visit),LPARAM(&mut found as *mut _ as isize));}
+    let Some(handle)=found.hwnd else{
+        focus_browser_log(&format!("未找到浏览器窗口 | needle={:?} | 候选=0",found.needle));
+        return false;
+    };
+    let hwnd=HWND(handle as *mut _);
+    let ok=unsafe{
+        if IsIconic(hwnd).as_bool(){let _=ShowWindow(hwnd,SW_RESTORE);}
+        if GetForegroundWindow().0==hwnd.0 {true} else {
+            // 岛仔主窗口是 WS_EX_NOACTIVATE，自己永远不是前台进程；
+            // 把输入队列附到前台线程再抢前台，绕过 Windows 的前台锁。
+            let fg=GetForegroundWindow();
+            let fg_thread=GetWindowThreadProcessId(fg,None);
+            let our=GetCurrentThreadId();
+            let attached=fg_thread!=0 && fg_thread!=our && AttachThreadInput(our,fg_thread,true).as_bool();
+            let _=BringWindowToTop(hwnd);
+            let _=SetActiveWindow(hwnd);
+            let mut done=SetForegroundWindow(hwnd).as_bool() && GetForegroundWindow().0==hwnd.0;
+            if attached{let _=AttachThreadInput(our,fg_thread,false);}
+            if !done {
+                // 少数情况前台锁仍不认，模拟一次 ALT 松开再试。
+                keybd_event(0x12,0,KEYBD_EVENT_FLAGS(0),0);
+                keybd_event(0x12,0,KEYEVENTF_KEYUP,0);
+                let _=SetForegroundWindow(hwnd);
+                done=GetForegroundWindow().0==hwnd.0;
+            }
+            done
+        }
+    };
+    focus_browser_log(&format!("needle={:?} | 候选={} | 命中标题={} | 选中={} | 前台={}",
+        found.needle,found.candidates,found.matched,found.detail,ok));
+    ok
+}
+
+fn focus_browser_log(message:&str){
+    use std::io::Write as _;
+    let path=crate::model::config_dir().join("diagnostics").join("focus-browser.log");
+    if let Some(dir)=path.parent(){let _=std::fs::create_dir_all(dir);}
+    if std::fs::metadata(&path).is_ok_and(|meta|meta.len()>256*1024){let _=std::fs::write(&path,b"");}
+    if let Ok(mut file)=std::fs::OpenOptions::new().create(true).append(true).open(&path){
+        let stamp=chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        let _=writeln!(file,"{stamp} | {message}");
+    }
+}
+
 fn avoidance_matches(path:&str,settings:&crate::model::Settings)->bool {
     settings.browser_minimal && (crate::avoidance::contains_app(&settings.avoid_apps,path)
         || settings.avoid_browsers && std::path::Path::new(path).file_name().and_then(|name|name.to_str()).is_some_and(is_browser_process))
@@ -913,5 +1110,113 @@ mod avoidance_tests {
         }
         let notepad=std::path::Path::new(r"C:\Windows\System32\notepad.exe");
         if notepad.exists(){assert!(executable_description(notepad.to_str().unwrap()).is_some());}
+    }
+}
+
+// —— 自定义构建补回：手机连接通道（Phone Link）——
+const PHONE_CHANNELS: &[(&str,&str)] = &[
+    ("YourPhoneMessages_","短信"),
+    ("YourPhoneCalling","通话"),
+    ("YourPhoneDeviceStatus","手机状态"),
+    ("com.apple.mobilephone","电话"),
+    ("com.tencent.xin","微信"),
+    ("com.tencent.mqq","QQ"),
+    ("com.alipay.iphoneclient","支付宝"),
+    ("com.google.Gmail","Gmail"),
+];
+/// 手机连接 Toast 的来源判定。
+///
+/// WinRT 只报主 AUMID（`!App`），拿不到通道信息，所以只能看正文：
+/// 正文格式是「来源 · 内容…」，但短信用**手机号**当来源（`+8610… · 【xx】验证码…`），
+/// 电话是「号码 · 传入呼叫 / 未接来电」，普通 App 才是「微信 · 张三 · 内容」。
+///
+/// 判定顺序：名单命中 → 来电标记 → 短信特征 → 用首段当标签兜底。
+/// 名单放在 `%APPDATA%\Daozai\phone-apps.json`，加新 App 不用改代码重编译。
+/// 返回 (标签, 是否允许上岛)；None = 无法识别，由调用方按「连接」放行。
+pub(crate) fn phone_app(body:&str,apps:&crate::model::PhoneApps)->Option<(String,bool)> {
+    let head=body.split('·').next().unwrap_or("").trim();
+    if head.is_empty() {return None;}
+    // 1. 名单优先：微信 / QQ / 支付宝 / Gmail 等。
+    if let Some(hit)=apps.lookup(head){return Some(hit);}
+    // 2. 来电：号码当来源，正文带这两个词。
+    if body.contains("传入呼叫")||body.contains("未接来电"){return Some(("电话".to_string(),true));}
+    // 3. 短信：来源是手机号，或正文有【签名】/验证码字样。
+    let digits=head.chars().all(|c|c.is_ascii_digit()||matches!(c,'+'|'-'|' '|'('|')'));
+    if digits||body.contains("验证码")||body.contains('【')||body.contains("短信"){
+        return Some(("短信".to_string(),true));
+    }
+    // 4. 兜底：短名字直接当标签（例如 WorkBuddy），过长才交给调用方。
+    if head.chars().count()<=12 {return Some((head.to_string(),true));}
+    None
+}
+
+pub(crate) fn phone_channel(id:&str)->bool {
+    // 只要是手机连接（Phone Link）发出来的就归手机通道：
+    // WinRT 有时给主 AUMID（`!App`），有时给子通道（`YourPhoneMessages_…` /
+    // `YourPhoneNotifications_<uuid>`），开机后通道注册晚一步还会先走汇总通道。
+    // 白名单只用来起标签，是否上岛/静音交给 phone-apps.json 按正文判断。
+    id.starts_with("Microsoft.YourPhone_")
+}
+pub(crate) fn phone_label(id:&str)->&'static str {
+    if id.ends_with("!App"){return "连接";}
+    PHONE_CHANNELS.iter().find(|(key,_)|id.contains(*key)).map(|(_,label)|*label).unwrap_or("手机")
+}
+
+#[cfg(test)]
+mod phone_channel_tests {
+    use super::{phone_app,phone_channel,phone_label};
+    #[test]
+    fn 只放行手机连接白名单通道(){
+        // 现在只要是手机连接的 AUMID 都算手机通道（白名单只管标签）；
+        // 真正决定「上不上岛 / 静不静音」的是正文 + phone-apps.json。
+        assert!(phone_channel("Microsoft.YourPhone_8wekyb3d8bbwe!YourPhoneNotifications_com.tencent.xin"));
+        assert!(phone_channel("Microsoft.YourPhone_8wekyb3d8bbwe!YourPhoneMessages_9d62fe0c"));
+        assert!(phone_channel("Microsoft.YourPhone_8wekyb3d8bbwe!App"));
+        // 开机后通道还没注册时，Win11 会先走汇总通道，这个也必须算手机通知。
+        assert!(phone_channel("Microsoft.YourPhone_8wekyb3d8bbwe!YourPhoneNotifications_9d62fe0c-7488-42c8-be15-0fbe4a087b7f"));
+        assert_eq!(phone_label("Microsoft.YourPhone_x!App"),"连接");
+        assert!(phone_channel("Microsoft.YourPhone_8wekyb3d8bbwe!YourPhoneNotifications_com.valvesoftware.Steam"));
+        assert!(!phone_channel("QQ"));
+        assert!(!phone_channel("mail.test"));
+        assert_eq!(phone_label("Microsoft.YourPhone_x!YourPhoneNotifications_com.tencent.xin"),"微信");
+        assert_eq!(phone_label("Microsoft.YourPhone_x!YourPhoneNotifications_com.google.Gmail"),"Gmail");
+    }
+    #[test]
+    fn 从正文首段识别手机应用与黑名单(){
+        let apps=crate::model::PhoneApps::builtin();
+        assert_eq!(crate::system::phone_app("QQ · 小号 · 这是一条测试正文内容",&apps),Some(("QQ".to_string(),true)));
+        assert_eq!(crate::system::phone_app("微信 · 某人 · 晚上好",&apps),Some(("微信".to_string(),true)));
+        assert_eq!(crate::system::phone_app("来电 · 138xxxx",&apps),Some(("电话".to_string(),true)));
+        assert_eq!(crate::system::phone_app("Steam · 夏季特惠",&apps),Some(("连接".to_string(),false)));
+        assert_eq!(crate::system::phone_app("",&apps),None);
+        assert_eq!(crate::system::phone_app("一条很长的普通消息内容里没有应用名",&apps),None);
+        // 名单是外部配置：加新 App 只需往 JSON 里加一条，不改代码。
+        let mut custom=crate::model::PhoneApps::builtin();
+        custom.items.push(("小红书".to_string(),"小红书".to_string(),true));
+        assert_eq!(crate::system::phone_app("小红书 · 有人回复了你",&custom),Some(("小红书".to_string(),true)));
+    }
+    #[test]
+    fn 短信与来电按正文特征识别(){
+        let apps=crate::model::PhoneApps::builtin();
+        // 短信用手机号当来源：认不出号码也要归到「短信」，不能退化成「连接」。
+        assert_eq!(phone_app("+86106826974003139 · 【清枫北京科技】您的验证码：4342，如非本人操作",&apps),Some(("短信".to_string(),true)));
+        assert_eq!(phone_app("10691234 · 您的验证码 8899",&apps),Some(("短信".to_string(),true)));
+        // 响铃与未接都先归到「电话」，再由正文区分「来电中 / 未接来电」。
+        assert_eq!(phone_app("130 8646 4686 · 传入呼叫",&apps),Some(("电话".to_string(),true)));
+        assert_eq!(phone_app("电话 · 130 8646 4686 · 未接来电",&apps),Some(("电话".to_string(),true)));
+        // 名单外的短名字直接用名字当标签。
+        assert_eq!(phone_app("WorkBuddy · 任务已完成",&apps),Some(("WorkBuddy".to_string(),true)));
+    }
+
+    #[test]
+    fn only_real_browsers_pass_the_chromium_window_class_filter(){
+        // Chrome_WidgetWin_1 是 Electron/CEF 通用类名：WorkBuddy、VS Code、QQ 都用它。
+        // 只按类名挑窗口会激活前台的 Electron 应用，看起来像「点了没反应」。
+        assert!(super::is_browser_process("chrome.exe"));
+        assert!(super::is_browser_process("msedge.exe"));
+        assert!(!super::is_browser_process("WorkBuddy.exe"));
+        assert!(!super::is_browser_process("Code.exe"));
+        assert!(!super::is_browser_process("QQ.exe"));
+        assert!(!super::is_browser_process(""));
     }
 }

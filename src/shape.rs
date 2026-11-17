@@ -31,6 +31,20 @@ impl EdgeMap {
     fn code(self) -> f32 { match self.dock { Dock::Top => 0.0, Dock::Left => 1.0, Dock::Right => 2.0 } }
 }
 
+/// 阴影层相对主体的 (等距外扩, 向下偏移)。
+///
+/// 圆角增量必须**等于**横向扩展量 `d`，否则每层阴影的圆弧与主体圆弧不同心、会在角部
+/// 互相交叉，看起来像「直线转半圆的地方多了一圈突起」。等距外扩后再整体下移 `dy`
+/// 模拟顶部光源，四角圆心只随 dy 平移，不会再横向漂移。
+///
+/// `dy` 必须保持 0：顶部净外扩是 `d - dy`、底部是 `d + dy`。早期用 `0.35g` 时两者
+/// 是 0.25g : 0.95g，顶部只剩一条硬边、底部有四五层渐淡的环，于是「上面两个角
+/// 不如下面两个角平滑」。岛本来就贴着屏幕顶边，向下的落影方向感收益极小，
+/// 完全对称的等距外扩才能保证四角过渡一模一样。
+pub(crate) fn shadow_expansion(grow: f32) -> (f32, f32) {
+    (grow * 0.6, 0.0)
+}
+
 /// 贴着 `dock` 边缘的轮廓（屏幕坐标）。
 pub fn outline_docked(rect: Rect, dock: Dock, flare: f32, flare_h: f32, radius: f32) -> Vec<Pos2> {
     let (map, frame) = EdgeMap::of(rect, dock);
@@ -73,7 +87,8 @@ pub fn sections(rect: Rect, flare: f32, flare_h: f32, radius: f32) -> Vec<(f32, 
     if y1 - r > y0 + fh {
         rows.push((y1 - r, x0, x1));
     }
-    const N_CORNER: usize = 20;
+    // 32 段：直线转圆弧的过渡更细腻，端点切线几乎与直边重合。
+    const N_CORNER: usize = 32;
     for i in 1..=N_CORNER {
         let a = i as f32 / N_CORNER as f32 * std::f32::consts::FRAC_PI_2;
         rows.push((y1 - r + r * a.sin(), x0 + r - r * a.cos(), x1 - r + r * a.cos()));
@@ -212,12 +227,13 @@ fn shadow_mapped(painter: &egui::Painter, rect: Rect, map: EdgeMap, flare: f32, 
         return;
     }
     for (grow, a) in [(10.0f32, 0.035f32), (6.5, 0.05), (3.5, 0.07), (1.5, 0.09)] {
+        let (d, dy) = shadow_expansion(grow);
         let r = Rect::from_min_max(
-            Pos2::new(rect.left() - grow * 0.6, rect.top()),
-            Pos2::new(rect.right() + grow * 0.6, rect.bottom() + grow),
+            Pos2::new(rect.left() - d, rect.top() - (d - dy)),
+            Pos2::new(rect.right() + d, rect.bottom() + d + dy),
         );
         let c = Color32::from_black_alpha((255.0 * a * strength) as u8);
-        fill_mapped(painter, r, map, flare, flare_h, radius + grow * 0.8, c, c, r.height(), grow * 0.9);
+        fill_mapped(painter, r, map, flare, flare_h, radius + d, c, c, r.height(), grow * 0.9);
     }
 }
 
@@ -407,3 +423,123 @@ pub(crate) fn shade_mesh(
     mesh
 }
 
+#[cfg(test)]
+mod corner_tests {
+    use super::*;
+
+    #[test]
+    fn 阴影层四角圆弧与主体同心等距() {
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, 46.0));
+        let radius = 16.0;
+        let body_rt = Pos2::new(rect.right() - radius, rect.top() + radius);
+        let body_lb = Pos2::new(rect.left() + radius, rect.bottom() - radius);
+        for grow in [10.0f32, 6.5, 3.5, 1.5] {
+            let (d, dy) = shadow_expansion(grow);
+            let r = Rect::from_min_max(rect.min - Vec2::new(d, d - dy), rect.max + Vec2::new(d, d + dy));
+            let rr = radius + d;
+            let shadow_rt = Pos2::new(r.right() - rr, r.top() + rr);
+            let shadow_lb = Pos2::new(r.left() + rr, r.bottom() - rr);
+            // 等距外扩不改圆心，整体下移只让圆心跟着下移 dy；圆弧不横向漂移就不会与主体交叉。
+            assert!((rr - radius - d).abs() < 1e-4, "圆角增量必须等于横向扩展量");
+            // 顶部净外扩 / 底部净外扩：太不对称就会「上两角硬、下两角柔」。
+            let top = d - dy;
+            let bottom = d + dy;
+            assert!(top > 0.0, "顶部阴影不能缩进主体");
+            assert!((top - bottom).abs() < 1e-6, "上下阴影必须严格对称，否则上两角比下两角生硬：{top}/{bottom}");
+            assert!((shadow_rt.x - body_rt.x).abs() < 1e-4, "右上角圆弧不能横向漂移");
+            assert!((shadow_rt.y - body_rt.y - dy).abs() < 1e-4);
+            assert!((shadow_lb.x - body_lb.x).abs() < 1e-4, "左下角圆弧不能横向漂移");
+            assert!((shadow_lb.y - body_lb.y - dy).abs() < 1e-4);
+
+            // 旧参数（圆角 +0.8g、横向 +0.6g、上下不对称）确实让角部圆弧错位，
+            // 这正是「直线转半圆处有突起」的来源。
+            let old_r = Rect::from_min_max(
+                rect.min - Vec2::new(grow * 0.6, grow * 0.3),
+                rect.max + Vec2::new(grow * 0.6, grow),
+            );
+            let old_c = Pos2::new(old_r.right() - (radius + grow * 0.8), old_r.top() + radius + grow * 0.8);
+            assert!((old_c.x - body_rt.x).abs() > 0.1 * grow, "旧实现圆心漂移量应当可测");
+        }
+    }
+
+    #[test]
+    fn 圆弧两端与直边相切() {
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, 140.0));
+        let r = 33.0;
+        let rows = sections(rect, 0.0, 16.0, r);
+        let corner: Vec<_> = rows.iter().copied().filter(|t| t.0 >= rect.bottom() - r - 1e-4).collect();
+        assert!(corner.len() > 20, "1/4 圆弧要有足够采样");
+
+        // 竖直侧边 -> 圆弧起点：切线必须接近竖直，否则直线接半圆时会有折角。
+        let (ya, la, _) = corner[0];
+        let (yb, lb, _) = corner[1];
+        assert!((lb - la).abs() / (yb - ya) < 0.03, "圆弧起点切线不够竖直");
+
+        // 圆弧终点 -> 水平底边：切线必须接近水平。
+        let (y1, l1, _) = corner[corner.len() - 2];
+        let (y2, l2, _) = corner[corner.len() - 1];
+        assert!((y2 - y1) / (l2 - l1) < 0.03, "圆弧终点切线不够水平");
+
+        // 羽化法线不能在轮廓拐点炸开（否则角部会拉出尖刺）。
+        let pts = outline(rect, 0.0, 16.0, r);
+        for i in 0..pts.len() {
+            assert!(edge_normal(&pts, i).length() < 2.0, "角部羽化法线异常：{i}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod fluid_path_bench {
+    use super::*;
+    use crate::fluid::Fluid;
+    use std::time::Instant;
+
+    /// 复刻 `paint_body` 里悬浮云胶囊的行表镜像。
+    fn pill_rows(rect: Rect, radius: f32) -> Vec<(f32, f32, f32)> {
+        let mut rows = sections(rect, 0.0, 16.0, radius);
+        let mid = rect.center().y;
+        rows.retain(|r| r.0 > mid && r.0 >= rect.bottom() - radius);
+        let top = rows.iter().rev().map(|&(y, l, r)| (2.0 * mid - y, l, r)).collect::<Vec<_>>();
+        rows.splice(0..0, top);
+        rows
+    }
+
+    #[test]
+    fn 纹理路径比梯形网格省得多() {
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(419.0, 215.0));
+        let rows = pill_rows(rect, 26.0);
+        let fluid = Fluid::default();
+        let (w, h) = (rect.width(), rect.height());
+        const N: usize = 40;
+
+        let t = Instant::now();
+        let mut vertices = 0usize;
+        let mut tris = 0usize;
+        for _ in 0..N {
+            let mesh = shade_mesh(rect, rows.clone(), 1.0, &|x, y| fluid.compose(x, y, w, h, 1.0));
+            vertices = mesh.vertices.len();
+            tris = mesh.indices.len() / 3;
+            std::hint::black_box(mesh);
+        }
+        let old_ms = t.elapsed().as_secs_f64() * 1000.0 / N as f64;
+
+        let t = Instant::now();
+        for _ in 0..N {
+            let mut image = egui::ColorImage::new([160, 80], Color32::TRANSPARENT);
+            for row in 0..80usize {
+                let py = h * (row as f32 + 0.5) / 80.0;
+                for col in 0..160usize {
+                    image.pixels[row * 160 + col] =
+                        fluid.compose(w * (col as f32 + 0.5) / 160.0, py, w, h, 1.0);
+                }
+            }
+            std::hint::black_box(image);
+        }
+        let new_ms = t.elapsed().as_secs_f64() * 1000.0 / N as f64;
+
+        println!("旧 shade_mesh: {vertices} 顶点 / {tris} 三角形 / {old_ms:.3} ms 每帧");
+        println!("新颜色纹理: {} 像素 / {new_ms:.3} ms 每帧", 160 * 80);
+        println!("顶点数据量: 旧 {:.0} KB -> 新 1 个 RectShape", vertices as f64 * 24.0 / 1024.0);
+        assert!(vertices > 1000, "旧路径确实每帧生成大量顶点");
+    }
+}

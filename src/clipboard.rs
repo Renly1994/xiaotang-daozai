@@ -22,13 +22,24 @@ pub struct Clip {
     /// 本地时间 `HH:MM`。
     pub at: String,
     pub pinned: bool,
+    /// 最后复制的 Unix 秒，用于清理 24 小时前的未固定内容。
+    /// 固定条目永远保留，不因这个字段被清理。
+    pub saved_at: i64,
 }
+
+/// 未固定剪贴板只保留最近 24 小时；固定条目不受影响。
+/// 旧的 JSON 没有时间戳时按「今天刚读到」迁移，不会在升级时突然清空历史。
+const RETENTION_SECS: i64 = 24 * 60 * 60;
+
+fn now_secs() -> i64 { chrono::Local::now().timestamp() }
 
 #[derive(Debug, Default)]
 pub struct History {
     pub items: Vec<Clip>,
     /// 每次变化 +1，界面据此判断是否需要重绘。
     pub version: u64,
+    /// 有未落盘的改动；由 `flush()` 在锁外统一写盘。
+    dirty: bool,
     path: Option<std::path::PathBuf>,
 }
 
@@ -41,7 +52,7 @@ impl History {
             Some(i) => self.items.remove(i).pinned,
             None => false,
         };
-        self.items.insert(0, Clip { text: text.to_string(), at: at.to_string(), pinned });
+        self.items.insert(0, Clip { text: text.to_string(), at: at.to_string(), pinned, saved_at: now_secs() });
         let mut recent = 0;
         self.items.retain(|c| c.pinned || { recent += 1; recent <= MAX_RECENT });
         self.changed();
@@ -71,7 +82,7 @@ impl History {
     }
 
     fn to_json(&self) -> Vec<u8> {
-        let rows: Vec<_> = self.items.iter().map(|c| serde_json::json!({"pinned": c.pinned,"text": c.text, "at": c.at})).collect();
+        let rows: Vec<_> = self.items.iter().map(|c| serde_json::json!({"pinned": c.pinned,"text": c.text, "at": c.at, "saved_at": c.saved_at})).collect();
         serde_json::to_vec(&rows).unwrap_or_default()
     }
 
@@ -81,6 +92,7 @@ impl History {
             text: row.get("text")?.as_str()?.to_string(),
             at: row.get("at").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             pinned: row.get("pinned").and_then(|v| v.as_bool()).unwrap_or(true),
+            saved_at: row.get("saved_at").and_then(|v| v.as_i64()).unwrap_or_else(now_secs),
         })).filter(|c| !c.text.is_empty()).take(MAX_PINNED + MAX_RECENT).collect();
         Self { items, ..Self::default() }
     }
@@ -93,16 +105,26 @@ impl History {
 
     fn load_from(path: std::path::PathBuf) -> Self {
         let mut history = std::fs::read(&path).map(|raw| Self::from_json(&raw)).unwrap_or_default();
+        let oldest = now_secs() - RETENTION_SECS;
+        // 敏感内容只在本机保留一天，重启时顺带清理；固定的片段模板不在此列。
+        history.items.retain(|clip| clip.pinned || clip.saved_at >= oldest);
         history.path = Some(path);
         history
     }
 
+    /// 只标记「有改动」。写盘交给 `flush()` 在锁外做——
+    /// 之前是在 Mutex 里直接 atomic_write，界面每帧取快照时会被磁盘 IO 卡住。
     fn changed(&mut self) {
         self.version += 1;
-        if let Some(path) = &self.path {
-            if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
-            let _ = crate::model::atomic_write(path, &self.to_json());
-        }
+        self.dirty = true;
+    }
+
+    /// 取出待写盘的内容（同时清掉 dirty）。没有改动返回 None。
+    fn take_dirty(&mut self) -> Option<(std::path::PathBuf, Vec<u8>)> {
+        if !self.dirty { return None; }
+        let path = self.path.clone()?;
+        self.dirty = false;
+        Some((path, self.to_json()))
     }
 }
 
@@ -122,13 +144,32 @@ impl Shared {
     pub fn lock(&self) -> std::sync::MutexGuard<'_, History> {
         self.history.lock().unwrap_or_else(|e| e.into_inner())
     }
+    /// 有改动才写盘，且整段在锁外完成；一次复制只序列化一次。
+    pub fn flush(&self) {
+        let payload = { let mut history = self.lock(); history.take_dirty() };
+        let Some((path, body)) = payload else { return; };
+        if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+        let _ = crate::model::atomic_write(&path, &body);
+    }
+
+    /// 只读版本号（加锁极短），界面先用它判断是否需要重建快照。
+    pub fn version(&self) -> u64 { self.lock().version }
+
+    /// 当前列表 + 版本号。界面用版本号判断要不要重建快照，避免每帧克隆整份历史。
+    pub fn snapshot(&self) -> (u64, std::sync::Arc<Vec<Clip>>) {
+        let history = self.lock();
+        (history.version, std::sync::Arc::new(history.items.clone()))
+    }
+
     fn record_update(&self, text: &str, from_history: bool) -> bool {
         !from_history && self.record(text)
     }
     pub fn record(&self, text: &str) -> bool {
         if !self.is_enabled() { return false; }
         let at = chrono::Local::now().format("%H:%M").to_string();
-        self.lock().push(text, &at)
+        let pushed = self.lock().push(text, &at);
+        self.flush();
+        pushed
     }
 }
 
@@ -304,6 +345,12 @@ mod win {
 mod tests {
     use super::*;
 
+    /// 与 Shared::flush 同逻辑，但不构造整份 Shared（沿用现有历史对象即可）。
+    fn flush_history(history: &mut History) {
+        let Some((path, body)) = history.take_dirty() else { return; };
+        crate::model::atomic_write(&path, &body).unwrap();
+    }
+
     #[cfg(windows)]
     #[test]
     fn dropping_the_watcher_ends_the_listener_thread(){
@@ -358,12 +405,40 @@ mod tests {
         history.push("保留", "09:00");
         history.push("删除", "09:01");
         history.remove(0);
+        flush_history(&mut history);
         let mut reopened = History::load_from(path.clone());
         assert_eq!(reopened.items, history.items);
         reopened.clear_recent();
+        flush_history(&mut reopened);
         let final_history = History::load_from(path.clone());
         assert_eq!(final_history.items.len(), 1);
         assert_eq!(final_history.items[0].text, "old");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn snapshot_version_changes_only_when_content_changes() {
+        let shared = Shared { history: Default::default(), enabled: Arc::new(AtomicBool::new(true)) };
+        let first = shared.snapshot();
+        assert_eq!(shared.snapshot().0, first.0, "重复读取不该让界面重建快照");
+        assert!(shared.record("new"));
+        let after = shared.snapshot();
+        assert!(after.0 > first.0, "内容变化才推进快照版本");
+        assert!(!shared.record("new"), "重复内容不产生新记录");
+        assert_eq!(shared.snapshot().0, after.0);
+    }
+
+    #[test]
+    fn old_unpinned_clips_expire_but_pins_survive() {
+        let path = std::env::temp_dir().join(format!("daozai-clip-retention-{}.json", std::process::id()));
+        let old = now_secs() - RETENTION_SECS - 60;
+        std::fs::write(&path, serde_json::to_vec(&serde_json::json!([
+            {"text":"过期秘密","at":"08:00","pinned":false,"saved_at":old},
+            {"text":"长期模板","at":"08:01","pinned":true,"saved_at":old}
+        ])).unwrap()).unwrap();
+        let history = History::load_from(path.clone());
+        assert_eq!(history.items.len(), 1);
+        assert_eq!(history.items[0].text, "长期模板");
         std::fs::remove_file(path).unwrap();
     }
 

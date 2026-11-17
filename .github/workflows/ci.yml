@@ -40,6 +40,4 @@ jobs:
           $compiler = ./scripts/get-nsis.ps1 -Directory $env:RUNNER_TEMP
           ./tests/native_installer.ps1 -NsisCompiler $compiler
           ./tests/update_installer.ps1
-          powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./tests/diagnostics_archive.ps1
-          if ($LASTEXITCODE -ne 0) { throw '诊断归档测试失败' }
           exit 0

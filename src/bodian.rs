@@ -213,7 +213,7 @@ pub(super) struct Reader {
 }
 impl Reader {
     pub fn poll(&mut self)->Option<NowPlaying>{
-        if self.target.is_none() && discovery_due(self.discovered,window_hint) {
+        if self.target.is_none() && self.discovered.is_none_or(|at|at.elapsed()>=Duration::from_secs(3)) {
             self.discovered=Some(Instant::now());self.target=Target::discover();
         }
         let target=self.target?;
@@ -353,36 +353,4 @@ mod tests {
         std::thread::sleep(Duration::from_millis(400));assert!(reader.poll().unwrap().playing);
         assert_eq!(unsafe{GetForegroundWindow()},foreground);
     }
-}
-
-/// 进程快照一次要十几毫秒：有波点窗口线索时 3 秒查一次，没有线索时（多数用户没装波点）30 秒才兜底查一次。
-const DISCOVER_HINTED:Duration=Duration::from_secs(3);
-const DISCOVER_FALLBACK:Duration=Duration::from_secs(30);
-fn discovery_due(last:Option<Instant>,hint:impl FnOnce()->bool)->bool{
-    let since=last.map(|at|at.elapsed());
-    since.is_none_or(|since|since>=DISCOVER_FALLBACK) || since.is_some_and(|since|since>=DISCOVER_HINTED) && hint()
-}
-
-/// 便宜的线索：波点（Flutter 程序）的主窗口属于 bodian_pc.exe。窗口类名若被改，仍有 30 秒一次的兜底查找。
-fn window_hint()->bool{
-    use windows::{core::{w,PCWSTR},Win32::{Foundation::HWND,UI::WindowsAndMessaging::{FindWindowExW,GetWindowThreadProcessId}}};
-    let mut after=HWND::default();
-    for _ in 0..16 {
-        let Ok(window)=(unsafe{FindWindowExW(HWND::default(),after,w!("FLUTTER_RUNNER_WIN32_WINDOW"),PCWSTR::null())})else{return false;};
-        let mut pid=0;unsafe{GetWindowThreadProcessId(window,Some(&mut pid));}
-        if super::player_process::image_is(pid,"bodian_pc.exe"){return true;}
-        after=window;
-    }
-    false
-}
-
-#[test]
-fn discovery_without_a_window_hint_falls_back_to_a_slow_check(){
-    let ago=|secs|Some(Instant::now()-Duration::from_secs(secs));
-    assert!(discovery_due(None,||false),"启动后第一次总要查");
-    assert!(!discovery_due(ago(1),||true),"有线索也至少隔 3 秒");
-    assert!(discovery_due(ago(4),||true));
-    assert!(!discovery_due(ago(4),||false),"没有线索时不做 3 秒一次的进程快照");
-    assert!(discovery_due(ago(31),||false),"窗口线索失效也能在 30 秒内找到");
-    let mut asked=false;assert!(!discovery_due(ago(1),||{asked=true;true}));assert!(!asked,"未到 3 秒不查窗口");
 }

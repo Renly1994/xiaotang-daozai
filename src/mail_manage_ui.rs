@@ -10,7 +10,16 @@ fn identity(account:&Account)->String{
 #[derive(Default)]pub(crate) struct State{
     pub unread_only:bool,pub trash_open:bool,pub trash:Vec<Item>,
     pub data:HashMap<(String,Folder),Snapshot>,pub identities:HashMap<String,Account>,pub pending:HashSet<String>,
-    pub next_refresh:f64,pub message:String,pub errors:Vec<String>,
+    pub next_refresh:f64,
+    /// 本批请求开始等待的时间点，用于请求丢失时超时复位。
+    pub pending_at:f64,
+    /// 同步进行中点了「全部已读」：等空闲后自动补执行，避免点了没反应。
+    pub read_all_queued:bool,
+    /// 邮件列表的账号筛选，None 表示全部账号。
+    pub account_filter:Option<String>,
+    /// 账号筛选下拉是否展开。
+    pub account_menu:bool,
+    pub message:String,pub errors:Vec<String>,
     pub auto_read:Option<(String,u32)>,pub reader_trash:bool,
     reader_identity:Option<(Account,u32)>,
     local:HashMap<String,LocalFlags>,local_loaded:bool,
@@ -23,6 +32,20 @@ impl State{
     pub fn ready(&self,account:&str,folder:Folder)->bool{self.pending.is_empty()&&self.data.contains_key(&(account.to_ascii_lowercase(),folder))}
 }
 impl App{
+    /// 当前账号筛选是否包含这封邮件。
+    pub(crate) fn mail_account_match(&self,item:&Item)->bool{
+        self.mail.manage.account_filter.as_ref().is_none_or(|f|item.account.eq_ignore_ascii_case(f))
+    }
+    /// 账号筛选按钮上的短标签（只取 @ 前面那段）。
+    pub(crate) fn mail_account_label(email:&str)->String{
+        email.split('@').next().unwrap_or(email).to_string()
+    }
+    /// 「全部已读」所需的数据是否齐备（与是否正在同步无关）。
+    pub(crate) fn mail_read_all_ready(&self)->bool{
+        self.mail.accounts.iter().any(|a|a.enabled
+            && self.mail.manage.data.contains_key(&(crate::mail::key(a),Folder::Inbox))
+            && self.mail.manage.identities.get(&crate::mail::key(a))==Some(a))
+    }
     fn mail_physical_folder(&self,folder:Folder)->Folder{if !self.settings.mail_sync_operations{Folder::Inbox}else{folder}}
     fn mail_local_key(&self,item:&Item)->Option<String>{
         let a=self.mail.accounts.iter().find(|a|a.email.eq_ignore_ascii_case(&item.account))?;
@@ -98,6 +121,7 @@ impl App{
             self.mail.manage.message="请等待邮件状态同步完成".into();return;
         }
         self.mail.manage.errors.clear();self.mail.manage.message=if action==Action::Load{"读取邮件状态…"}else{"同步中…"}.into();
+        self.mail.manage.pending_at=self.t;
         for account in accounts{
             let email=crate::mail::key(&account);
             let validity=self.mail.manage.data.get(&(email.clone(),folder)).filter(|_|self.mail.manage.identities.get(&email)==Some(&account)).map(|s|s.validity);
@@ -125,7 +149,19 @@ impl App{
             if !cfg!(test){self.mail_reload_local();}
             self.mail.manage.local_loaded=true;
         }
-        if !self.mail.manage.pending.is_empty(){return;}
+        if !self.mail.manage.pending.is_empty(){
+            // 超过 40 秒还没有结果，说明请求丢了，复位避免按钮永久禁用。
+            if self.t-self.mail.manage.pending_at>40.0{
+                self.mail.manage.pending.clear();
+                self.mail.manage.message="邮件同步超时，已复位".into();
+            }
+            return;
+        }
+        if self.mail.manage.read_all_queued{
+            self.mail.manage.read_all_queued=false;
+            if self.mail_read_all_ready(){self.mail_manage_request(None,Folder::Inbox,Action::ReadAll);}
+            else{self.mail.manage.message="邮件状态还没同步完，请稍后再试".into();}
+        }
         if let Some((email,uid))=self.mail.manage.auto_read.take(){
             let folder=self.mail.manage.folder();
             let item=self.mail_rows().iter().find(|m|m.uid==uid&&m.account.eq_ignore_ascii_case(&email));
@@ -214,6 +250,25 @@ impl App{
         let items=(1..=80).map(|uid|Item{html:String::new().into(),account:a.email.clone(),from:String::new(),subject:String::new(),time:String::new(),code:None,received_unix:None,summary:"".into(),links:vec![],meeting:None,uid}).collect();
         app.mail_managed(Completed{request:Request{account:a,folder:Folder::Inbox,validity:None,known:vec![],extra:(1..=60).map(|uid|(7,uid)).collect(),action:Action::Load},result:Ok(Snapshot{validity:7,entries:(1..=80).map(|uid|(uid,false)).collect(),items})});
         assert_eq!(app.mail.recent.len(),20);assert_eq!(app.mail.manage.trash.len(),60,"本机回收站不能被收件箱的显示上限截断");
+    }
+    #[test]fn account_filter_only_matches_selected_mailbox(){
+        let mut app=App::new(&eframe::egui::Context::default(),Default::default());
+        let item=|email:&str|Item{account:email.into(),from:String::new(),subject:String::new(),time:String::new(),code:None,html:String::new().into(),received_unix:None,summary:"".into(),links:vec![],meeting:None,uid:1};
+        assert!(app.mail_account_match(&item("a@qq.com")),"默认应匹配全部账号");
+        app.mail.manage.account_filter=Some("A@QQ.com".into());
+        assert!(app.mail_account_match(&item("a@qq.com")),"筛选应忽略大小写");
+        assert!(!app.mail_account_match(&item("b@qq.com")),"其他账号的邮件应被排除");
+        assert_eq!(App::mail_account_label("a@qq.com"),"a");
+    }
+    #[test]fn stuck_pending_resets_after_timeout(){
+        let ctx=eframe::egui::Context::default();let mut app=App::new(&ctx,Default::default());app.mail.accounts=vec![account()];
+        app.mail_manage_request(None,Folder::Inbox,Action::Load);
+        assert!(!app.mail.manage.pending.is_empty());
+        // 模拟请求丢失：时间推进 50 秒后必须复位，否则「全部已读」等按钮永久禁用。
+        app.t=app.mail.manage.pending_at+50.0;
+        app.mail_manage_tick();
+        assert!(app.mail.manage.pending.is_empty(),"请求丢失后 pending 必须能复位");
+        assert!(app.mail.manage.message.contains("超时"));
     }
     #[test]fn read_state_is_separate_for_each_folder_and_account(){
         let mut state=State::default();state.data.insert(("test@example.com".into(),Folder::Inbox),Snapshot{validity:1,entries:vec![(42,true)],items:vec![]});

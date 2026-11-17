@@ -1,14 +1,14 @@
 use crate::{bar_layout::*,paint::{self,Card,H},theme::{self,W}};
 use eframe::egui::{self,Color32,RichText,Rect,Pos2,Vec2};
 
-pub(crate) fn preview_layout(order:&[usize],quotas:usize)->Layout {
-    let mut layout=Layout::new(true,quotas.max(1),true,true,false,true,true);
+pub(crate) fn preview_layout(order:&[usize],quotas:usize,weather:bool)->Layout {
+    let mut layout=Layout::new(true,quotas.max(1),true,true,false,true,weather);
     layout.reorder(order);layout
 }
 
 impl crate::app::App {
     pub(crate) fn resident_order_settings(&mut self,ui:&mut egui::Ui){
-        let default=if self.settings.show_battery {DEFAULT_ORDER.to_vec()}else{vec![QUOTA,PET,CLOCK,WEATHER,BATTERY,MUSIC,FOCUS]};
+        let default=if self.settings.show_battery {DEFAULT_ORDER.to_vec()}else{vec![QUOTA,PET,CLOCK,BATTERY,MUSIC,FOCUS]};
         let mut order=if valid_order(&self.settings.resident_order){self.settings.resident_order.clone()}else{default.clone()};
         ui.horizontal(|ui|{
             ui.label(RichText::new("拖动岛上的图标").color(ui.visuals().text_color()));
@@ -19,10 +19,9 @@ impl crate::app::App {
         ui.add_space(12.0);
         let indices=self.quota_bar_indices();let count=indices.len();
         let weather_snapshot=self.weather_pill().cloned();
-        let mut layout=preview_layout(&order,count);
+        let mut layout=preview_layout(&order,count,weather_snapshot.is_some());
         for (position,extra) in self.quota_balance_layout(ui.ctx()){layout.balance_tail(position,extra);}
         if self.settings.clock_period!=0 { layout.widen_clock(40.0); }
-        if self.settings.clock_seconds { layout.widen_clock(24.0); }
         if let Some(extra)=self.weather_pill_extra(ui.ctx()){layout.widen(WEATHER,extra);}
         let (stage,_)=ui.allocate_exact_size(Vec2::new(ui.available_width(),100.0),egui::Sense::hover());
         ui.painter().rect_filled(stage,10.0,Color32::from_rgb(19,25,36));
@@ -49,15 +48,17 @@ impl crate::app::App {
         let pointer=ui.ctx().pointer_interact_pos();
         let dragged=egui::DragAndDrop::payload::<usize>(ui.ctx());
         let mut movement=None;
-        let label=|slot|match slot{CLOCK=>"时间",BATTERY=>"电量",WEATHER=>"天气",QUOTA=>"AI 额度",MUSIC=>"音乐",FOCUS=>"专注",_=>"吉祥物"};
+        let label=|slot|match slot{CLOCK=>"时间",BATTERY=>"电量",QUOTA=>"AI 额度",MUSIC=>"音乐",FOCUS=>"专注",_=>"吉祥物"};
         for (index,&slot) in order.iter().enumerate(){
             let x=cx+layout.x[slot].unwrap();
-            let width=match slot{CLOCK=>layout.widths[CLOCK],BATTERY=>20.0,WEATHER=>layout.widths[WEATHER],PET=>32.0,MUSIC=>14.0,FOCUS=>crate::focus_bar::WIDTH,_=>{
+            let width=match slot{CLOCK=>if self.settings.clock_period!=0 {84.0}else{44.0},BATTERY=>20.0,PET=>32.0,MUSIC=>14.0,FOCUS=>crate::focus_bar::WIDTH,_=>{
                 let left=layout.quota_slots().filter_map(|i|layout.x[i].map(|x|x-layout.widths[i]/2.0)).fold(f32::INFINITY,f32::min);
                 let right=layout.quota_slots().filter_map(|i|layout.x[i].map(|x|x+layout.widths[i]/2.0)).fold(f32::NEG_INFINITY,f32::max);
                 right-left
             }};
             let left=if slot==QUOTA{cx+layout.quota_slots().filter_map(|i|layout.x[i].map(|x|x-layout.widths[i]/2.0)).fold(f32::INFINITY,f32::min)}else{x-width/2.0};
+            // 天气与时钟成组，拖拽热区一并盖住，拖时钟会带着天气走。
+            let (left,width)=if slot==CLOCK&&layout.x[WEATHER].is_some(){(left,width+12.0+layout.widths[WEATHER])}else{(left,width)};
             let rect=card.rect(left-5.0,1.0,width+10.0,28.0);
             let response=ui.interact(rect,ui.id().with(("resident-icon",slot)),egui::Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::Grab);
             response.dnd_set_drag_payload(slot);
@@ -68,15 +69,17 @@ impl crate::app::App {
             let dx=if is_dragged{pointer.map(|p|((p.x-origin.x)/scale-(left+width/2.0)).clamp(-left,layout.width-left-width)).unwrap_or(0.0)}else{0.0};
             if is_dragged {ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);}
             else if response.hovered(){ui.painter().rect_filled(rect,6.0,Color32::from_white_alpha(18));}
-            let active=match slot{CLOCK=>self.settings.show_clock,BATTERY=>self.settings.show_battery&&self.resident_power.0.is_some(),WEATHER=>weather_snapshot.is_some(),PET=>self.settings.pet,QUOTA=>count>0,MUSIC=>self.media.is_music(),FOCUS=>self.pomo.running,_=>true};
+            let active=match slot{BATTERY=>self.battery_visible(),PET=>self.settings.pet,QUOTA=>count>0,MUSIC=>self.media.is_music(),FOCUS=>self.pomo.running,_=>true};
             let c=card.shifted(dx,0.0).faded(if active||is_dragged{1.0}else{0.38}).ghost();
             match slot{
-                BATTERY=>paint::battery(&c,x,15.0,self.resident_power.0,self.resident_power.1,1.0),
+                BATTERY=>{let (pc,phone)=self.battery_rings();let (pct,chg)=pc.or(phone).unwrap_or((None,false));paint::battery(&c,x,15.0,pct,chg,1.0)},
                 CLOCK=>{
                     let text=self.settings.clock_text(&chrono::Local::now().format("%H:%M:%S").to_string());
                     paint::clock(&c,x-paint::clock_width(&c,&text,theme::size::PILL_CLOCK)/2.0,21.0,&text,theme::size::PILL_CLOCK);
+                    if let Some(snapshot)=weather_snapshot.as_ref() {
+                        self.paint_pill_weather(&c,cx+layout.x[WEATHER].unwrap(),&layout,snapshot);
+                    }
                 },
-                WEATHER=>if let Some(snapshot)=weather_snapshot.as_ref(){self.paint_pill_weather(&c,x,&layout,snapshot);}else{crate::weather_ui::icon(&c,x,15.0,16.0,crate::weather::Kind::Partly);},
                 PET=>self.pet.draw(&c,x,self.t,self.skin_palette()),
                 MUSIC=>paint::playback_bars(&c,x,15.0,self.t,self.media.playing,theme::WHITE),
                 FOCUS=>crate::focus_bar::draw(&c,x,15.0,self.t,&self.pomo,self.phase_secs(self.pomo.phase),false),

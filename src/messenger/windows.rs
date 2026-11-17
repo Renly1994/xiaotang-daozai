@@ -32,26 +32,6 @@ pub(crate) fn frame_style(class:&str,style:u32,extended:u32)->bool{
 pub fn describe_foreground()->String{unsafe{let window=GetForegroundWindow();format!("{:#x} {} 进程 {}",window.0 as usize,class_name(window),window_pid(window))}}
 pub fn trace(line:impl AsRef<str>){crate::resources::append_log(&crate::model::config_dir().join("diagnostics"),"messenger-events",line.as_ref());}
 
-// 点岛上的提醒唤起客户端：各客户端把走过的步骤记在当前线程，结束时与结果合成一行写入
-// messenger-events.log。只记窗口句柄、类名、可见状态和进程号，不记窗口标题或消息内容。
-thread_local!{static WAKE_STEPS:std::cell::RefCell<Vec<String>>=const{std::cell::RefCell::new(Vec::new())};}
-pub(crate) fn wake_step(line:impl Into<String>){WAKE_STEPS.with(|steps|steps.borrow_mut().push(line.into()));}
-/// 窗口当时的状态：是否还在、类名、隐藏 / 最小化、所属进程。
-pub(crate) fn describe_window(window:HWND)->String{unsafe{
-    if window.0.is_null() || !IsWindow(window).as_bool(){return format!("{:#x} 已不存在",window.0 as usize);}
-    format!("{:#x} {}{}{} 进程 {}",window.0 as usize,class_name(window),
-        if IsWindowVisible(window).as_bool(){""}else{" 隐藏"},if IsIconic(window).as_bool(){" 最小化"}else{""},window_pid(window))
-}}
-fn wake_line(head:&str,steps:&[String],result:&Result<(),OpenError>,elapsed:Duration)->String{
-    let outcome=match result{Ok(())=>"已发出打开请求".to_string(),Err(error)=>format!("失败 {error:?}")};
-    let steps=if steps.is_empty(){"-".to_string()}else{steps.join(" → ")};
-    format!("{head} → {steps} → 结果:{outcome} 用时{}ms",elapsed.as_millis())
-}
-#[cfg(test)]
-thread_local!{static LAST_WAKE:std::cell::RefCell<String>=const{std::cell::RefCell::new(String::new())};}
-#[cfg(test)]
-pub(crate) fn take_wake_steps()->Vec<String>{WAKE_STEPS.with(|steps|std::mem::take(&mut *steps.borrow_mut()))}
-
 pub(crate) fn normalized(path: &str) -> String {
     path.trim_start_matches(r"\\?\").replace('/', "\\").to_lowercase()
 }
@@ -387,40 +367,23 @@ pub struct OpenRequest {unread:Unread,target:Option<Target>,allow_tray:bool}
 static OPEN:crate::resources::Lane=crate::resources::Lane::new("daozai-messenger-open",1);
 impl OpenRequest {
     pub fn start(self,ctx:eframe::egui::Context)->Result<mpsc::Receiver<Result<(),OpenError>>,OpenError>{
-        let lease=OPEN.acquire().ok_or(OpenError::Busy)?;
-        if self.unread.unidentified(){return Err(OpenError::Unidentified);}
-        let (tx,rx)=mpsc::channel();
+        let lease=OPEN.acquire().ok_or(OpenError::Busy)?;let (tx,rx)=mpsc::channel();
         lease.spawn(move||{let _=tx.send(self.run());ctx.request_repaint();}).ok_or(OpenError::Unavailable)?;
         Ok(rx)
     }
     fn run(self)->Result<(),OpenError>{self.run_with_paths(&client_paths(self.unread.source))}
     pub(crate) fn run_with_paths(self,paths:&[String])->Result<(),OpenError>{
-        WAKE_STEPS.with(|steps|steps.borrow_mut().clear());
-        let started=Instant::now();
-        let head=format!("唤起 {} 账号 {} · 提醒窗口 {} · 允许托盘={}",
-            self.unread.source.name(),self.unread.pid,describe_window(HWND(self.unread.window as *mut _)),self.allow_tray);
-        let result=self.attempt(paths);
-        let steps=WAKE_STEPS.with(|steps|std::mem::take(&mut *steps.borrow_mut()));
-        let line=wake_line(&head,&steps,&result,started.elapsed());
-        #[cfg(test)] LAST_WAKE.with(|last|*last.borrow_mut()=line.clone());
-        // 测试时不写，免得把模拟数据混进用户的真实诊断日志。
-        if !cfg!(test){trace(line);}
-        result
-    }
-    fn attempt(self,paths:&[String])->Result<(),OpenError>{
         use windows::Win32::{Foundation::WAIT_OBJECT_0,System::Threading::WaitForSingleObject};
         let Some(target)=self.target else{
-            wake_step("提醒未登记到账号进程");
             validate_unread_with(self.unread,client_processes)?;
             return Err(if self.unread.pid==0{OpenError::Unidentified}else{OpenError::Unavailable});
         };
-        if target.unread!=self.unread{wake_step("登记的账号与提醒不一致");return Err(OpenError::Unavailable);}
+        if target.unread!=self.unread{return Err(OpenError::Unavailable);}
         // 句柄保留到整个唤起结束，不能因提醒被关闭而提前允许进程号复用。
-        let process=check_target(target).inspect_err(|error|wake_step(format!("账号进程检查未通过 {error:?}")))?;
-        let adapter=self.unread.source.adapter().native;
-        if !(adapter.ready)(target){wake_step("客户端尚未就绪");return Err(OpenError::Unavailable);}
+        let process=check_target(target)?;let adapter=self.unread.source.adapter().native;
+        if !(adapter.ready)(target){return Err(OpenError::Unavailable);}
         let result=(adapter.open)(self.unread,paths,self.allow_tray);
-        if unsafe{WaitForSingleObject(*process,0)==WAIT_OBJECT_0}{wake_step("唤起过程中账号进程已退出");Err(OpenError::Exited)}else{result}
+        if unsafe{WaitForSingleObject(*process,0)==WAIT_OBJECT_0}{Err(OpenError::Exited)}else{result}
     }
 }
 fn validate_unread_with(unread:Unread,discover:impl FnMut(Messenger)->Option<Vec<u32>>)->Result<(),OpenError>{
@@ -546,20 +509,6 @@ mod tests {
     }
     fn qq_target(pid:u32)->Target{Target{unread:crate::app::Unread{source:crate::app::Messenger::Qq,pid,window:pid as isize},started:u64::from(pid)}}
     #[test]
-    fn qq_open_regression_unknown_click_after_an_account_exits(){
-        let (a,b)=(qq_target(100),qq_target(200));
-        let mut history=AccountHistory::new(Messenger::Qq);
-        history.observe(10,Some(vec![a,b]));
-        history.observe(20,Some(vec![a,b]));
-        assert_eq!(history.target(1,15,|_|true),None);
-        let unknown=Unread::of(Messenger::Qq);
-        let mut runtime=Runtime::default();
-        history.observe(30,Some(vec![b]));
-        assert!(runtime.exited_with(&[unknown],|_|Some(vec![b.unread.pid])).is_empty());
-        let click=runtime.request(unknown,&Settings::default()).start(Default::default());
-        assert!(matches!(click,Err(OpenError::Unidentified)),"旧提醒不能启动唤起剩余账号的后台任务");
-    }
-    #[test]
     fn qq_notifications_bind_only_to_the_stable_account_at_creation(){
         let a=qq_target(100);let mut accounts=AccountHistory::new(Messenger::Qq);
         accounts.observe(10_000_000,Some(vec![a]));accounts.observe(20_000_000,Some(vec![a]));
@@ -649,28 +598,6 @@ mod tests {
         let visible=IsWindowVisible(window).as_bool();DestroyWindow(window).unwrap();
         assert!(!visible && results.iter().all(Result::is_err),"不能显示辅助窗口或改为唤起其他 QQ");
     }}
-    #[test]
-    fn wake_attempts_record_the_target_route_and_result_without_titles(){unsafe{
-        use crate::app::{Messenger,Unread};
-        let window=CreateWindowExW(WS_EX_TOOLWINDOW,w!("STATIC"),w!("聊天对象的名字"),WS_POPUP,0,0,10,10,None,None,None,None).unwrap();
-        let paths=[normalized(&std::env::current_exe().unwrap().to_string_lossy())];
-        let pid=std::process::id();
-        assert!(open_unread_with_paths(Unread{source:Messenger::Qq,pid,window:window.0 as isize},&paths).is_err());
-        let line=LAST_WAKE.with(|last|last.borrow().clone());
-        DestroyWindow(window).unwrap();
-        assert!(line.starts_with(&format!("唤起 QQ 账号 {pid} · 提醒窗口 {:#x} Static 隐藏",window.0 as usize)),"记录目标账号与提醒窗口当时的状态：{line}");
-        assert!(line.contains("→ 客户端尚未就绪 →"),"记录停在哪一步：{line}");
-        assert!(line.contains("结果:失败 Unavailable") && line.contains("用时"),"记录结果与耗时：{line}");
-        assert!(!line.contains("聊天对象的名字"),"不能记录窗口标题");
-        assert_eq!(WAKE_STEPS.with(|steps|steps.borrow().len()),0,"每次唤起结束后清空步骤，不串到下一次");
-    }}
-    #[test]
-    fn wake_line_reports_success_and_steps_in_order(){
-        let ok=wake_line("唤起 钉钉 账号 7",&["切前台 0x1 StandardFrame_DingTalk 进程 7".into(),"系统已接受".into()],&Ok(()),Duration::from_millis(12));
-        assert_eq!(ok,"唤起 钉钉 账号 7 → 切前台 0x1 StandardFrame_DingTalk 进程 7 → 系统已接受 → 结果:已发出打开请求 用时12ms");
-        let failed=wake_line("唤起 微信 账号 9",&[],&Err(OpenError::Failed("未能唤起微信（T3）".into())),Duration::ZERO);
-        assert!(failed.contains("→ - →") && failed.contains("失败 Failed(\"未能唤起微信（T3）\")"));
-    }
     #[test]
     fn exited_messenger_accounts_are_removed_individually(){
         use crate::app::{Messenger,Unread};

@@ -28,15 +28,11 @@ fn open_wechat(unread:Unread,paths:&[String],allow_tray:bool)->Result<(),OpenErr
             else if window_pid(window)==unread.pid && usable_main_frame(window,unread.source) && matches(window,paths){Some(window)}
             else{account_main_window(unread.pid,unread.source,paths)};
         if let Some(target)=target{
-            wake_step(format!("切前台 {}",describe_window(target)));
-            if IsIconic(target).as_bool(){ShowWindowAsync(target,SW_RESTORE).ok().map_err(|_|{wake_step("还原最小化窗口失败");OpenError::Failed("请从任务栏打开微信".into())})?;}
-            if SetForegroundWindow(target).as_bool(){wake_step("系统已接受");return Ok(());}
-            wake_step("系统拒绝切前台");
-        }else{wake_step("没有该账号可见的微信主窗口");}
+            if IsIconic(target).as_bool(){ShowWindowAsync(target,SW_RESTORE).ok().map_err(|_|OpenError::Failed("请从任务栏打开微信".into()))?;}
+            if SetForegroundWindow(target).as_bool(){return Ok(());}
+        }
     }
-    if !allow_tray{wake_step("未开启从托盘唤起");return Err(OpenError::Failed("请从任务栏或托盘打开微信".into()));}
-    // 托盘唤起的每一步记在 wechat-tray.log（失败时写入，失败代码 T0–T5 同时出现在唤起结果里）。
-    wake_step("改从托盘唤起");
+    if !allow_tray{return Err(OpenError::Failed("请从任务栏或托盘打开微信".into()));}
     wechat_in_tray(unread).map_err(OpenError::Failed)?;
     open_wechat_from_tray(unread).map_err(OpenError::Failed)
 }

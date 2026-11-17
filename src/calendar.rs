@@ -11,8 +11,6 @@ mod exchange;
 #[cfg(test)]
 #[path="calendar/compatibility_tests.rs"]
 mod compatibility_tests;
-#[cfg(test)]
-mod transport_tests;
 
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
@@ -403,7 +401,6 @@ pub struct Failure {
     pub message: String,
     request_url: Option<String>,
     report:Option<ReadReport>,
-    kind: &'static str,
 }
 
 impl Failure {
@@ -419,7 +416,7 @@ impl Failure {
             500..=599 => format!("服务器出错（{code}），稍后再试"),
             _ => format!("服务器返回 {code}"),
         };
-        Self { status: Some(code), message, request_url: None,report:None,kind:"http" }
+        Self { status: Some(code), message, request_url: None,report:None }
     }
 
     fn at_url(mut self, url: &url::Url) -> Self {
@@ -432,116 +429,25 @@ impl Failure {
         self
     }
 
-    fn transport(error: &(dyn std::error::Error + 'static)) -> Self {
-        let (kind, message) = transport_issue(error).details();
-        Self { kind, ..Self::text(message) }
+    fn transport(_detail: &str) -> Self {
+        Self { status: None, message: "连不上服务器，检查网络".into(), request_url: None,report:None }
     }
 
     fn text(message: impl Into<String>) -> Self {
-        Self { status: None, message: message.into(), request_url: None,report:None,kind:"calendar" }
+        Self { status: None, message: message.into(), request_url: None,report:None }
     }
     fn with_report(mut self,report:ReadReport)->Self{self.report=Some(report);self}
 }
 
-#[derive(Clone, Copy)]
-enum TransportIssue { Untrusted, Validity, Name, Revoked, Certificate, Tls, Timeout, Dns, Refused, Proxy, Network }
-
-impl TransportIssue {
-    fn details(self) -> (&'static str, &'static str) {
-        match self {
-            Self::Untrusted => ("certificate_untrusted", "日历服务器证书不受信任，请先在 Windows 中信任服务器证书或其颁发机构"),
-            Self::Validity => ("certificate_validity", "日历服务器证书不在有效期内，请检查系统时间或联系管理员更新证书"),
-            Self::Name => ("certificate_name", "日历服务器证书与服务器地址不匹配，请使用证书对应的域名或联系管理员更新证书"),
-            Self::Revoked => ("certificate_revoked", "日历服务器证书已被吊销，请联系管理员更新证书"),
-            Self::Certificate => ("certificate_invalid", "日历服务器证书验证失败，请联系管理员检查证书及证书链"),
-            Self::Tls => ("tls_handshake", "无法与日历服务器建立安全连接（TLS 握手失败），请检查服务器证书和 TLS 配置"),
-            Self::Timeout => ("timeout", "日历服务器连接超时，请检查网络或稍后重试"),
-            Self::Dns => ("dns", "无法解析日历服务器地址，请核对域名和网络"),
-            Self::Refused => ("connection_refused", "日历服务器拒绝连接，请核对服务器端口及服务是否启动"),
-            Self::Proxy => ("proxy", "无法连接日历代理服务器，请检查代理配置及认证"),
-            Self::Network => ("network", "连不上服务器，检查网络"),
-        }
-    }
-}
-
-#[cfg(windows)]
-fn windows_transport_issue(code: u32) -> Option<TransportIssue> {
-    Some(match code {
-        0x800b0109 | 0x800b010a | 0x80090325 => TransportIssue::Untrusted,
-        0x800b0101 | 0x80090328 => TransportIssue::Validity,
-        0x800b010f | 0x80090322 => TransportIssue::Name,
-        0x800b010c | 0x80092010 => TransportIssue::Revoked,
-        0x800b0100..=0x800b0114 => TransportIssue::Certificate,
-        10060 => TransportIssue::Timeout,
-        10061 => TransportIssue::Refused,
-        11001 | 11004 => TransportIssue::Dns,
-        _ => return None,
-    })
-}
-
-fn transport_issue(mut error: &(dyn std::error::Error + 'static)) -> TransportIssue {
-    let mut issue = TransportIssue::Network;
-    loop {
-        if let Some(ureq::Error::Transport(inner)) = error.downcast_ref::<ureq::Error>() { error = inner; continue; }
-        if let Some(error) = error.downcast_ref::<ureq::Transport>() {
-            match error.kind() {
-                ureq::ErrorKind::Dns => return TransportIssue::Dns,
-                ureq::ErrorKind::ProxyConnect | ureq::ErrorKind::ProxyUnauthorized | ureq::ErrorKind::InvalidProxyUrl => return TransportIssue::Proxy,
-                _ => {}
-            }
-        }
-        if let Some(io) = error.downcast_ref::<std::io::Error>() {
-            #[cfg(windows)]
-            if let Some(issue) = io.raw_os_error().and_then(|code| windows_transport_issue(code as u32)) { return issue; }
-            match io.kind() {
-                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => return TransportIssue::Timeout,
-                std::io::ErrorKind::ConnectionRefused => return TransportIssue::Refused,
-                _ => {}
-            }
-            // io::Error 的 source() 可能跳过内层错误本身，优先保留其具体类型。
-            if let Some(inner) = io.get_ref() { error = inner; continue; }
-        }
-        #[cfg(windows)]
-        if let Some(native) = error.downcast_ref::<native_tls::Error>() {
-            // native-tls 不公开底层系统错误码；只读 Rust 的数字后缀，不匹配本地化文案。
-            let detail = native.to_string();
-            let code = detail.rsplit_once("(os error ").and_then(|(_, code)| code.strip_suffix(')'))
-                .and_then(|code| code.parse::<i32>().ok());
-            return code.and_then(|code| windows_transport_issue(code as u32)).unwrap_or(TransportIssue::Tls);
-        }
-        if let Some(tls) = error.downcast_ref::<ureq::rustls::Error>() {
-            use ureq::rustls::CertificateError as Cert;
-            return match tls {
-                ureq::rustls::Error::InvalidCertificate(cert) => match cert {
-                    Cert::UnknownIssuer => TransportIssue::Untrusted,
-                    Cert::Expired | Cert::ExpiredContext { .. } | Cert::NotValidYet | Cert::NotValidYetContext { .. } => TransportIssue::Validity,
-                    Cert::NotValidForName | Cert::NotValidForNameContext { .. } => TransportIssue::Name,
-                    Cert::Revoked => TransportIssue::Revoked,
-                    _ => TransportIssue::Certificate,
-                },
-                _ => TransportIssue::Tls,
-            };
-        }
-        if let Some(transport) = error.downcast_ref::<ureq::Transport>() {
-            if matches!(transport.message(), Some("tls connection init failed" | "native_tls connect failed")) { issue = TransportIssue::Tls; }
-        }
-        match error.source() { Some(source) => error = source, None => return issue }
-    }
-}
-
-fn agent() -> Result<ureq::Agent, Failure> {
-    let builder = ureq::AgentBuilder::new()
+fn agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(10))
         .timeout_read(Duration::from_secs(20))
         .timeout_write(Duration::from_secs(20))
         .timeout(Duration::from_secs(30))
         .redirects(0)
-        .user_agent(concat!("Daozai/",env!("CARGO_PKG_VERSION")));
-    // 仅日历使用系统证书验证，继承用户已信任的自签证书和私有 CA。
-    #[cfg(windows)]
-    let builder = builder.tls_connector(std::sync::Arc::new(native_tls::TlsConnector::new()
-        .map_err(|_| Failure::text("无法初始化日历安全连接，请重启岛仔后重试"))?));
-    Ok(builder.build())
+        .user_agent(concat!("Daozai/",env!("CARGO_PKG_VERSION")))
+        .build()
 }
 
 /// `Authorization: Basic base64(用户名:密码)`。
@@ -587,9 +493,9 @@ fn dav_response(
                     .map_err(|_|Failure::text("日历重定向地址无效"))?;
             }
             Ok(r) if r.status()>=300=>return Err(Failure::status(cfg.provider,r.status()).at_url(&target)),
-            Ok(r)=>return r.into_string().map(|xml|(xml,target.to_string())).map_err(|e|Failure::transport(&e)),
+            Ok(r)=>return r.into_string().map(|xml|(xml,target.to_string())).map_err(|e|Failure::transport(&e.to_string())),
             Err(ureq::Error::Status(code,_))=>return Err(Failure::status(cfg.provider,code).at_url(&target)),
-            Err(e)=>return Err(Failure::transport(&e)),
+            Err(e)=>return Err(Failure::transport(&e.to_string())),
         }
     }
     Err(Failure::text("日历重定向次数过多"))
@@ -668,8 +574,7 @@ fn record_fetch(provider:Provider,scope:&str,result:&Result<Fetched,Failure>){
     if cfg!(test){return;}
     let empty=ReadReport::default();
     let (report,parsed,status)=match result{Ok(f)=>(&f.report,f.events.len(),f.report.status),Err(e)=>(e.report.as_ref().unwrap_or(&empty),0,e.status.or(e.report.as_ref().and_then(|report|report.status)))};
-    let reason=result.as_ref().err().map_or("none",|error|error.kind);
-    let line=format!("provider={} scope={scope} error={} reason={reason} calendars={} failed={} received={} parsed_instances={parsed} outside={} invalid={} unsupported={} cancelled={} limited={} status={}",provider.key(),result.is_err(),report.calendars,report.failed,report.received,report.outside,report.invalid,report.unsupported,report.cancelled,report.limited,status.unwrap_or(0));
+    let line=format!("provider={} scope={scope} error={} calendars={} failed={} received={} parsed_instances={parsed} outside={} invalid={} unsupported={} cancelled={} limited={} status={}",provider.key(),result.is_err(),report.calendars,report.failed,report.received,report.outside,report.invalid,report.unsupported,report.cancelled,report.limited,status.unwrap_or(0));
     crate::resources::append_log(&crate::model::config_dir().join("diagnostics"),"calendar.log",&format!("{} {line}",chrono::Utc::now().timestamp()));
 }
 
@@ -698,7 +603,7 @@ pub fn fetch_month(cfg: &Config, password: &str, month: NaiveDate) -> Result<Fet
 
 fn fetch_range(cfg: &Config, password: &str, lo: chrono::DateTime<chrono::Utc>, hi: chrono::DateTime<chrono::Utc>) -> Result<Fetched, Failure> {
     if cfg.provider.exchange() { return exchange::fetch(cfg, password, lo, hi); }
-    let agent = agent()?;
+    let agent = agent();
     // 每次都发现全部日历：已保存的地址可能指向空日历，会遮蔽同一账号下的其他日历。
     // 逐个查询，单个日历失败不影响其他日历，全部失败才报错。
     let (calendars,mut report)=discover_calendars(&agent,cfg,password).map_err(|e|e.at_stage("查找日历"))?;
@@ -1288,7 +1193,7 @@ pub fn now_label() -> String {
 pub fn human_error(provider: Provider, status: Option<u16>) -> String {
     match status {
         Some(code) => Failure::status(provider, code).message,
-        None => TransportIssue::Network.details().1.into(),
+        None => Failure::transport("").message,
     }
 }
 
@@ -1392,7 +1297,7 @@ mod tests {
                 paths
             });
             let cfg=Config{provider,username:"synthetic".into(),href:None,server:Some(base.clone())};
-            let result=discover(&agent().unwrap(),&cfg,"synthetic-password");
+            let result=discover(&agent(),&cfg,"synthetic-password");
             stop_tx.send(()).unwrap();let paths=worker.join().unwrap();
             assert_eq!(result.unwrap(),format!("{base}dav/calendars/account/primary/"));
             assert_eq!(paths,vec!["/","/.well-known/caldav","/dav/principals/","/dav/principals/account/","/dav/calendars/account/"]);
@@ -1454,7 +1359,7 @@ mod tests {
             drop(stream);listener
         });
         let cfg=Config{provider:Provider::Custom,username:"synthetic".into(),href:None,server:Some(base)};
-        assert_eq!(discover(&agent().unwrap(),&cfg,"synthetic-password").unwrap_err().status,Some(400));
+        assert_eq!(discover(&agent(),&cfg,"synthetic-password").unwrap_err().status,Some(400));
         let listener=worker.join().unwrap();listener.set_nonblocking(true).unwrap();
         assert!(listener.accept().is_err());
     }
@@ -1518,7 +1423,7 @@ mod tests {
             write!(stream,"HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
         });
         let cfg=Config{provider:Provider::WeCom,username:"synthetic".into(),href:None,server:Some(base)};
-        assert!(discover(&agent().unwrap(),&cfg,"synthetic-password").unwrap_err().message.contains("不可信"));
+        assert!(discover(&agent(),&cfg,"synthetic-password").unwrap_err().message.contains("不可信"));
         worker.join().unwrap();foreign.set_nonblocking(true).unwrap();assert!(foreign.accept().is_err());
     }
 
@@ -1552,8 +1457,8 @@ mod tests {
             }
         });
         let cfg=Config{provider:Provider::Feishu,username:"synthetic".into(),href:None,server:Some(base.clone())};
-        assert!(dav(&agent().unwrap(),"REPORT",&base,"1","",&cfg,"secret").is_ok());
-        assert!(dav(&agent().unwrap(),"REPORT",&base,"1","",&cfg,"secret").is_err());
+        assert!(dav(&agent(),"REPORT",&base,"1","",&cfg,"secret").is_ok());
+        assert!(dav(&agent(),"REPORT",&base,"1","",&cfg,"secret").is_err());
         worker.join().unwrap();foreign.set_nonblocking(true).unwrap();assert!(foreign.accept().is_err());
     }
 
@@ -1874,7 +1779,7 @@ mod tests {
         assert!(Provider::Exchange.custom_server() && Provider::Exchange.server().is_empty());
         let saved=Config{provider:Provider::Exchange,username:"me@example.com".into(),href:None,server:Some("https://mail.example.com/".into())};
         assert_eq!(decode_config(&encode_config(&saved)).unwrap(),saved,"Exchange 账号的服务器地址要能保存和读回");
-        assert!(Failure::transport(&std::io::Error::from(std::io::ErrorKind::TimedOut)).message.contains("连接超时"));
+        assert_eq!(Failure::transport("timed out").message, "连不上服务器，检查网络");
         assert_eq!(Failure::status(Provider::DingTalk, 404).message, "服务器地址不对（404）");
     }
 

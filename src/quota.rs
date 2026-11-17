@@ -26,6 +26,8 @@ pub(crate) mod api;
 pub(crate) mod kiro;
 #[path="native_auth.rs"]
 mod native_auth;
+#[path="marvis_quota.rs"]
+pub(crate) mod marvis;
 
 pub struct Discovery {pub added:usize,pub notes:Vec<String>}
 impl Discovery {
@@ -36,10 +38,10 @@ impl Discovery {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini, ZCode, WorkBuddy, DeepSeek, OpenCodeGo, MiniMax, Glm, NewApi, OneApi, Sub2Api, Kiro, Doubao, RelayGeneral, RelayCustom }
+pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini, ZCode, WorkBuddy, DeepSeek, OpenCodeGo, MiniMax, Glm, NewApi, OneApi, Sub2Api, Kiro, Doubao, RelayGeneral, RelayCustom, Marvis }
 impl Provider {
-    pub const ALL: [Self; 18] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini, Self::ZCode, Self::WorkBuddy, Self::DeepSeek, Self::OpenCodeGo, Self::MiniMax, Self::Glm, Self::NewApi, Self::OneApi, Self::Sub2Api, Self::Kiro, Self::Doubao, Self::RelayGeneral, Self::RelayCustom];
-    pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini",Self::ZCode=>"ZCode",Self::WorkBuddy=>"WorkBuddy",Self::DeepSeek=>"DeepSeek",Self::OpenCodeGo=>"OpenCode Go",Self::MiniMax=>"MiniMax",Self::Glm=>"GLM",Self::NewApi=>"New API",Self::OneApi=>"One API",Self::Sub2Api=>"Sub2API",Self::Kiro=>"Kiro",Self::Doubao=>"豆包",Self::RelayGeneral=>"通用余额",Self::RelayCustom=>"自定义查询"} }
+    pub const ALL: [Self; 19] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini, Self::ZCode, Self::WorkBuddy, Self::DeepSeek, Self::OpenCodeGo, Self::MiniMax, Self::Glm, Self::NewApi, Self::OneApi, Self::Sub2Api, Self::Kiro, Self::Doubao, Self::RelayGeneral, Self::RelayCustom, Self::Marvis];
+    pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini",Self::ZCode=>"ZCode",Self::WorkBuddy=>"WorkBuddy",Self::DeepSeek=>"DeepSeek",Self::OpenCodeGo=>"OpenCode Go",Self::MiniMax=>"MiniMax",Self::Glm=>"GLM",Self::NewApi=>"New API",Self::OneApi=>"One API",Self::Sub2Api=>"Sub2API",Self::Kiro=>"Kiro",Self::Doubao=>"豆包",Self::RelayGeneral=>"通用余额",Self::RelayCustom=>"自定义查询",Self::Marvis=>"Marvis"} }
     pub fn api_key(self)->bool{matches!(self,Self::OpenCodeGo|Self::MiniMax|Self::Glm)||self.relay()}
     pub fn relay(self)->bool{matches!(self,Self::NewApi|Self::OneApi|Self::Sub2Api|Self::RelayGeneral|Self::RelayCustom)}
     pub fn balance(self)->bool{matches!(self,Self::WorkBuddy|Self::DeepSeek)||self.relay()}
@@ -56,8 +58,8 @@ impl Accent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Account {pub id:String, pub provider:Provider, pub alias:String, pub source:PathBuf, pub slot:Option<String>, pub enabled:bool, pub pinned:bool}
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Config {pub enabled:bool, pub compact:bool, pub selected:String, pub accounts:Vec<Account>, pub colors:HashMap<String,Accent>}
-impl Default for Config {fn default()->Self {Self{enabled:true,compact:true,selected:String::new(),accounts:vec![],colors:HashMap::new()}}}
+pub struct Config {pub enabled:bool, pub compact:bool, pub selected:String, pub accounts:Vec<Account>, pub colors:HashMap<String,Accent>, pub marvis:bool}
+impl Default for Config {fn default()->Self {Self{enabled:true,compact:true,selected:String::new(),accounts:vec![],colors:HashMap::new(),marvis:true}}}
 impl Config {
     pub fn load()->Self {
         let path=crate::model::config_dir().join("ai-quota.json");
@@ -69,9 +71,9 @@ impl Config {
             id:a["id"].as_str()?.into(),provider:Provider::parse(a["provider"].as_str()?)?,alias:a["alias"].as_str()?.into(),source:PathBuf::from(a["source"].as_str()?),slot:a["slot"].as_str().map(str::to_owned),enabled:a["enabled"].as_bool().unwrap_or(true),pinned:a["pinned"].as_bool().unwrap_or(false)
         })).collect();
         let colors=v["colors"].as_object().into_iter().flatten().filter_map(|(id,value)|{let color=Accent::parse(value.as_str()?);(color!=Accent::Brand).then(||(id.clone(),color))}).collect();
-        Self{enabled:v["enabled"].as_bool().unwrap_or(true),compact:v["compact"].as_bool().unwrap_or(true),selected:v["selected"].as_str().unwrap_or_default().into(),accounts,colors}
+        Self{enabled:v["enabled"].as_bool().unwrap_or(true),compact:v["compact"].as_bool().unwrap_or(true),selected:v["selected"].as_str().unwrap_or_default().into(),accounts,colors,marvis:v["marvis"].as_bool().unwrap_or(true)}
     }
-    fn json(&self)->Value {let colors:serde_json::Map<String,Value>=self.colors.iter().map(|(id,color)|(id.clone(),json!(color.key()))).collect();json!({"enabled":self.enabled,"compact":self.compact,"selected":self.selected,"colors":colors,"accounts":self.accounts.iter().map(|a|json!({"id":a.id,"provider":a.provider.name(),"alias":a.alias,"source":a.source,"slot":a.slot,"enabled":a.enabled,"pinned":a.pinned})).collect::<Vec<_>>()})}
+    fn json(&self)->Value {let colors:serde_json::Map<String,Value>=self.colors.iter().map(|(id,color)|(id.clone(),json!(color.key()))).collect();json!({"enabled":self.enabled,"compact":self.compact,"selected":self.selected,"marvis":self.marvis,"colors":colors,"accounts":self.accounts.iter().map(|a|json!({"id":a.id,"provider":a.provider.name(),"alias":a.alias,"source":a.source,"slot":a.slot,"enabled":a.enabled,"pinned":a.pinned})).collect::<Vec<_>>()})}
     pub fn save(&self) {let _=self.save_checked();}
     pub(crate) fn save_checked(&self)->Result<(),String>{
         let dir=crate::model::config_dir();fs::create_dir_all(&dir).map_err(|_|"无法创建额度配置目录")?;
@@ -84,6 +86,7 @@ impl Config {
         if provider==Provider::Kiro{return kiro::add(self,&source,&alias);}
         if provider==Provider::WorkBuddy{return Err("请使用浏览器连接 WorkBuddy".into());}
         if provider==Provider::DeepSeek{return Err("请使用 API Key 连接 DeepSeek".into());}
+        if provider==Provider::Marvis{return self.add_marvis(&alias);}
         if provider==Provider::Gemini{return Err("请使用浏览器或 Cookie 连接 Gemini 网页账号".into());}
         if provider==Provider::Doubao{return Err("请使用浏览器或 Cookie 连接豆包网页账号".into());}
         if provider==Provider::GrokBot{return self.import_grok(&source,&alias).map(|_|());}
@@ -187,14 +190,26 @@ impl Config {
         }
         notes
     }
-    pub fn selected_index(&self)->Option<usize>{self.accounts.iter().position(|a|a.id==self.selected && a.enabled).or_else(||self.accounts.iter().position(|a|a.enabled))}
+    pub fn selected_index(&self)->Option<usize>{self.accounts.iter().position(|a|a.id==self.selected && a.enabled && self.visible(a)).or_else(||self.accounts.iter().position(|a|a.enabled && self.visible(a)))}
     pub fn move_account(&mut self,from:&str,to:&str){
         if let (Some(source),Some(target))=(self.accounts.iter().position(|a|a.id==from),self.accounts.iter().position(|a|a.id==to)){
             let account=self.accounts.remove(source);self.accounts.insert(target,account);
         }
     }
-    pub fn ordered_indices(&self,pinned:bool)->Vec<usize>{let mut indices:Vec<_>=self.accounts.iter().enumerate().filter_map(|(i,a)|(a.enabled && (!pinned||a.pinned)).then_some(i)).collect();indices.sort_by_key(|i|match self.accounts[*i].provider{Provider::WorkBuddy=>1,Provider::DeepSeek=>2,_=>0});indices}
+    pub fn ordered_indices(&self,pinned:bool)->Vec<usize>{let mut indices:Vec<_>=self.accounts.iter().enumerate().filter_map(|(i,a)|(a.enabled && self.visible(a) && (!pinned||a.pinned)).then_some(i)).collect();indices.sort_by_key(|i|match self.accounts[*i].provider{Provider::WorkBuddy=>1,Provider::DeepSeek=>2,_=>0});indices}
     pub fn pinned_indices(&self)->Vec<usize>{self.ordered_indices(true)}
+    /// Marvis 来源跟随设置页的组件开关，关闭后不参与面板与常驻胶囊的账号轮换。
+    pub fn visible(&self,a:&Account)->bool{a.provider!=Provider::Marvis||self.marvis}
+    /// 添加本机 Marvis 用量来源：只记录快照路径，不保存任何凭据、不联网。
+    fn add_marvis(&mut self,alias:&str)->Result<(),String>{
+        let file=marvis::path();
+        if !file.is_file(){let _=crate::marvis_snapshot::write_snapshot();}
+        if !file.is_file(){return Err("未读到 Marvis 用量记录，请先登录 Marvis 并产生一次对话后再添加".into());}
+        if self.accounts.iter().any(|a|a.provider==Provider::Marvis){return Err("Marvis 用量已经在列表里".into());}
+        let alias=if alias.trim().is_empty(){"Marvis".to_owned()}else{alias.trim().to_owned()};
+        let id=format!("{}-{}",Provider::Marvis.name(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+        self.accounts.push(Account{id:id.clone(),provider:Provider::Marvis,alias,source:file,slot:None,enabled:true,pinned:false});self.selected=id;Ok(())
+    }
     pub fn reconnect_deepseek(&mut self,id:&str,slot:String,alias:String)->Result<String,String>{
         if self.accounts.iter().any(|a|a.id!=id&&a.provider==Provider::DeepSeek&&a.slot.as_deref()==Some(&slot)){return Err("这把 API Key 已连接到另一个账号".into());}
         let account=self.accounts.iter_mut().find(|a|a.id==id&&a.provider==Provider::DeepSeek).ok_or("原账号已移除，请重新添加")?;
@@ -230,7 +245,7 @@ impl Window {
 }
 #[derive(Clone, Debug, Default)]
 #[derive(serde::Serialize,serde::Deserialize)]
-pub struct Snapshot {#[serde(default)]pub kiro:Option<kiro::Details>,pub plan:String,pub windows:Vec<Window>,pub extra:Vec<Window>,pub at:i64,pub wallet:Option<deepseek::Wallet>,pub credits:Option<workbuddy::Credits>,#[serde(default)] pub relay:Option<relay::Quota>}
+pub struct Snapshot {#[serde(default)]pub kiro:Option<kiro::Details>,pub plan:String,pub windows:Vec<Window>,pub extra:Vec<Window>,pub at:i64,pub wallet:Option<deepseek::Wallet>,pub credits:Option<workbuddy::Credits>,#[serde(default)] pub relay:Option<relay::Quota>,#[serde(default)] pub marvis:Option<marvis::Details>}
 impl Account {
     pub(crate) fn cache_identity_marker(&self)->Value {
         if claude::is_desktop(&self.source){json!(2)}else{json!(true)}
@@ -424,6 +439,7 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
     if account.provider==Provider::Gemini{return gemini::fetch(agent,account);}
     if account.provider==Provider::Kiro{return kiro::fetch(agent,account);}
     if account.provider==Provider::Doubao{return doubao::fetch(agent,account);}
+    if account.provider==Provider::Marvis{return marvis::fetch(account);}
     let auth=account_credentials(account).map_err(|e|(e,0))?;
     let url=match account.provider{Provider::Codex=>"https://chatgpt.com/backend-api/wham/usage",Provider::Kimi=>"https://api.kimi.com/coding/v1/usages",_=>unreachable!()};
     let mut req=agent.get(url).set("Authorization",&format!("Bearer {}",auth.token)).set("Accept","application/json").set("User-Agent","codex-cli/Daozai");

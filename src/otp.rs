@@ -285,10 +285,12 @@ fn score_at(hay: &str, start: usize, end: usize, text: &str, subject_end: usize,
     if has(&before(hay, start, 20), ORDER_WORDS) || has(&after(hay, end, 8), ORDER_WORDS) {
         return None;
     }
-    // 4 位年份：直接判负，掉到门槛以下
+    // 4 位年份：只在后面紧跟日期成分时判负（`2026-10-30`、`2026年`），
+    // 否则「验证码：2084」这种正好落在 1900..=2100 的真实验证码会被误杀。
     if len == 4 && !mixed {
         if let Ok(y) = core.parse::<u32>() {
-            if (1900..=2100).contains(&y) {
+            let dateish = hay[end..].chars().next().is_some_and(|c| matches!(c, '-' | '/' | '.' | '年' | '月' | '日'));
+            if (1900..=2100).contains(&y) && dateish {
                 score -= 35;
             }
         }
@@ -315,6 +317,11 @@ fn score_at(hay: &str, start: usize, end: usize, text: &str, subject_end: usize,
         .trim();
     let own_line = line == text;
     let colon = hay[..start].trim_end().ends_with(':');
+    let tight = {
+        let before6 = before(hay, start, 6);
+        let trimmed = before6.trim_end_matches([' ', ':', '：', '是', '为']);
+        strong().is_match(trimmed)
+    };
     let char_pos = hay[..start].chars().count();
     let in_subject = char_pos < subject_end;
     let is_emph = emph.iter().any(|e| e.contains(text));
@@ -327,6 +334,9 @@ fn score_at(hay: &str, start: usize, end: usize, text: &str, subject_end: usize,
         score += 15;
     }
     if colon {
+        score += 10;
+    } else if tight {
+        // 「验证码1234」「验证码 1234」：没有冒号，但强关键词紧贴数字，同样算强信号。
         score += 10;
     }
     if in_subject {
@@ -513,6 +523,11 @@ mod tests {
 
     #[test]
     fn negatives_are_rejected() {
+        // 4 位验证码正好落在 1900..=2100（如 2084）时，不能因为「像年份」被判负。
+        assert_eq!(code("", "【清枫北京科技】您的验证码：2084，如非本人操作，请忽略本短信!"), Some("2084".into()));
+        // 常见写法「验证码1234」「验证码 1234」不能因为没有冒号就掉到门槛以下。
+        assert_eq!(code("", "验证码 1999，5 分钟内有效"), Some("1999".into()));
+        assert_eq!(code("", "您的验证码1234，5分钟内有效"), Some("1234".into()));
         let cases = [
             ("", "您的订单号 12345678 已发货"),
             ("", "订单 482913，金额 ￥1,299.00"),

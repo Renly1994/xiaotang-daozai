@@ -1,14 +1,11 @@
-//! 自动检查正式版更新，下载与安装由用户确认。
+//! 用户主动检查、下载并安装正式版更新。
 use eframe::egui;
-use std::{io::{Read, Write}, path::PathBuf, sync::{mpsc::{self, Receiver}, Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
+use std::{io::{Read, Write}, path::PathBuf, sync::{mpsc::{self, Receiver}, Arc, atomic::{AtomicBool, Ordering}}, time::Duration};
 
 const REPOSITORY: &str = "https://github.com/Renly1994/xiaotang-daozai";
 const API: &str = "https://api.github.com/repos/Renly1994/xiaotang-daozai/releases/latest";
 const RELEASES: &str = "https://github.com/Renly1994/xiaotang-daozai/releases/latest";
 const BACKUP_DOWNLOAD: &str = "https://pan.quark.cn/s/0a39b4e1f332";
-const STARTUP_DELAY: Duration = Duration::from_secs(10);
-const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 3600);
-const RETRY_INTERVAL: Duration = Duration::from_secs(3600);
 
 #[derive(Clone, Debug)]
 struct Release { version: String, notes: String, page: String, package: Option<Package> }
@@ -26,10 +23,6 @@ pub(crate) struct State {
     dialog_open: bool,
     focus_requested: bool,
     logo: Option<egui::TextureHandle>,
-    next_check: Option<Instant>,
-    automatic_check: bool,
-    notified_version: Option<String>,
-    history_path: Option<PathBuf>,
 }
 
 impl Drop for State {
@@ -37,63 +30,20 @@ impl Drop for State {
 }
 
 impl State {
-    pub(crate) fn load(path: PathBuf) -> Self {
-        let mut state = State::default();
-        if let Some((next, version)) = std::fs::read(&path).ok()
-            .and_then(|bytes| serde_json::from_slice::<(i64, Option<String>)>(&bytes).ok()) {
-            let seconds = next.saturating_sub(chrono::Utc::now().timestamp()).clamp(0, CHECK_INTERVAL.as_secs() as i64);
-            state.next_check = Some(Instant::now() + STARTUP_DELAY.max(Duration::from_secs(seconds as u64)));
-            state.notified_version = version;
-        }
-        state.history_path = Some(path);
-        state
-    }
-
-    fn remember_check(&self, delay: Duration) {
-        let Some(path) = &self.history_path else { return };
-        let next = chrono::Utc::now().timestamp() + delay.as_secs() as i64;
-        if let Some(parent) = path.parent() {
-            if std::fs::create_dir_all(parent).is_err() { return; }
-        }
-        if let Ok(bytes) = serde_json::to_vec(&(next, &self.notified_version)) {
-            let _ = crate::model::atomic_write(path, &bytes);
-        }
-    }
-
-    fn should_check(&mut self, now: Instant) -> bool {
-        now >= *self.next_check.get_or_insert(now + STARTUP_DELAY) && self.rx.is_none() && !self.dialog_open
-    }
-
-    fn begin_check(&mut self, ctx: &egui::Context, automatic: bool, load: impl FnOnce() -> Result<Option<Release>, String> + Send + 'static) -> bool {
-        if self.rx.is_some() { return false; }
-        let (tx, rx) = mpsc::channel(); self.rx = Some(rx); self.automatic_check = automatic;
-        self.next_check = Some(Instant::now() + CHECK_INTERVAL);
-        self.message.clear(); self.result = None; self.dialog_open = false; self.focus_requested = false;
-        let ctx = ctx.clone();
-        std::thread::spawn(move || { let _ = tx.send(Event::Checked(load())); ctx.request_repaint(); });
-        true
-    }
-
     pub(crate) fn poll(&mut self, ctx: &egui::Context) {
         loop {
             let event = match self.rx.as_ref().map(|rx| rx.try_recv()) {
                 Some(Ok(event)) => event,
                 Some(Err(mpsc::TryRecvError::Disconnected)) => {
                     self.rx = None; self.cancel = None;
-                    self.automatic_check = false; self.next_check = Some(Instant::now() + RETRY_INTERVAL);
                     self.message = "检查或下载已中断，请重试。".into(); break;
                 }
                 _ => break,
             };
             match event {
                 Event::Checked(result) => {
-                    let automatic = std::mem::take(&mut self.automatic_check);
-                    let delay = if result.is_err() { RETRY_INTERVAL } else { CHECK_INTERVAL };
-                    self.next_check = Some(Instant::now() + delay);
-                    self.dialog_open = matches!(&result, Ok(Some(release)) if !automatic || self.notified_version.as_deref() != Some(release.version.as_str()));
+                    self.dialog_open = matches!(&result, Ok(Some(_)));
                     self.focus_requested = self.dialog_open;
-                    if self.dialog_open { if let Ok(Some(release)) = &result { self.notified_version = Some(release.version.clone()); } }
-                    self.remember_check(delay);
                     self.result = Some(result); self.rx = None;
                 }
                 Event::Progress(value) => self.progress = value,
@@ -119,14 +69,19 @@ impl State {
                 }
             }
         }
-        // 复用主界面的低频轮询；只在实际检查时启动线程，不增加常驻计时线程。
-        if !cfg!(test) && self.should_check(Instant::now()) { self.begin_check(ctx, true, check); }
-        if self.rx.is_some() && !self.automatic_check { ctx.request_repaint_after(Duration::from_millis(100)); }
+        if self.rx.is_some() { ctx.request_repaint_after(Duration::from_millis(100)); }
     }
 
-    pub(crate) fn ui(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn ui(&mut self, ui: &mut egui::Ui, enabled: bool) {
+        if !enabled {
+            ui.label(egui::RichText::new("更新检查已关闭 · 自定义构建保护").size(11.5).color(ui.visuals().weak_text_color()));
+            return;
+        }
         if ui.add_enabled(self.rx.is_none(), egui::Button::new("检查更新")).clicked() {
-            self.begin_check(ui.ctx(), false, check);
+            let (tx, rx) = mpsc::channel(); self.rx = Some(rx);
+            self.message.clear(); self.result = None; self.dialog_open = false;
+            let ctx = ui.ctx().clone();
+            std::thread::spawn(move || { let _ = tx.send(Event::Checked(check())); ctx.request_repaint(); });
         }
         match &self.result {
             Some(Ok(Some(release))) => {
@@ -231,6 +186,9 @@ impl State {
                                     });
                             });
                         ui.add_space(4.0);
+                        if crate::CUSTOM_BUILD {
+                            ui.label(egui::RichText::new("当前是自定义构建：安装官方版会覆盖手机电量、更新开关等本地修改，建议先运行 reapply.ps1。").color(egui::Color32::from_rgb(240,180,90)).size(11.5));
+                        }
                         ui.label(egui::RichText::new(if self.message.is_empty(){"更新后自动重启，设置和记录会保留。"}else{&self.message}).color(theme::DIM).size(11.5));
                         if self.cancel.is_some() {
                             ui.add(egui::ProgressBar::new(self.progress).fill(theme::BLUE).desired_height(8.0));
@@ -273,8 +231,8 @@ impl State {
 
 }
 
+// Windows 的 GL 透明窗口可能仍显示黑底，按绘制轮廓裁掉窗口外沿。
 /// 只统计岛仔自己的文件（KB）。共享安装文件夹里的其他软件不算在内。
-/// 诊断脚本已内嵌在程序里（`--collect-diagnostics`），安装目录不再附带单独的诊断文件。
 fn own_files_kb(dir: &std::path::Path) -> u32 {
     let bytes: u64 = ["daozai.exe", "Uninstall.exe", "LICENSE", "THIRD_PARTY_NOTICES.txt"].iter()
         .filter_map(|name| std::fs::metadata(dir.join(name)).ok()).filter(|meta| meta.is_file()).map(|meta| meta.len()).sum();
@@ -477,70 +435,6 @@ mod install_size_tests {
 mod tests {
     use super::*;
     #[test]
-    fn automatic_check_waits_for_startup_and_idle_state() {
-        let mut state = State::default();
-        let start = Instant::now();
-        assert!(!state.should_check(start));
-        let due = start + Duration::from_secs(10);
-        assert!(!state.should_check(due - Duration::from_millis(1)));
-        assert!(state.should_check(due));
-        let (_tx, rx) = mpsc::channel(); state.rx = Some(rx);
-        assert!(!state.should_check(due));
-        state.rx = None; state.dialog_open = true;
-        assert!(!state.should_check(due));
-        state.dismiss();
-        assert!(state.should_check(due));
-    }
-
-    #[test]
-    fn automatic_check_reschedules_success_and_silent_failure() {
-        for (result, delay) in [(Ok(None), Duration::from_secs(24 * 3600)), (Err("网络失败".into()), Duration::from_secs(3600))] {
-            let mut state = State::default(); state.automatic_check = true;
-            let (tx, rx) = mpsc::channel(); state.rx = Some(rx);
-            tx.send(Event::Checked(result)).unwrap();
-            let before = Instant::now();
-            state.poll(&egui::Context::default());
-            let after = Instant::now();
-            let next = state.next_check.unwrap();
-            assert!(next >= before + delay && next <= after + delay);
-            assert!(!state.dialog_open); assert!(!state.focus_requested);
-            assert!(!state.automatic_check); assert!(state.rx.is_none());
-            assert!(!state.should_check(next - Duration::from_millis(1)));
-            assert!(state.should_check(next));
-        }
-    }
-
-    #[test]
-    fn automatic_notice_is_once_per_version_and_manual_check_can_reopen_it() {
-        let path=std::env::temp_dir().join(format!("daozai-update-check-{}.json",std::process::id()));
-        let _=std::fs::remove_file(&path);
-        for (automatic, version, expected) in [(true, "v0.6.65", true), (true, "v0.6.65", false),
-            (true, "v0.6.66", true), (false, "v0.6.66", true)] {
-            let mut state=State::load(path.clone());
-            if path.exists() { assert!(!state.should_check(Instant::now()+Duration::from_secs(3600))); }
-            state.automatic_check = automatic;
-            let (tx, rx) = mpsc::channel(); state.rx = Some(rx);
-            tx.send(Event::Checked(Ok(Some(Release { version: version.into(), notes: String::new(), page: RELEASES.into(),
-                package: Some(Package { url: String::new(), size: 1, hash: String::new() }) })))).unwrap();
-            state.poll(&egui::Context::default());
-            assert_eq!(state.dialog_open, expected); assert_eq!(state.focus_requested, expected);
-            assert!(state.rx.is_none()); assert!(state.cancel.is_none()); assert_eq!(state.progress, 0.0);
-            assert!(matches!(&state.result, Some(Ok(Some(release))) if release.version == version));
-            state.dismiss();
-        }
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn background_checks_do_not_overlap_active_work() {
-        let mut state = State::default();
-        let ctx = egui::Context::default();
-        assert!(state.begin_check(&ctx, true, || Ok(None)));
-        assert!(!state.begin_check(&ctx, false, || panic!("已有任务时不应发起检查")));
-        assert!(matches!(state.rx.as_ref().unwrap().recv_timeout(Duration::from_secs(3)), Ok(Event::Checked(Ok(None)))));
-    }
-
-    #[test]
     fn update_requests_use_configured_proxy() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -653,17 +547,11 @@ mod tests {
             if !disconnected { tx.send(Event::Checked(Ok(None))).unwrap(); }
             drop(tx);
             let mut state = State::default(); state.rx = Some(rx);
-            state.automatic_check = true;
-            let before = Instant::now();
             let _ = ctx.run(Default::default(), |ctx| {
                 state.poll(ctx);
-                egui::CentralPanel::default().show(ctx, |ui| state.ui(ui));
+                egui::CentralPanel::default().show(ctx, |ui| state.ui(ui, true));
             });
             assert!(state.rx.is_none());
-            assert!(!state.automatic_check);
-            let delay = if disconnected { Duration::from_secs(3600) } else { Duration::from_secs(24 * 3600) };
-            let next = state.next_check.unwrap();
-            assert!(next >= before + delay && next <= Instant::now() + delay);
             assert_eq!(!state.message.is_empty(), disconnected);
         }
     }

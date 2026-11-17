@@ -4,7 +4,7 @@ use crate::anim::{smoothstep, Spring};
 pub(crate) const CLOCK: usize = 0;
 pub(crate) const BATTERY: usize = 1;
 pub(crate) const QUOTA: usize = 2;
-/// 可独立排列的天气徽标。
+/// 紧跟时钟的天气徽标；不参与用户排序，永远与时钟成组。
 pub(crate) const WEATHER: usize = 5;
 pub(crate) fn quota_slot(position:usize)->usize {
     if position<3 {QUOTA+position} else {WIDTHS.len()+position-3}
@@ -17,9 +17,9 @@ pub(crate) const PET: usize = 9;
 pub(crate) const WEATHER_WIDTH: f32 = 38.0;
 const WIDTHS: [f32; 10] = [44.0,20.0,27.0,27.0,27.0,WEATHER_WIDTH,14.0,crate::focus_bar::WIDTH,20.0,32.0];
 
-pub(crate) const DEFAULT_ORDER: [usize;7]=[BATTERY,PET,CLOCK,WEATHER,QUOTA,MUSIC,FOCUS];
+pub(crate) const DEFAULT_ORDER: [usize;6]=[BATTERY,PET,CLOCK,QUOTA,MUSIC,FOCUS];
 pub(crate) fn valid_order(order:&[usize])->bool {
-    order.len()==DEFAULT_ORDER.len() && DEFAULT_ORDER.iter().all(|slot|order.iter().filter(|value|*value==slot).count()==1)
+    order.len()==6 && DEFAULT_ORDER.iter().all(|slot|order.iter().filter(|value|*value==slot).count()==1)
 }
 
 pub(crate) fn animations_enabled()->bool {
@@ -41,6 +41,8 @@ pub(crate) struct Layout {
     pub x: Vec<Option<f32>>,
     pub widths:Vec<f32>,
     quotas:usize,
+    /// 状态总线占用的槽位（在末尾动态追加，不参与 resident_order 重排）。
+    pub status: Option<usize>,
 }
 
 impl Layout {
@@ -56,6 +58,7 @@ impl Layout {
                 CLOCK=>{
                     if pet {x[PET]=Some(place(&mut cursor,WIDTHS[PET]));}
                     x[slot]=Some(place(&mut cursor,WIDTHS[slot]));
+                    // 天气紧跟时钟，中间只留组件间距；排序时也与时钟成组移动。
                     if weather {x[WEATHER]=Some(place(&mut cursor,WIDTHS[WEATHER]));}
                 },
                 QUOTA if count>0=>{
@@ -71,7 +74,26 @@ impl Layout {
         }
         let width=cursor-12.0+16.0;
         for value in x.iter_mut().flatten() {*value-=width/2.0;}
-        Self {width:width.max(96.0),x,widths,quotas}
+        Self {width:width.max(96.0),x,widths,quotas,status:None}
+    }
+    /// 在胶囊最右侧追加一条状态区：不影响 resident_order 的既有槽位，
+    /// 只是把整体左移半个宽度，让常驻组件保持相对位置。
+    pub fn add_status(&mut self, width: f32) -> usize {
+        let gap = 12.0;
+        // 状态区是胶囊最右的槽位，右侧留与左侧一致的 16px 边距，避免胶囊贴边、左右不对称。
+        let end_pad = 16.0;
+        let slot = self.x.len();
+        self.x.push(None);
+        self.widths.push(width);
+        let old_w = self.width;
+        // 状态区中心相对旧胶囊右边界的偏移：gap（左间距）+ width/2；
+        // 右侧再让出 end_pad，所以整体多占 end_pad，各槽位左移 shift 保证相对位置不变。
+        let shift = (width + gap + end_pad) / 2.0;
+        for value in self.x.iter_mut().flatten() { *value -= shift; }
+        self.x[slot] = Some(old_w / 2.0 + gap / 2.0 - end_pad / 2.0);
+        self.width = old_w + width + gap + end_pad;
+        self.status = Some(slot);
+        slot
     }
     pub fn quota_slots(&self)->impl Iterator<Item=usize> { (0..self.quotas).map(quota_slot) }
     /// 把某个槽加宽 extra：其余槽对称让位并记入总宽。点数文字、时段时钟、天气温度共用。
@@ -81,19 +103,24 @@ impl Layout {
         for (i,x) in self.x.iter_mut().enumerate(){if i!=slot{if let Some(x)=x{*x+=if *x<center{-extra/2.0}else{extra/2.0};}}}
         self.widths[slot]+=extra;self.width+=extra;
     }
+    /// 本机与手机电量同时显示时把电池槽加宽，两个环并排；其余槽位左右让开。
+    pub fn widen_battery(&mut self, extra:f32) {
+        let Some(battery)=self.x[BATTERY] else{return;};
+        for (slot,x) in self.x.iter_mut().enumerate() {
+            if slot!=BATTERY { if let Some(x)=x { *x+=if *x<battery {-extra/2.0}else{extra/2.0}; } }
+        }
+        self.widths[BATTERY]+=extra;
+        self.width+=extra;
+    }
     pub fn balance_tail(&mut self,position:usize,extra:f32){self.widen(quota_slot(position),extra);}
     pub fn widen_clock(&mut self, extra:f32) {self.widen(CLOCK,extra);}
-    pub fn hide_clock(&mut self) {
-        let Some(center)=self.x[CLOCK].take() else{return;};
-        let removed=self.widths[CLOCK]+12.0;
-        self.width=(self.width-removed).max(96.0);
-        for x in self.x.iter_mut().flatten() {*x+=if *x<center {removed/2.0}else{-removed/2.0};}
-    }
     pub fn reorder(&mut self,order:&[usize]) {
         if !valid_order(order){return;}
         let original=self.x.clone();let mut cursor=-self.width/2.0+16.0;
         for slot in order.iter().copied().chain(std::iter::once(BELL)) {
-            let slots:Vec<usize>=if slot==QUOTA{self.quota_slots().collect()}else{vec![slot]};
+            let slots:Vec<usize>=if slot==QUOTA{self.quota_slots().collect()}
+                else if slot==CLOCK&&self.x[WEATHER].is_some(){vec![CLOCK,WEATHER]}
+                else{vec![slot]};
             let left=slots.iter().filter_map(|&i|original[i].map(|x|x-self.widths[i]/2.0)).fold(f32::INFINITY,f32::min);
             let right=slots.iter().filter_map(|&i|original[i].map(|x|x+self.widths[i]/2.0)).fold(f32::NEG_INFINITY,f32::max);
             if !left.is_finite(){continue;}
@@ -147,38 +174,8 @@ impl Motion {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn hidden_clock_closes_its_gap_in_custom_orders(){
-        for reverse in [false,true] {for count in [0,5] {
-            let mut order=DEFAULT_ORDER.to_vec();if reverse {order.reverse();}
-            let mut layout=Layout::new(true,count,true,true,false,true,true);
-            layout.reorder(&order);layout.widen_clock(64.0);
-            let width=layout.width;let removed=layout.widths[CLOCK]+12.0;
-            layout.hide_clock();assert!(layout.x[CLOCK].is_none());
-            assert_eq!(layout.width,(width-removed).max(96.0));
-            let mut boxes:Vec<_>=layout.x.iter().enumerate().filter_map(|(i,x)|x.map(|x|(x-layout.widths[i]/2.0,x+layout.widths[i]/2.0))).collect();
-            boxes.sort_by(|a,b|a.0.total_cmp(&b.0));
-            assert!(boxes.windows(2).all(|p|p[1].0-p[0].1>=6.9),"关闭时间后相邻组件不应重叠");
-            let after=layout.x.clone();layout.hide_clock();assert_eq!(layout.x,after);
-        }}
-        let mut empty=Layout::new(false,0,false,false,false,false,false);
-        empty.hide_clock();assert_eq!(empty.width,96.0);assert!(empty.x.iter().all(Option::is_none));
-    }
-    #[test]
-    fn weather_can_be_reordered_independently_of_the_clock(){
-        let order=[WEATHER,FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY];
-        assert!(valid_order(&order),"天气应有独立的排列位置");
-        for quotas in 0..=5 {for enabled in [false,true] {
-            let mut layout=Layout::new(true,quotas,true,true,false,true,enabled);
-            layout.reorder(&order);layout.widen(WEATHER,18.0);layout.widen_clock(40.0);
-            let positions:Vec<_>=order.iter().filter_map(|slot|layout.x[*slot]).collect();
-            assert!(positions.windows(2).all(|pair|pair[0]<pair[1]));
-            let boxes:Vec<_>=order.iter().flat_map(|&slot|if slot==QUOTA{layout.quota_slots().collect()}else{vec![slot]}).filter_map(|slot|layout.x[slot].map(|x|(x-layout.widths[slot]/2.0,x+layout.widths[slot]/2.0))).collect();
-            assert!(boxes.windows(2).all(|pair|pair[1].0-pair[0].1>=6.9),"排序和加宽后组件不能重叠");
-        }}
-    }
     #[test] fn deepseek_balance_follows_more_and_never_overlaps(){
-        for order in [DEFAULT_ORDER,[FOCUS,MUSIC,QUOTA,CLOCK,WEATHER,PET,BATTERY]] {for quotas in 1..=6 {for battery in [false,true]{
+        for order in [DEFAULT_ORDER,[FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY]] {for quotas in 1..=6 {for battery in [false,true]{
             let mut layout=Layout::new(battery,quotas,true,true,false,true,false);layout.reorder(&order);layout.balance_tail(quotas-1,76.0);layout.widen_clock(40.0);
             let mut boxes:Vec<_>=layout.x.iter().enumerate().filter_map(|(i,x)|x.map(|x|{let width=layout.widths[i];(x-width/2.0,x+width/2.0)})).collect();boxes.sort_by(|a,b|a.0.total_cmp(&b.0));
             assert!(boxes.windows(2).all(|p|p[1].0-p[0].1>=6.9));assert!(boxes.last().unwrap().1<=layout.width/2.0-15.9);
@@ -187,7 +184,7 @@ mod tests {
     }
     #[test]
     fn clock_12h_keeps_components_separate_in_custom_orders(){
-        for order in [DEFAULT_ORDER,[FOCUS,MUSIC,QUOTA,CLOCK,WEATHER,PET,BATTERY]] {
+        for order in [DEFAULT_ORDER,[FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY]] {
             for quotas in 0..=5 {
                 let mut layout=Layout::new(true,quotas,true,true,false,true,false);
                 layout.reorder(&order);layout.widen_clock(40.0);
@@ -206,7 +203,7 @@ mod tests {
     fn custom_order_preserves_groups_and_hidden_positions(){
         assert!(!valid_order(&[0,0,2,6,7,9]));
         assert!(!valid_order(&[0,1,2]));
-        let order=[FOCUS,MUSIC,QUOTA,CLOCK,WEATHER,PET,BATTERY];
+        let order=[FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY];
         for battery in [false,true]{for count in 0..=5 {
             let mut layout=Layout::new(battery,count,true,true,false,true,false);
             let width=layout.width;layout.reorder(&order);
@@ -233,14 +230,14 @@ mod tests {
         }}}}}}}
     }
     #[test]
-    fn weather_defaults_after_the_clock_and_preserves_custom_spacing(){
-        for order in [DEFAULT_ORDER,[FOCUS,MUSIC,QUOTA,CLOCK,WEATHER,PET,BATTERY],[QUOTA,MUSIC,CLOCK,WEATHER,PET,FOCUS,BATTERY]] {
+    fn weather_sits_after_the_clock_and_follows_it_in_custom_orders(){
+        for order in [DEFAULT_ORDER,[FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY],[QUOTA,MUSIC,CLOCK,PET,FOCUS,BATTERY]] {
             for quotas in 0..=3 {for battery in [false,true] {
                 let mut layout=Layout::new(battery,quotas,true,true,false,true,true);
                 layout.reorder(&order);
                 let (clock,weather)=match (layout.x[CLOCK],layout.x[WEATHER]) {(Some(c),Some(w))=>(c,w),_=>panic!("时钟与天气都应就位：{layout:?}")};
                 assert!(weather>clock+22.0+6.9,"天气应紧跟时钟右侧：时钟 {clock}，天气 {weather}");
-                // 相邻排列的时钟与天气保持标准组件间距。
+                // reorder 后时钟与天气的相对距离保持成组前的间隔。
                 assert!((weather-clock-(38.0+44.0)/2.0-12.0).abs()<0.01);
                 let mut boxes:Vec<_>=layout.x.iter().enumerate().filter_map(|(i,x)|x.map(|x|(x-layout.widths[i]/2.0,x+layout.widths[i]/2.0))).collect();
                 boxes.sort_by(|a,b|a.0.total_cmp(&b.0));
@@ -271,6 +268,21 @@ mod tests {
         let width=empty.width;empty.widen(WEATHER,20.0);
         assert_eq!(empty.width,width);
     }
+    #[test]
+    fn widening_the_battery_slot_keeps_neighbours_apart(){
+        // 本机与手机电量同时显示时，电池槽加宽 20px，其余组件必须自动让开。
+        let one=Layout::new(true,2,true,false,false,true,false);
+        let mut two=Layout::new(true,2,true,false,false,true,false);
+        two.widen_battery(20.0);
+        assert!((two.width-one.width-20.0).abs()<0.01,"整体宽度应增加 20");
+        assert!((two.widths[BATTERY]-one.widths[BATTERY]-20.0).abs()<0.01);
+        let mut boxes:Vec<_>=two.x.iter().enumerate().filter_map(|(i,x)|x.map(|x|(x-two.widths[i]/2.0,x+two.widths[i]/2.0))).collect();
+        boxes.sort_by(|a,b|a.0.total_cmp(&b.0));
+        assert!(boxes.windows(2).all(|p|p[1].0-p[0].1>=6.9),"加宽后不能和邻居挤在一起");
+        assert!(boxes.first().unwrap().0>=-two.width/2.0+15.9);
+        assert!(boxes.last().unwrap().1<=two.width/2.0-15.9);
+    }
+
     #[test]
     fn replacing_battery_moves_continuously_and_supports_an_instant_state(){
         let before=Layout::new(true,1,true,false,false,true,false);let after=Layout::new(false,1,true,false,false,true,false);

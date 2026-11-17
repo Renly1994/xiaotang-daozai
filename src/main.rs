@@ -17,9 +17,6 @@ struct Shell {
     t0: Instant,
     #[cfg(windows)]
     frame_at: Instant,
-    /// 兼容渲染上一次请求读回画面的时刻（无输入的持续动画按约 30 帧/秒读回）。
-    #[cfg(windows)]
-    readback_at: Option<Instant>,
     media: smtc::Shared,
     seek_rx: Option<(&'static str,std::sync::mpsc::Receiver<bool>)>,
     media_control:Option<smtc::ControlWorker>,
@@ -33,11 +30,8 @@ struct Shell {
     placed: bool,
     placement_at: PollClock,
     placement_scale: f32,
-    /// 上次定位时的目标屏幕、水平位置与 OLED 像素偏移；变化后立即重新定位，不等下一次轮询。
-    placement_key: (String, i32, daozai::model::Dock, bool, (i32, i32)),
-    /// OLED 像素偏移当前实际使用的位移；展开、拖拽、隐藏时保持不变。
-    #[cfg(windows)]
-    oled_shift: (i32, i32),
+    /// 上次定位时的目标屏幕与水平位置；变化后立即重新定位，不等下一次轮询。
+    placement_key: (String, i32, daozai::model::Dock, bool),
     win_x: f32,
     sys: (Option<u8>, bool, PollClock),
     #[cfg(windows)]
@@ -109,19 +103,6 @@ impl Shell {
     }
 
     #[cfg(windows)]
-    fn confirm_messenger_open(&mut self,unread:app::Unread)->bool{
-        let foreground=self.messengers.foreground(&[unread.source]);
-        if !self.app.confirm_messenger_open(unread,foreground){
-            let seen=foreground.map(|(source,pid)|format!("{} 账号 {pid}",source.name())).unwrap_or_else(messenger::windows::describe_foreground);
-            messenger::windows::trace(format!("唤起 {} 账号 {}：未到前台（前台是 {seen}）",unread.source.name(),unread.pid));
-            return false;
-        }
-        messenger::windows::trace(format!("唤起 {} 账号 {}：已在前台",unread.source.name(),unread.pid));
-        self.messengers.viewed_client(unread.source,unread.pid);
-        true
-    }
-
-    #[cfg(windows)]
     fn clear_exited_messengers(&mut self,ctx:&egui::Context){
         for unread in self.messengers.exited(&self.app.pending_messengers){
             messenger::windows::trace(format!("清除已退出的{}提醒 账号 {}",unread.source.name(),unread.pid));
@@ -140,12 +121,15 @@ impl Shell {
         diagnostics::startup("加载本地配置");
         let mut app = App::new(&cc.egui_ctx, Options::default());
         app.render_compat_running=running_compat;
+        app.wgpu_format=cc.wgpu_render_state.as_ref().map(|state|state.target_format);
         #[cfg(feature="record")] let quota_demo=std::env::var("DAOZAI_QUOTA_DEMO").is_ok();
         #[cfg(not(feature="record"))] let quota_demo=false;
         diagnostics::startup("初始化额度配置");
         if !quota_demo{app.quota_initialize();}
         diagnostics::startup("启动剪贴板记录");
         if std::env::args().any(|arg|arg=="--settings"){app.open_settings();}
+        // 直达 MAA 设置分组（SETTINGS_GROUPS 里 "MAA" 是第 9 项）。
+        if std::env::args().any(|arg|arg=="--maa"){app.open_settings_group(8);}
         if std::env::args().any(|arg|arg=="--calendar"){app.open_calendar(None);}
         #[cfg(feature="record")]
         if std::env::var("DAOZAI_MAIL_DEMO").is_ok(){app.mail_demo();}
@@ -180,8 +164,6 @@ impl Shell {
             t0: Instant::now(),
             #[cfg(windows)]
             frame_at: Instant::now(),
-            #[cfg(windows)]
-            readback_at: None,
             media,
             seek_rx: None,
             media_control:None,
@@ -194,9 +176,7 @@ impl Shell {
             placed: false,
             placement_at: PollClock::default(),
             placement_scale: 0.0,
-            placement_key: (String::new(), 0, daozai::model::Dock::Top, true, (0, 0)),
-            #[cfg(windows)]
-            oled_shift: (0, 0),
+            placement_key: (String::new(), 0, daozai::model::Dock::Top, true),
             win_x: 0.0,
             sys: (None, false, PollClock::default()),
             #[cfg(windows)]
@@ -292,7 +272,7 @@ impl Shell {
         #[cfg(windows)]
         let screen=daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id).map(|d|{
             // 与岛体摆放用同一范围：避开顶栏后，拖动换边和浮层都以顶栏下沿为顶边。
-            let b=daozai::display_layout::placement_bounds(d,self.app.settings.avoids_top_bar());
+            let b=daozai::display_layout::placement_bounds(d,self.app.settings.avoid_top_bar);
             egui::Rect::from_min_max(Pos2::new(b.left as f32/ppp-origin.x,b.top as f32/ppp-origin.y),Pos2::new(b.right as f32/ppp-origin.x,b.bottom as f32/ppp-origin.y))
         });
         #[cfg(not(windows))]
@@ -318,10 +298,6 @@ impl Shell {
                 #[cfg(windows)] {daozai::system::screen_locked()}
                 #[cfg(not(windows))] {false}
             },
-            fullscreen_hidden: {
-                #[cfg(windows)] {self.hidden}
-                #[cfg(not(windows))] {false}
-            },
             browser_at_top: {
                 #[cfg(windows)] {if self.app.settings.browser_minimal {self.native.as_mut().and_then(|native|native.browser_at_top(&self.app.settings))}else{None}}
                 #[cfg(not(windows))] {None}
@@ -331,6 +307,7 @@ impl Shell {
             bt: self.bt.clone(),
             bt_ready: self.bt_ready,
             screen,
+            window_origin:[origin.x,origin.y],
             backdrop,
             glass_blur,
             opaque_surface: {
@@ -347,11 +324,16 @@ impl eframe::App for Shell {
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [0.0; 4]
+        // 兼容渲染的窗口是不透明的：首帧清成黑色会「黑闪」一下。
+        // 液态玻璃皮肤下清成接近浅玻璃的灰白，等 GPU 内容覆盖，观感平滑很多。
+        if self.app.settings.skin == daozai::model::Skin::Liquid && self.app.wgpu_format.is_some() {
+            [0.93, 0.93, 0.94, 1.0]
+        } else {
+            [0.0; 4]
+        }
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let frame_start=Instant::now();
         if self.resource_at.ready(Duration::from_secs(30)){
             let (count,bytes)={let textures=ctx.tex_manager();let textures=textures.read();(textures.num_allocated(),textures.allocated().map(|(_,info)|info.bytes_used()).sum())};
             daozai::resources::TEXTURES.store(count,std::sync::atomic::Ordering::Relaxed);
@@ -388,16 +370,14 @@ impl eframe::App for Shell {
         }
         #[cfg(windows)]
         let offset=self.app.placement_offset();
-        #[cfg(windows)]
-        let shift=self.oled_shift;
         // 拖动时位置不取整，按万分之一比例比较，窗口逐帧平滑跟随。
         #[cfg(windows)]
-        let placement_key=(self.app.settings.display_id.clone(),(offset*10000.0).round() as i32,self.app.settings.dock,self.app.settings.avoids_top_bar(),shift);
+        let placement_key=(self.app.settings.display_id.clone(),(offset*10000.0).round() as i32,self.app.settings.dock,self.app.settings.avoid_top_bar);
         #[cfg(windows)]
         if !self.placed || self.placement_scale!=ctx.pixels_per_point() || self.placement_key!=placement_key || self.placement_at.ready(Duration::from_secs(1)) {
             // 只有位置变化时沿用已知屏幕，避免拖动中每帧枚举显示器。
             let offset_only=self.placed && self.placement_scale==ctx.pixels_per_point() && !self.placement_at.ready(Duration::from_secs(1))
-                && (&self.placement_key.0,self.placement_key.2,self.placement_key.3,self.placement_key.4)==(&placement_key.0,placement_key.2,placement_key.3,placement_key.4);
+                && (&self.placement_key.0,self.placement_key.2,self.placement_key.3)==(&placement_key.0,placement_key.2,placement_key.3);
             if !offset_only {
                 self.placement_at=PollClock::now();
                 self.app.displays=daozai::display_layout::connected();
@@ -405,7 +385,7 @@ impl eframe::App for Shell {
             self.placement_scale=ctx.pixels_per_point();
             self.placement_key=placement_key;
             let display=daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id);
-            if display.is_some_and(|d|self.native.as_ref().is_some_and(|w|w.place_on_display(self.placement_scale,daozai::display_layout::placement_bounds(d,self.app.settings.avoids_top_bar()),offset,self.app.settings.dock,shift))) {
+            if display.is_some_and(|d|self.native.as_ref().is_some_and(|w|w.place_on_display(self.placement_scale,daozai::display_layout::placement_bounds(d,self.app.settings.avoid_top_bar),offset,self.app.settings.dock))) {
                 if !self.placed {diagnostics::startup("目标屏幕物理坐标定位完成，已请求显示");}
                 self.placed=true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -508,13 +488,7 @@ impl eframe::App for Shell {
             if let Some((unread,rx))=&self.tray_opening {
                 let unread=*unread;
                 match rx.try_recv(){
-                    Ok(Ok(()))=>{
-                        self.tray_opening=None;
-                        if !self.confirm_messenger_open(unread){
-                            self.opening_messenger=Some((unread,Instant::now()));
-                            ctx.request_repaint_after(Duration::from_secs(4));
-                        }
-                    }
+                    Ok(Ok(()))=>{self.tray_opening=None;self.opening_messenger=Some((unread,Instant::now()));ctx.request_repaint_after(Duration::from_secs(4));}
                     Ok(Err(error))=>{
                         self.tray_opening=None;
                         if error==OpenError::Exited{self.app.discard_unread(unread);}
@@ -522,7 +496,6 @@ impl eframe::App for Shell {
                         self.app.messenger_unavailable(error.message(unread.source));
                     }
                     Err(std::sync::mpsc::TryRecvError::Disconnected)=>{
-                        messenger::windows::trace(format!("唤起 {} 账号 {}：唤起线程异常结束，未返回结果",unread.source.name(),unread.pid));
                         self.tray_opening=None;self.app.messenger_unavailable(format!("{} 暂时无法响应，请重试",unread.source.name()));
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty)=>{}
@@ -532,8 +505,9 @@ impl eframe::App for Shell {
                 if !self.app.pending_messengers.contains(&unread){self.opening_messenger=None;}
                 else if started.elapsed()>=Duration::from_secs(4){
                     self.opening_messenger=None;
-                    if !self.confirm_messenger_open(unread){
-                        self.app.messenger_unavailable(format!("{}尚未切到前台，可点图标重试",unread.source.name()));
+                    match self.messengers.foreground(&[unread.source]){
+                        Some((source,pid)) if unread.pid==0||unread.pid==pid=>{self.messengers.viewed_client(source,pid);self.app.viewed_client(source,pid);},
+                        _=>self.app.messenger_unavailable(format!("{}尚未切到前台，可点图标重试",unread.source.name())),
                     }
                 }
             }
@@ -598,55 +572,12 @@ impl eframe::App for Shell {
         let Some(out) = out else { return };
 
         #[cfg(windows)]
-        {
-            // 先处理本帧输入和动画，再决定是否移动，避免悬停或按下的首帧仍使用旧状态。
-            let hovering=env.cursor.is_some_and(|p|out.hit.contains(p)||out.notice_hit.is_some_and(|r|r.contains(p)));
-            let shift=if !self.app.settings.oled_shift {(0,0)}
-                else if !self.hidden && !hovering && self.app.oled_shift_idle(ctx) {
-                    ctx.request_repaint_after(daozai::oled_shift::until_next_step(self.t0.elapsed()));
-                    let target=daozai::oled_shift::shift(true,self.app.settings.dock,self.t0.elapsed());
-                    daozai::oled_shift::toward(self.oled_shift,target)
-                } else {self.oled_shift};
-            if shift!=self.oled_shift {
-                self.oled_shift=shift;
-                let display=daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id);
-                if display.is_some_and(|d|self.native.as_ref().is_some_and(|w|w.place_on_display(ctx.pixels_per_point(),daozai::display_layout::placement_bounds(d,self.app.settings.avoids_top_bar()),self.app.placement_offset(),self.app.settings.dock,shift))) {
-                    self.placement_key.4=shift;
-                }
-                ctx.request_repaint();
-            }
-        }
-
-        #[cfg(windows)]
         if let Some(native) = &mut self.native {
-            // 兼容渲染：读回的画面交给分层窗口，边缘保留抗锯齿。画面变化（或有其他输入）时才请求下一次读回，
-            // 读回完成本身触发的那一帧若画面没变就停下，静止时不会一直空转。
-            if native.wants_frames() {
-                let (shot,other_input)=ctx.input(|i|(
-                    i.events.iter().rev().find_map(|e|match e{egui::Event::Screenshot{image,..}=>Some(image.clone()),_=>None}),
-                    i.events.iter().any(|e|!matches!(e,egui::Event::Screenshot{..})),
-                ));
-                let changed=shot.as_ref().is_some_and(|image|native.present_frame(image.size,image.as_raw()));
-                if shot.is_none() || changed || other_input {
-                    // 拖动、悬停等有输入时满帧跟手；歌词滚动这类自己在动的画面约 30 帧/秒读回，
-                    // 未到间隔就预约一次重绘，到时补上读回，动画停下时的最后一帧不会漏掉。
-                    let now=Instant::now();
-                    match daozai::layered::readback_delay(self.readback_at,now,other_input) {
-                        None=>{self.readback_at=Some(now);ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));}
-                        Some(wait)=>ctx.request_repaint_after(wait),
-                    }
-                }
-            }
             let r = |r: egui::Rect| (r.left(), r.top(), r.width(), r.height());
             // 保留主窗口的事件循环，避免全屏隐藏后设置窗口无法关闭或重新打开。
             let region=if self.hidden {(0.0,0.0,0.0,0.0)} else {r(out.region)};
             let hit=if self.hidden {(0.0,0.0,0.0,0.0)} else {r(out.hit)};
             native.update(region, hit, if self.hidden{None}else{out.notice_hit.map(r)},if self.hidden{None}else{out.file_drop_zone.map(r)},if self.hidden{None}else{out.glass.as_deref()},ctx.pixels_per_point(), out.editing, !self.hidden && out.expanded);
-            if !self.hidden && self.app.settings.avoids_top_bar() && self.app.settings.top_bar_on_top && !self.app.settings.dock.is_side() {
-                if let Some(display)=daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id) {
-                    native.keep_above_top_bar(display.bounds);
-                }
-            }
         }
         for cmd in out.cmds {
             match cmd {
@@ -675,23 +606,13 @@ impl eframe::App for Shell {
                         let was_pending=self.app.pending_messengers.contains(&unread);
                         self.clear_exited_messengers(ctx);
                         if !self.app.pending_messengers.contains(&unread){
-                            if was_pending{
-                                messenger::windows::trace(format!("唤起 {} 账号 {}：未开始，账号进程已退出",unread.source.name(),unread.pid));
-                                self.app.messenger_unavailable(OpenError::Exited.message(unread.source));
-                            }
+                            if was_pending{self.app.messenger_unavailable(OpenError::Exited.message(unread.source));}
                             continue;
                         }
-                        if self.tray_opening.is_some(){
-                            messenger::windows::trace(format!("唤起 {} 账号 {}：未开始，上一次唤起还没结束",unread.source.name(),unread.pid));
-                            self.app.messenger_unavailable(OpenError::Busy.message(unread.source));ctx.request_repaint();continue;
-                        }
+                        if self.tray_opening.is_some(){self.app.messenger_unavailable(OpenError::Busy.message(unread.source));ctx.request_repaint();continue;}
                         match self.messengers.request(unread,&self.app.settings).start(ctx.clone()){
                             Ok(rx)=>self.tray_opening=Some((unread,rx)),
-                            Err(error)=>{
-                                messenger::windows::trace(format!("唤起 {} 账号 {}：未开始 {error:?}",unread.source.name(),unread.pid));
-                                if error==OpenError::Unidentified{self.app.reveal_messenger_notice(unread);}
-                                self.app.messenger_unavailable(error.message(unread.source));ctx.request_repaint();
-                            }
+                            Err(error)=>{self.app.messenger_unavailable(error.message(unread.source));ctx.request_repaint();}
                         }
                     }
                 }
@@ -733,6 +654,20 @@ impl eframe::App for Shell {
                 Cmd::Reveal(p)=>{let _=daozai::child_process::spawn(std::process::Command::new("explorer.exe").arg(format!("/select,{}",p.display())));},
                 Cmd::QuotaChooseFile=>{
                     #[cfg(windows)] match daozai::system::pick_files_for("选择 AI 账号的登录 JSON 文件",false){Ok(files)=>if let Some(path)=files.into_iter().next(){self.app.quota_set_source(path);},Err(_)=>self.app.say("无法选择登录文件")}
+                },
+                Cmd::PickMaaExe=>{
+                    #[cfg(windows)] match daozai::system::pick_exe("选择 MAA 程序（MAA.exe）"){
+                        Ok(Some(path))=>self.app.set_maa_exe(path.display().to_string()),
+                        Ok(None)=>{},
+                        Err(e)=>self.app.say(format!("无法选择程序：{}",e.code())),
+                    }
+                },
+                Cmd::PickMaaLogDir=>{
+                    #[cfg(windows)] match daozai::system::pick_folder("选择 MAA 日志目录（一般是 MAA 目录下的 debug）"){
+                        Ok(Some(path))=>self.app.set_maa_log_dir(path.display().to_string()),
+                        Ok(None)=>{},
+                        Err(e)=>self.app.say(format!("无法选择文件夹：{}",e.code())),
+                    }
                 },
                 Cmd::QuotaRefresh=>{
                     if self.quota_at.ready(Duration::from_secs(15)) {
@@ -792,13 +727,6 @@ impl eframe::App for Shell {
         #[cfg(windows)] let repaint_after=if self.hidden{Duration::from_secs(1)}else{out.repaint_after};
         #[cfg(not(windows))] let repaint_after=out.repaint_after;
         schedule_repaint(ctx,repaint_after);
-        // 只记慢帧：卡顿反馈时能直接看出是渲染慢还是输入被吞（页面/展开状态一并记下）。
-        let elapsed=frame_start.elapsed();
-        if elapsed>=Duration::from_millis(60) {
-            let (page,open)=self.app.debug_state();
-            daozai::resources::append_log(&daozai::model::config_dir().join("diagnostics"),"frames",
-                &format!("帧 {:.0} ms｜页面 {}｜展开 {}",elapsed.as_secs_f64()*1000.0,page,open));
-        }
     }
 }
 
@@ -1018,15 +946,9 @@ mod open_path_tests {
 }
 
 fn main() -> std::process::ExitCode {
+    // 浏览器扩展桥宿主已拆成独立二进制 daozai-bridge.exe（见 src/bin/daozai-bridge），
+    // 不再复用本 exe，这里直接进入主程序。
     diagnostics::install();
-    // 收集诊断：在单实例检查、创建窗口和初始化显卡之前处理，岛仔启动即崩溃、卡死时也能用。
-    #[cfg(windows)]
-    if daozai::diagnostics_tool::requested(std::env::args()) {
-        return match daozai::diagnostics_tool::run(&daozai::model::config_dir()) {
-            Ok(_) => std::process::ExitCode::SUCCESS,
-            Err(error) => {diagnostics::report("诊断收集未完成。", &error); std::process::ExitCode::FAILURE}
-        };
-    }
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
@@ -1060,6 +982,58 @@ fn run() -> eframe::Result<()> {
         .with_taskbar(false)
         .with_always_on_top()
         .with_visible(false);
-    let opts = eframe::NativeOptions { viewport, vsync: !cfg!(windows), ..Default::default() };
+    let mut opts = eframe::NativeOptions { viewport, vsync: !cfg!(windows), ..Default::default() };
+    // 液态玻璃可选「优先独立显卡」。显卡是启动期决定的（wgpu 适配器只选一次），
+    // 所以在建窗前独立读一次设置；非液态皮肤、或用户关掉这项时完全不动 wgpu 的默认策略。
+    //
+    // 为什么要这项：egui-wgpu 的默认偏好虽是 HighPerformance，但混合显卡机器上仍可能
+    // 落到核显。核显没有独立显存，玻璃的纹理/帧缓冲会从系统内存分配 —— 实测同一构建包
+    // 核显 548MB、独显 274MB（工作集）。用 is_surface_supported 过滤，保证选中的卡
+    // 一定能呈现到本窗口，不会黑屏；另把虚拟/远程显示适配器垫底。
+    let boot = daozai::model::Settings::load();
+    if boot.skin == daozai::model::Skin::Liquid && boot.liquid_prefer_dgpu {
+        opts.wgpu_options.wgpu_setup = eframe::egui_wgpu::WgpuSetup::CreateNew(
+            eframe::egui_wgpu::WgpuSetupCreateNew {
+                native_adapter_selector: Some(std::sync::Arc::new(
+                    |adapters: &[eframe::wgpu::Adapter],
+                     surface: Option<&eframe::wgpu::Surface<'_>>|
+                     -> Result<eframe::wgpu::Adapter, String> {
+                        let score = |a: &eframe::wgpu::Adapter| -> i32 {
+                            let info = a.get_info();
+                            let name = info.name.to_lowercase();
+                            // 虚拟/远程/软件渲染一律垫底：它们比核显更慢、更占内存。
+                            if name.contains("virtual")
+                                || name.contains("display adapter")
+                                || name.contains("basic render")
+                                || name.contains("remote")
+                            {
+                                return -100;
+                            }
+                            match info.device_type {
+                                eframe::wgpu::DeviceType::DiscreteGpu => 100,
+                                eframe::wgpu::DeviceType::IntegratedGpu => 50,
+                                eframe::wgpu::DeviceType::VirtualGpu => 10,
+                                eframe::wgpu::DeviceType::Cpu => 0,
+                                _ => 20,
+                            }
+                        };
+                        let mut best: Option<&eframe::wgpu::Adapter> = None;
+                        for a in adapters {
+                            if let Some(s) = surface {
+                                if !a.is_surface_supported(s) {
+                                    continue;
+                                }
+                            }
+                            if best.map_or(true, |b| score(a) > score(b)) {
+                                best = Some(a);
+                            }
+                        }
+                        best.cloned().ok_or_else(|| "没有可用的 GPU 适配器".to_string())
+                    },
+                )),
+                ..Default::default()
+            },
+        );
+    }
     graphics::run(opts,|opts|eframe::run_native("岛仔", opts, Box::new(|cc| Ok(Box::new(Shell::new(cc))))))
 }

@@ -444,7 +444,6 @@ fn main() {
             cursor: Some(cursor),
             idle_seconds:None,
             screen_locked:false,
-            fullscreen_hidden:false,
             browser_at_top:None,
             media: media.np.clone(),
             volume: Some((62, false)),

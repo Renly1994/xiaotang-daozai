@@ -6,27 +6,6 @@ fn enable(app:&mut App){
     app.settings.wecom_notifications=true;app.settings.feishu_notifications=true;app.settings.dingtalk_notifications=true;
 }
 #[test]
-fn qq_open_regression_foreground_switch_keeps_unrelated_reminders(){
-    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-    let mut h=H::new();
-    h.app.settings.read_notifications=true;
-    let [a,b]=[100,200].map(|pid|Unread{source:Messenger::Qq,pid,window:pid as isize});
-    let unknown=Unread::of(Messenger::Qq);
-    for item in [a,b,unknown]{
-        h.app.receive_notification_from("QQ".into(),"QQ".into(),"群消息".into(),Some(item));
-    }
-    assert_eq!(h.app.pending_messengers,[a,b,unknown]);
-    assert!(!h.app.confirm_messenger_open(a,None));
-    assert!(!h.app.confirm_messenger_open(a,Some((Messenger::Qq,b.pid))));
-    assert!(!h.app.confirm_messenger_open(unknown,Some((Messenger::Qq,b.pid))));
-    assert!(!h.app.confirm_messenger_open(a,Some((Messenger::Wechat,a.pid))));
-    assert_eq!(h.app.pending_messengers,[a,b,unknown]);
-    assert!(h.app.confirm_messenger_open(a,Some((Messenger::Qq,a.pid))));
-    assert_eq!(h.app.pending_messengers,[b,unknown]);
-    h.app.discard_unread(unknown);
-    assert_eq!(h.app.pending_messengers,[b]);
-}
-#[test]
 fn office_settings_are_independent_default_off_and_survive_restart(){
     let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     for client in Messenger::OFFICE{assert!(!client.enabled(&h.app.settings));}

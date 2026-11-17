@@ -52,13 +52,6 @@ fn create_backdrop_window() -> windows::core::Result<HWND> {
     }
 }
 
-fn enable_host_backdrop(hwnd: HWND) -> windows::core::Result<()> {
-    unsafe {
-        let on = BOOL::from(true);
-        DwmSetWindowAttribute(hwnd, DWMWA_USE_HOSTBACKDROPBRUSH, (&on as *const BOOL).cast(), std::mem::size_of::<BOOL>() as u32)
-    }
-}
-
 /// 把底板窗口裁成模糊块的并集。底板和岛仔画布一样大，而 `HTTRANSPARENT`
 /// 只把点击让给同一线程的窗口：不裁剪时，画布范围内（含岛右侧和下方大片空白）
 /// 其他程序的标题栏按钮等都会点不动，直到退出岛仔。
@@ -118,12 +111,6 @@ pub struct Backdrop {
 impl Backdrop {
     pub fn new() -> windows::core::Result<Self> {
         let hwnd = create_backdrop_window()?;
-        // Win10 不支持这个 Win32 宿主背景属性。失败时不能继续绘制纯色画刷，
-        // 交给上层使用半透明底色，并释放尚未显示的底板窗口。
-        if let Err(error) = enable_host_backdrop(hwnd) {
-            unsafe { let _ = DestroyWindow(hwnd); }
-            return Err(error);
-        }
         unsafe {
             // 主线程已由窗口框架初始化为单线程套间时返回 S_FALSE，忽略即可。
             let _ = RoInitialize(RO_INIT_SINGLETHREADED);
@@ -144,6 +131,11 @@ impl Backdrop {
         target.SetRoot(&root)?;
         let children = root.Children()?;
         let brush: CompositionBrush = compositor.CreateHostBackdropBrush()?.cast()?;
+        unsafe {
+            // Windows 11 需要显式允许宿主背景画刷；Windows 10 不认识该属性，忽略错误。
+            let on = BOOL::from(true);
+            let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_HOSTBACKDROPBRUSH, (&on as *const BOOL).cast(), std::mem::size_of::<BOOL>() as u32);
+        }
         root.SetIsVisible(false)?;
         Ok(Self { hwnd, placed: (RECT::default(), false), _queue: queue, compositor, _target: target, root, children, brush, pool: Vec::new(), shown: Vec::new(), clip: None, visible: false })
     }
@@ -219,25 +211,6 @@ impl Drop for Backdrop {
 mod tests {
     use super::*;
     use windows::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject, GetWindowRgn, PtInRegion};
-
-    #[test]
-    fn regression_rejected_host_backdrop_is_not_reported_as_working_blur() {
-        assert!(enable_host_backdrop(HWND::default()).is_err(),"DWM 拒绝宿主背景画刷时必须启用透明回退，不能把纯色底板当成模糊成功");
-    }
-
-    #[test]
-    fn backdrop_initialization_respects_system_support_and_starts_hidden() {
-        let hwnd=create_backdrop_window().unwrap();
-        let supported=enable_host_backdrop(hwnd).is_ok();
-        unsafe { let _=DestroyWindow(hwnd); }
-        match Backdrop::new() {
-            Ok(backdrop)=>{
-                assert!(supported);
-                assert!(!unsafe{IsWindowVisible(backdrop.hwnd)}.as_bool(),"模糊块准备好之前不能显示矩形底板");
-            }
-            Err(error)=>assert!(!supported,"支持宿主背景画刷时不应初始化失败：{error}"),
-        }
-    }
 
     #[test]
     fn backdrop_only_covers_the_blur_pieces_so_other_apps_stay_clickable() {

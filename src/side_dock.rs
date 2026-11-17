@@ -21,14 +21,14 @@ pub const SIDE_HALF_EXTENT: f32 = 150.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum SideItem {
-    Clock, Weather, Battery, Music, Focus, Bell,
+    Clock, Weather, Battery, PhoneBattery, Music, Focus, Bell,
     /// AI 额度：账号下标（None 为「+N」）与高度。
     Quota(usize, f32),
 }
 
 impl SideItem {
-    fn height(self, clock_seconds: bool) -> f32 {
-        match self { Self::Clock => if clock_seconds {46.0}else{32.0}, Self::Weather => 40.0, Self::Battery => 20.0, Self::Music => 18.0, Self::Focus => 22.0, Self::Bell => 22.0, Self::Quota(_, h) => h }
+    fn height(self) -> f32 {
+        match self { Self::Clock => 32.0, Self::Weather => 40.0, Self::Battery | Self::PhoneBattery => 20.0, Self::Music => 18.0, Self::Focus => 22.0, Self::Bell => 22.0, Self::Quota(_, h) => h }
     }
 }
 
@@ -38,10 +38,11 @@ impl App {
 
     /// 竖向胶囊里依次显示的内容。
     pub(crate) fn side_items(&self) -> Vec<SideItem> {
-        let mut items = Vec::new();
-        if self.settings.show_clock {items.push(SideItem::Clock);}
+        let mut items = vec![SideItem::Clock];
         if self.weather_pill().is_some() {items.push(SideItem::Weather);}
-        if self.settings.show_battery && self.resident_power.0.is_some() { items.push(SideItem::Battery); }
+        let (pc_ring,phone_ring)=self.battery_rings();
+        if pc_ring.is_some() { items.push(SideItem::Battery); }
+        if phone_ring.is_some() { items.push(SideItem::PhoneBattery); }
         if self.media.is_music() { items.push(SideItem::Music); }
         if self.pomo.running { items.push(SideItem::Focus); }
         items.extend(self.quota_side_items().into_iter().map(|(index, h)| SideItem::Quota(index, h)));
@@ -51,7 +52,7 @@ impl App {
 
     /// 收起时竖向胶囊的长度。
     pub(crate) fn side_bar_len(&self) -> f32 {
-        14.0 + self.side_items().iter().map(|i| i.height(self.settings.clock_seconds)).sum::<f32>()
+        14.0 + self.side_items().iter().map(|i| i.height()).sum::<f32>()
     }
 
     /// 收起态尺寸（屏幕宽 × 高）。极简模式是贴边的一小段竖线。
@@ -115,25 +116,23 @@ impl App {
     /// 竖向胶囊的内容。`c` 的原点是胶囊左上角。
     pub(crate) fn side_bar(&mut self, c: &Card, width: f32, height: f32, env: &Env) {
         let items = self.side_items();
-        let total: f32 = items.iter().map(|i| i.height(self.settings.clock_seconds)).sum();
+        let total: f32 = items.iter().map(|i| i.height()).sum();
         let cx = width / 2.0;
         let fitted=c.scaled(cx,height/2.0,((SIDE_H-24.0)/(total+14.0)).min(1.0));
         let c=&fitted;
         let mut y = (height - total) / 2.0;
         for item in items {
-            let h = item.height(self.settings.clock_seconds);
+            let h = item.height();
             let mid = y + h / 2.0;
             match item {
                 SideItem::Clock => {
-                    let text=self.settings.clock_text(&env.clock);
-                    let (hour, minute) = side_clock(&text);
-                    let top=mid-if self.settings.clock_seconds {8.0}else{1.0};
-                    c.text(cx, top, &hour, 13.5, W::Bold, theme::WHITE, H::Center);
-                    c.text(cx, top + 14.0, &minute, 13.5, W::Bold, theme::WHITE, H::Center);
-                    if self.settings.clock_seconds {c.text(cx,top+28.0,text.rsplit(':').next().unwrap_or("--"),12.0,W::Bold,theme::GRAY,H::Center);}
+                    let (hour, minute) = side_clock(&self.settings.clock_text(&env.clock));
+                    c.text(cx, mid - 1.0, &hour, 13.5, W::Bold, theme::WHITE, H::Center);
+                    c.text(cx, mid + 13.0, &minute, 13.5, W::Bold, theme::WHITE, H::Center);
                 }
                 SideItem::Weather => self.draw_side_weather(c,cx,mid),
-                SideItem::Battery => paint::battery(c, cx, mid, env.battery, env.charging, 0.72),
+                SideItem::Battery => paint::battery(c, cx, mid, self.resident_power.0, self.resident_power.1, 0.72),
+                SideItem::PhoneBattery => paint::battery(c, cx, mid, self.phone_resident.0, self.phone_resident.1, 0.72),
                 SideItem::Music => paint::playback_bars(c, cx, mid, self.t, self.media.playing, theme::WHITE),
                 SideItem::Focus => {
                     let minutes = (self.pomo.remaining / 60.0).ceil().max(0.0) as u32;

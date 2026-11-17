@@ -273,6 +273,29 @@ impl<'a> Card<'a> {
         let p = ctx.animate_bool_with_time(r.id.with("p"), self.live && r.is_pointer_button_down_on(), 0.07);
         (h, p)
     }
+
+    /// 按钮按压弹簧（k=300 ζ=0.5：按下冲过头、松手晃回来）。
+    /// 弹簧状态按 `id` 存在 egui 的临时数据里，跨帧保留速度与位置；非 live
+    /// （截图/录制）时直接吸附到目标，不产生动画。返回当前位移 0..≈1.3。
+    pub fn press_spring(&self, id: egui::Id, down: bool, k: f32, zeta: f32) -> f32 {
+        let ctx = self.ui.ctx();
+        let sid = id.with("glass-press-spring");
+        // `unstable_dt` 是这一帧的真实间隔（`stable_dt` 会做平滑，弹簧会慢半拍）；
+        // 上限 50ms 防止掉帧后弹簧积分爆掉。
+        let dt = self.ui.input(|i| i.unstable_dt.min(0.05));
+        let mut s = ctx.data_mut(|d| {
+            d.get_temp::<crate::anim::Spring>(sid).unwrap_or_else(|| {
+                crate::anim::Spring::new(if down { 1.0 } else { 0.0 }, k, zeta)
+            })
+        });
+        s.tune(k, zeta);
+        s.target = if self.live && down { 1.0 } else { 0.0 };
+        if !self.live { s.snap(s.target); }
+        s.step(dt);
+        let pos = s.pos;
+        ctx.data_mut(|d| d.insert_temp(sid, s));
+        pos
+    }
 }
 
 pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
@@ -374,6 +397,91 @@ mod gradient_tests {
     }
 }
 
+// ======================= 玻璃控件（液态玻璃皮肤） =======================
+//
+// 小控件（30~40 点的按钮、胶囊、进度槽）不走 GPU 透镜：这个尺寸上的折射位移
+// 只有 1~2px，肉眼分辨不出来，白烧一遍纹理采样。这里用「同一套视觉语言」的
+// 矢量近似做出玻璃片：极淡的填充 + 顶部内高光（厚度）+ 细白边 + 底部内暗边。
+//
+// 颜色一律按「深色玻璃上的样子」给（白/黑半透明），浅色皮肤由 skin_paint
+// 统一换色（白→墨、黑→纸），所以这里不需要判断深/浅。
+
+/// 一小片玻璃（胶囊、圆角按钮的底）。
+///
+/// `level`：0 = 静止，1 = 悬停/按下。只影响填充与白边的强度。
+/// 玻璃控件的「材质」标记：从这里开始画的图形自带配色，换肤时不跟着换。
+///
+/// GPU 玻璃的描边在着色器里恒为白线，所以矢量回退版也必须保持白边 ——
+/// 否则翻页过渡（控件走不了 GPU 的那半秒）会从黑边跳回白边。
+fn chrome_mark(c: &Card) -> usize {
+    crate::skin_paint::shape_count(c.ui.ctx(), c.painter.layer_id())
+}
+
+fn chrome_since(c: &Card, from: usize) {
+    crate::skin_paint::tone_since(c.ui.ctx(), c.painter.layer_id(), from,
+                                  crate::skin_paint::keep_glass_chrome);
+}
+
+pub fn glass_chip(c: &Card, x: f32, y: f32, w: f32, h: f32, r: f32, level: f32) {
+    if w < 2.0 || h < 2.0 {
+        return;
+    }
+    let from = chrome_mark(c);
+    let lv = level.clamp(0.0, 1.0);
+    let r = r.min(w.min(h) * 0.5);
+    // 主体：极淡的白。静止时几乎只有一圈边，悬停才「亮起来」。
+    c.fill(x, y, w, h, r, Color32::from_white_alpha((10.0 + 30.0 * lv) as u8));
+    // 顶部内高光：玻璃厚度的来源。整块高度做渐变，越往下越透明，
+    // 这样不会切出一条和圆角对不上的横边。
+    c.vgrad(x, y, w, h, r, Color32::from_white_alpha((22.0 + 24.0 * lv) as u8), Color32::TRANSPARENT);
+    // 底部内暗边：下缘「实」一点，不然整片会飘。
+    if h >= 8.0 {
+        let inset = r * 0.8;
+        c.fill(x + inset, y + h - 1.0, (w - inset * 2.0).max(1.0), 1.0, 0.5, Color32::from_black_alpha(28));
+    }
+    // 白边 1.5px：液态玻璃要细、要亮，粗了就成描边贴纸。
+    c.stroke(x + 0.75, y + 0.75, w - 1.5, h - 1.5, (r - 0.75).max(0.0), 1.5,
+             Color32::from_white_alpha((120.0 + 60.0 * lv) as u8));
+    chrome_since(c, from);
+}
+
+/// 圆形玻璃片：播放控制、齿轮、翻页箭头。
+pub fn glass_disc(c: &Card, cx: f32, cy: f32, r: f32, level: f32) {
+    if r < 2.0 {
+        return;
+    }
+    let from = chrome_mark(c);
+    let lv = level.clamp(0.0, 1.0);
+    c.circle(cx, cy, r, Color32::from_white_alpha((10.0 + 28.0 * lv) as u8));
+    // 上半圈内高光（光源在上方，和 GPU 那边的 line/rim 同一个约定）。
+    c.arc(cx, cy, r - 0.8, PI * 1.12, PI * 1.88, 1.1, Color32::from_white_alpha((26.0 + 30.0 * lv) as u8));
+    c.ring(cx, cy, (r - 0.75).max(0.5), 1.5, Color32::from_white_alpha((110.0 + 60.0 * lv) as u8));
+    chrome_since(c, from);
+}
+
+/// 玻璃凹槽：进度条底槽用（竖向滑槽也能用）。
+/// 黑 46% 的底 + 上缘阴影 + 下缘 1px 反光，读出「凹进去」的玻璃感。
+/// 曾经用在进度条上失败过（浅色皮肤换色把压暗翻成提亮），液态皮肤改成恒 GLASS_DARK
+/// 调色板之后这个问题不存在了，所以现在正式启用。
+pub fn glass_groove(c: &Card, x: f32, y: f32, w: f32, h: f32) {
+    if w < 2.0 || h < 1.5 {
+        return;
+    }
+    let from = chrome_mark(c);
+    let r = h * 0.5;
+    c.fill(x, y, w, h, r, Color32::from_black_alpha(46));
+    if h >= 6.0 {
+        // 上缘阴影（光被槽壁挡掉）
+        let inset = (r * 0.9).min(w * 0.4);
+        c.fill(x + inset, y, (w - inset * 2.0).max(1.0), 1.0, 0.5, Color32::from_black_alpha(56));
+    }
+    // 下缘反光：只有 1px，多一道就脏
+    let inset = (r * 0.9).min(w * 0.4);
+    c.fill(x + inset, y + h - 1.0, (w - inset * 2.0).max(1.0), 1.0, 0.5, Color32::from_white_alpha(26));
+    chrome_since(c, from);
+}
+
+
 /// 胶囊按钮：悬停提亮、按下轻微缩小，返回 (响应, 内容画布)。
 pub fn capsule<'a>(
     c: &Card<'a>,
@@ -393,6 +501,27 @@ pub fn capsule<'a>(
     (r, inner)
 }
 
+/// 液态玻璃皮肤下的胶囊按钮：hit / 悬停 / 按压缩放与 [`capsule`] 完全一致，
+/// 填充换成玻璃层。`level` 是静止亮度（0=只剩一圈边），悬停时按 `hover_boost` 提亮。
+/// 选中态由调用方自己表达（更高 level 或文字色）。
+pub fn glass_capsule<'a>(
+    c: &Card<'a>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    id: &str,
+    level: f32,
+    hover_boost: f32,
+) -> (Response, Card<'a>) {
+    let r = c.hit(x, y, w, h, id);
+    let (ht, pt) = c.hover_t(&r);
+    let k = 1.0 - 0.05 * pt;
+    let inner = c.scaled(x + w / 2.0, y + h / 2.0, k);
+    glass_chip(&inner, x, y, w, h, h / 2.0, (level + ht * hover_boost).clamp(0.0, 1.0));
+    (r, inner)
+}
+
 // ======================= 图标 =======================
 
 pub fn close(c:&Card,cx:f32,cy:f32,r:f32,color:Color32) {
@@ -400,10 +529,16 @@ pub fn close(c:&Card,cx:f32,cy:f32,r:f32,color:Color32) {
     c.seg((cx-r,cy+r),(cx+r,cy-r),1.2,color);
 }
 
-pub fn chevron(c: &Card, x: f32, y: f32, dir: f32, hover: f32, press: f32) {
-    let k = 1.0 - 0.08 * press;
-    let c = c.scaled(x, y, k);
-    c.circle(x, y, 9.0, mix(theme::ARROW_BG, Color32::from_rgb(78, 78, 82), hover));
+/// 翻页箭头。`scale` 由控件弹簧给（入场张开 + 按压回弹），`gpu` 表示这块玻璃
+/// 已经由 GPU 着色器画了 —— 那样这里只画箭头本体，不再叠一片矢量玻璃。
+pub fn chevron(c: &Card, x: f32, y: f32, dir: f32, hover: f32, scale: f32, glass: bool, gpu: bool) {
+    let c = c.scaled(x, y, scale);
+    if glass {
+        // 液态玻璃：整颗换成玻璃片，箭头保持白色（浅色皮肤由换色改成墨色）。
+        if !gpu { glass_disc(&c, x, y, 12.0, 0.18 + hover * 0.82); }
+    } else {
+        c.circle(x, y, 9.0, mix(theme::ARROW_BG, Color32::from_rgb(78, 78, 82), hover));
+    }
     let nudge = dir * 0.8 * hover;
     let (cx, s) = (x + nudge + dir * 0.6, 2.7);
     c.path(&[(cx - dir * s * 0.75, y - s), (cx + dir * s * 0.45, y), (cx - dir * s * 0.75, y + s)], 1.6, Color32::WHITE);
@@ -465,10 +600,18 @@ pub fn play_pause(c: &Card, cx: f32, cy: f32, size: f32, t: f32, color: Color32)
     c.poly(&right, color);
 }
 
-pub fn skip(c: &Card, cx: f32, cy: f32, dir: f32, color: Color32) {
-    for k in [-1.0f32, 1.0] {
-        let x = cx + k * 4.3;
-        c.poly(&[(x - dir * 4.6, cy - 6.0), (x + dir * 4.6, cy), (x - dir * 4.6, cy + 6.0)], color);
+/// 上一首/下一首的双三角。`size` = 图标总高（旧版硬编码 12.0）；玻璃圆盘外圈
+/// 已有描边，内部图标整体调小一档避免拥挤，总宽按 size 等比（旧总宽 18.2）。
+/// 上一首/下一首的双三角。`size` = 图标总高（旧版硬编码 12.0）；玻璃圆盘外圈
+/// 已有描边，内部图标整体调小一档避免拥挤，总宽按 size 等比（size=12 时总宽 18.2）。
+pub fn skip(c: &Card, cx: f32, cy: f32, dir: f32, size: f32, color: Color32) {
+    let k = size / 12.0;
+    let half_gap = 4.3 * k;   // 两个三角的中心间距一半
+    let half_w = 4.6 * k;     // 单个三角半宽
+    let half_h = 6.0 * k;     // 单个三角半高
+    for s in [-1.0f32, 1.0] {
+        let x = cx + s * half_gap;
+        c.poly(&[(x - dir * half_w, cy - half_h), (x + dir * half_w, cy), (x - dir * half_w, cy + half_h)], color);
     }
 }
 
@@ -480,15 +623,18 @@ pub fn playback_bars(c:&Card,cx:f32,cy:f32,time:f64,playing:bool,color:Color32) 
     }
 }
 
-pub fn speaker(c:&Card,cx:f32,cy:f32,muted:bool,color:Color32) {
-    c.fill(cx-7.0,cy-2.8,4.0,5.6,0.8,color);
-    c.poly(&[(cx-4.0,cy-2.8),(cx+0.5,cy-6.0),(cx+0.5,cy+6.0),(cx-4.0,cy+2.8)],color);
+/// `scale` = 相对旧版（喇叭体宽约 20）的缩放；玻璃圆盘外圈已有描边，内部图标
+/// 缩小一档避免拥挤。
+pub fn speaker(c:&Card,cx:f32,cy:f32,muted:bool,scale:f32,color:Color32) {
+    let s=scale;
+    c.fill(cx-7.0*s,cy-2.8*s,4.0*s,5.6*s,0.8*s,color);
+    c.poly(&[(cx-4.0*s,cy-2.8*s),(cx+0.5*s,cy-6.0*s),(cx+0.5*s,cy+6.0*s),(cx-4.0*s,cy+2.8*s)],color);
     if muted {
-        c.seg((cx+4.0,cy-2.7),(cx+9.0,cy+2.7),1.4,color);
-        c.seg((cx+4.0,cy+2.7),(cx+9.0,cy-2.7),1.4,color);
+        c.seg((cx+4.0*s,cy-2.7*s),(cx+9.0*s,cy+2.7*s),1.4*s,color);
+        c.seg((cx+4.0*s,cy+2.7*s),(cx+9.0*s,cy-2.7*s),1.4*s,color);
     } else {
-        c.arc(cx-0.8,cy,5.4,-0.7,0.7,1.4,color);
-        c.arc(cx-0.8,cy,8.5,-0.7,0.7,1.4,alpha(color,0.6));
+        c.arc(cx-0.8*s,cy,5.4*s,-0.7,0.7,1.4*s,color);
+        c.arc(cx-0.8*s,cy,8.5*s,-0.7,0.7,1.4*s,alpha(color,0.6));
     }
 }
 

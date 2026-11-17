@@ -179,25 +179,12 @@ pub(crate) fn native_fingerprint(source:&str)->Option<(std::time::SystemTime,u64
 }
 
 pub(crate) fn read_native(source:&str,track:&str,artist:&str,duration:f64)->Option<Lyrics> {
-    read_native_detail(source,track,artist,duration).ok()
-}
-
-/// 本地缓存读取；未命中时给出原因，供诊断日志使用。
-pub(crate) fn read_native_detail(source:&str,track:&str,artist:&str,duration:f64)->Result<Lyrics,&'static str> {
-    if source.to_ascii_lowercase().contains("kugou") {return kugou_cache::read(track,artist,duration).ok_or("未命中");}
+    if source.to_ascii_lowercase().contains("kugou") {return kugou_cache::read(track,artist,duration);}
     if is_soda(source) {
-        let lyrics=parse_krc(&soda_cache::read_detail(track,artist,duration).map_err(|miss|miss.label())?);
-        return if lyrics.synced {Ok(lyrics)}else{Err("缓存歌词无时间轴")};
+        let lyrics=parse_krc(&soda_cache::read(track,artist,duration)?);
+        return lyrics.synced.then_some(lyrics);
     }
-    Err("不支持本地读取")
-}
-
-/// 后台本地轮询（客户端稍后才写好歌词）的结果单独记一行，命中或放弃时各写一次。
-pub(crate) fn log_native(source:&str,track:&str,artist:&str,outcome:&str,elapsed:std::time::Duration) {
-    if cfg!(test) {return;}
-    let line=format!("{} {source} · {track} - {artist} → 本地轮询:{outcome} 用时{}ms\n",
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),elapsed.as_millis());
-    crate::resources::append_log(&crate::model::config_dir().join("diagnostics"),"lyrics.log",&line);
+    None
 }
 
 /// 返回歌词及是否仍需等待酷狗缓存；等待期间复用已有歌词，不重复访问在线服务。
@@ -291,13 +278,9 @@ pub fn fetch_for_source(source:&str,track:&str,artist:&str,duration:f64,song_id:
         }
     }
     if is_soda(source) {
-        match soda_cache::read_detail(track,artist,duration) {
-            Ok(raw)=>{
-                let lyrics=parse_krc(&raw);
-                if lyrics.synced {trace(||"汽水本地:命中".into());return Ok(lyrics);}
-                trace(||"汽水本地:无时间轴".into());
-            }
-            Err(miss)=>trace(||format!("汽水本地:{}",miss.label())),
+        if let Some(raw)=soda_cache::read(track,artist,duration) {
+            let lyrics=parse_krc(&raw);
+            if lyrics.synced {return Ok(lyrics);}
         }
     }
     fetch(track,artist,duration)
@@ -391,55 +374,9 @@ fn fetch_with_sources(netease:Option<&str>,qq:Option<&str>,lrclib:Option<&str>,t
     fetch_with_sources_detail(netease,qq,lrclib,track,artist,duration).0
 }
 
-/// 电台、DJ、部分网页播放器把「歌名 - 歌手」整个放进标题、歌手栏留空：拆成两半，只拆唯一的一个分隔符。
-pub(crate) fn split_title_artist(title:&str)->Option<(String,String)> {
-    for separator in [" - "," – "," — "] {
-        if title.matches(separator).count()!=1 {continue;}
-        let (left,right)=title.split_once(separator)?;
-        let (left,right)=(left.trim(),right.trim());
-        if !left.is_empty() && !right.is_empty() {return Some((left.to_owned(),right.to_owned()));}
-    }
-    None
-}
-
-/// 去掉开头的节目标注（【电台】、[DJ]）和结尾的版本标注（(DJ版)、（伴奏）、【现场】），只留歌名本体。
-pub(crate) fn bare_title(title:&str)->String {
-    static LEADING:std::sync::OnceLock<regex::Regex>=std::sync::OnceLock::new();
-    static TRAILING:std::sync::OnceLock<regex::Regex>=std::sync::OnceLock::new();
-    let leading=LEADING.get_or_init(||regex::Regex::new(r"^\s*(?:【[^】]*】|\[[^\]]*\])\s*").unwrap());
-    let trailing=TRAILING.get_or_init(||regex::Regex::new(r"\s*(?:\([^()]*\)|（[^（）]*）|\[[^\]]*\]|【[^】]*】)\s*$").unwrap());
-    let mut text=title.trim().to_owned();
-    loop {
-        let next=trailing.replace(&leading.replace(&text,""),"").trim().to_owned();
-        if next==text || next.is_empty() {return text;}
-        text=next;
-    }
-}
-
-/// 在线找词：先按播放器给的歌名、歌手找；落空时再按两种兜底各试一次——
-/// 歌手为空时从标题里拆出歌手（两种顺序），以及去掉节目 / 版本标注（只在有时长时，靠时长校验避免套错版本）。
-/// 有来源断网或限流时不再追加尝试，免得一首歌放大成多倍请求。
-fn fetch_with_sources_detail(netease:Option<&str>,qq:Option<&str>,lrclib:Option<&str>,track:&str,artist:&str,duration:f64)->(Result<Lyrics,FetchError>,bool) {
-    let mut attempts=vec![(track.to_owned(),artist.to_owned())];
-    if artist.trim().is_empty() {
-        if let Some((left,right))=split_title_artist(track) {attempts.push((left.clone(),right.clone()));attempts.push((right,left));}
-    }
-    let bare=bare_title(track);
-    if duration>0.0 && bare!=track.trim() {attempts.push((bare,artist.to_owned()));}
-    let mut best:Option<Result<Lyrics,FetchError>>=None;
-    for (index,(title,singer)) in attempts.into_iter().enumerate() {
-        if index>0 {trace(||format!("兜底:{title} - {}",if singer.is_empty(){"（无歌手）"}else{&singer}));}
-        let (result,failed)=fetch_with_sources_once(netease,qq,lrclib,&title,&singer,duration);
-        if failed || result.as_ref().is_ok_and(|lyrics|lyrics.synced) {return (result,failed);}
-        // 纯文本先留着，继续找同步版本；都没有时用第一份纯文本。
-        if best.as_ref().is_none_or(|kept|kept.is_err() && result.is_ok()) {best=Some(result);}
-    }
-    (best.unwrap_or(Err(FetchError::NotFound)),false)
-}
-
 /// 按顺序尝试，命中同步歌词立即停止；全部只有纯文本时取第一个，网络类错误优先于「未找到」上报以便重试。
 /// 第二个返回值表示是否有来源失败（断网、限流、响应异常），这时结果不能当作「确认没有」缓存。
-fn fetch_with_sources_once(netease:Option<&str>,qq:Option<&str>,lrclib:Option<&str>,track:&str,artist:&str,duration:f64)->(Result<Lyrics,FetchError>,bool) {
+fn fetch_with_sources_detail(netease:Option<&str>,qq:Option<&str>,lrclib:Option<&str>,track:&str,artist:&str,duration:f64)->(Result<Lyrics,FetchError>,bool) {
     let mut plain=None;
     let mut transliterated=None;
     let mut failure=None;
@@ -472,16 +409,6 @@ fn fetch_with_sources_once(netease:Option<&str>,qq:Option<&str>,lrclib:Option<&s
 pub(crate) fn same_song(title:&str,artist:&str,other_title:&str,other_artist:&str)->bool {
     let (a,b)=(song_identity(title,artist),song_identity(other_title,other_artist));
     !a.0.is_empty() && a.0==b.0 && (a.1.is_empty() || b.1.is_empty() || a.1==b.1)
-}
-
-/// 同一会话里前后两次歌曲信息的关系：`Some(true)` 同一首（歌手相同或一方为空），
-/// `Some(false)` 同一首但署名有补全（如单人署名补全为合唱），`None` 不同歌曲。
-pub(crate) fn song_relation(title:&str,artist:&str,other_title:&str,other_artist:&str)->Option<bool> {
-    if same_song(title,artist,other_title,other_artist){return Some(true);}
-    let (a,b)=(song_identity(title,artist),song_identity(other_title,other_artist));
-    if a.0.is_empty() || a.0!=b.0 {return None;}
-    let within=|x:&[String],y:&[String]|x.iter().all(|s|y.contains(s));
-    (within(&a.1,&b.1) || within(&b.1,&a.1)).then_some(false)
 }
 
 fn normalized(text:&str)->String {
@@ -719,17 +646,6 @@ fn urlencode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn radio_style_titles_are_split_and_stripped_conservatively(){
-        assert_eq!(split_title_artist("晴天 - 周杰伦"),Some(("晴天".into(),"周杰伦".into())));
-        assert_eq!(split_title_artist("周杰伦 – 晴天"),Some(("周杰伦".into(),"晴天".into())));
-        assert_eq!(split_title_artist("A - B - C"),None,"多个分隔符时不猜");
-        assert_eq!(split_title_artist("Re-Make"),None,"连字符不是分隔符");
-        assert_eq!(bare_title("【周末电台】晴天 (DJ版)"),"晴天");
-        assert_eq!(bare_title("遥远的她（Live）【现场】"),"遥远的她");
-        assert_eq!(bare_title("(没有歌名)"),"(没有歌名)","去掉后为空时保留原样");
-        assert_eq!(bare_title("晴天"),"晴天");
-    }
     #[test]
     fn resource_network_and_disk_lyrics_have_input_limits(){
         let oversized="x".repeat(2*1024*1024+1);
@@ -1178,19 +1094,6 @@ mod tests {
         assert!(same_song("Track","","Track","甲"));
         assert!(!same_song("Track (Live)","甲","Track","甲"));
         assert!(!same_song("Track","甲","Track","丙"));
-    }
-
-    #[test]
-    fn song_relation_separates_fill_ins_from_other_songs(){
-        assert_eq!(song_relation("Track","甲","Track","甲"),Some(true));
-        assert_eq!(song_relation("Track","","Track","甲"),Some(true),"歌手从空补全仍是同一首");
-        assert_eq!(song_relation("Track","甲 / 乙","Track","乙、甲"),Some(true));
-        assert_eq!(song_relation("有点甜","汪苏泷","有点甜","汪苏泷、BY2"),Some(false),"单人署名补全为合唱");
-        assert_eq!(song_relation("有点甜","汪苏泷、BY2","有点甜","汪苏泷"),Some(false));
-        assert_eq!(song_relation("Track","甲","Track","丙"),None);
-        assert_eq!(song_relation("Track","甲、乙","Track","甲、丙"),None,"部分重叠不算补全");
-        assert_eq!(song_relation("Track (Live)","甲","Track","甲"),None,"不同版本是不同歌曲");
-        assert_eq!(song_relation("","甲","","甲"),None);
     }
 
     #[test]

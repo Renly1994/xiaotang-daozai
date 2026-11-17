@@ -5,13 +5,14 @@
 //! - `model` / `lyrics` / `smtc` / `icons`：数据、歌词、系统媒体、文件图标
 //! - `native` / `tray`：仅 Windows 的窗口区域、命中穿透与托盘
 
+/// 自定义构建标记：官方安装包会覆盖本地修改，更新弹窗据此提示。
+pub const CUSTOM_BUILD: bool = true;
+
 pub mod display_layout;
-pub mod diagnostics_tool;
 mod mail_privacy;
 pub mod poll_clock;
 pub mod resources;
 pub mod anim;
-pub mod oled_shift;
 pub mod app;
 pub mod messenger;
 pub mod child_process;
@@ -35,14 +36,16 @@ pub mod clipboard;
 pub mod side_dock;
 mod task_picker;
 pub mod model;
+pub mod island_status;
+pub mod maa;
 pub mod renderer;
 pub mod otp;
+pub mod phone_battery;
 pub mod quota;
+mod marvis_snapshot;
 mod quota_ui;
 pub mod weather;
 mod weather_ui;
-mod weather_source_ui;
-mod qweather;
 mod pages;
 mod extras;
 mod pet;
@@ -56,12 +59,19 @@ pub mod backdrop;
 #[cfg(windows)]
 pub mod composition;
 #[cfg(windows)]
-pub mod layered;
-#[cfg(windows)]
 pub mod system;
 pub mod paint;
 pub mod shape;
 mod fluid;
+#[cfg(windows)]
+pub mod monitor;
+pub mod mem_clean;
+pub mod audio_switch;
+pub mod quick_ctl;
+pub mod mi_light;
+pub mod pages_extra;
+pub mod gpu_glass;
+pub mod wgc;
 pub mod smtc;
 pub mod music_volume;
 pub mod theme;
@@ -70,6 +80,8 @@ mod updates;
 #[cfg(windows)]
 pub use updates::record_install_size;
 
+#[cfg(windows)]
+pub mod bridge;
 #[cfg(windows)]
 pub mod native;
 #[cfg(windows)]

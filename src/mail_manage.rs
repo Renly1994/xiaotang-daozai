@@ -166,5 +166,13 @@ mod protocol{
 }
 #[cfg(windows)]pub fn start()->(std::sync::mpsc::Sender<Request>,std::sync::mpsc::Receiver<Completed>){
     let(tx,rx)=std::sync::mpsc::channel::<Request>();let(done,out)=std::sync::mpsc::channel();
-    std::thread::spawn(move||while let Ok(request)=rx.recv(){let result=protocol::run(&request);let _=done.send(Completed{request,result});});(tx,out)
+    std::thread::spawn(move||while let Ok(request)=rx.recv(){
+        // 单次协议异常不能带走整个线程：线程一死，后续请求全部发不出去，
+        // 界面上的 pending 永远清不掉，「全部已读」等按钮就永久禁用。
+        let result=match std::panic::catch_unwind(std::panic::AssertUnwindSafe(||protocol::run(&request))){
+            Ok(result)=>result,
+            Err(_)=>Err("邮件操作异常，请重试".to_string()),
+        };
+        let _=done.send(Completed{request,result});
+    });(tx,out)
 }

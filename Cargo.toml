@@ -1,6 +1,6 @@
 [package]
 name = "daozai"
-version = "0.6.65"
+version = "0.6.64"
 edition = "2021"
 license = "MIT"
 description = "岛仔：Windows 顶部的桌面伙伴与信息岛"
@@ -14,6 +14,12 @@ path = "src/lib.rs"
 [[bin]]
 name = "daozai"
 path = "src/main.rs"
+
+# 独立精简的浏览器扩展桥宿主：不链接 GUI 栈，只做下载事件 → island_status.json 的翻译。
+# 安装包把编译出的 daozai-bridge.exe 复制为 daozai_bridge.exe（见 installer/daozai.iss）。
+[[bin]]
+name = "daozai-bridge"
+path = "src/bin/daozai-bridge/main.rs"
 
 # 无窗口演示录制器：脚本驱动 + 软件光栅化，输出 RGBA 帧流给 ffmpeg。
 [[bin]]
@@ -50,14 +56,12 @@ url = "2"
 chrono = "0.4"
 chrono-tz = "0.10"
 rrule = "0.14.0"
-rquickjs = "0.8"
 
 # Linux 下 winit 至少要一个后端才能编译（只用于开发/录制，正式目标是 Windows）。
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "x11"] }
 
 [target.'cfg(windows)'.dependencies]
-ureq = { version = "2.12", default-features = false, features = ["native-tls"] }
 tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 clipboard-win = "5.4.3"
 wgpu = { version = "24", default-features = false, features = ["dx12"] }
@@ -74,6 +78,7 @@ windows = { version = "0.58", features = [
   "Win32_Security_Cryptography",
   "Win32_System_Power",
   "Win32_System_Registry",
+  "Win32_System_IO",
   "Win32_System_SystemInformation",
   "Win32_System_Threading",
   "Win32_System_RemoteDesktop",
@@ -102,6 +107,10 @@ windows = { version = "0.58", features = [
   "Win32_Devices_Properties",
   "Win32_Devices_Bluetooth",
   "Devices_Bluetooth", "Devices_Enumeration",
+  "Graphics", "Graphics_Capture", "Graphics_DirectX", "Graphics_DirectX_Direct3D11",
+  "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common",
+  "Win32_System_WinRT_Direct3D11", "Win32_System_WinRT_Graphics_Capture",
 ] }
 # v0.5.5 邮件：IMAP 走系统 TLS，凭据进 Windows 凭据管理器。
 imap = "2.4"
