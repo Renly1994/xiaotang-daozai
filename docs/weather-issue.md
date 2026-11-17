@@ -82,7 +82,7 @@
 - **直接信 IP 库给的经纬度**：省一次请求，但 IP 定位的坐标误差经常是几十公里甚至跨市（尤其移动网络、企业出口），落到隔壁城市的格点上就会明显不准。
 - **只用 IP 库给的城市名，再拿城市名去查天气**：多一次 geocoding 请求（几十毫秒、同一个域名体系），但结果和用户心里「我在杭州」一致得多。
 
-**当前实现采用前者**：自动定位使用 `ipwho.is` 返回的坐标查询天气，城市名用作显示标签。用户手动确认城市后，才使用 Open-Meteo geocoding 解析坐标；网络出口位置不准确时可以手动指定城市。
+**当前实现优先使用 Windows 系统定位**：自动定位先调用 `Windows.Devices.Geolocation`，用 Wi‑Fi／GPS 给出的坐标查询天气；用户未授权、系统定位关闭或超时时，才回退到 `ipwho.is` 的网络出口坐标。这样即使本机走代理或共享出口，也不会把城市判到出口所在地。系统定位拿不到 `CivicAddress` 城市名时，再用 BigDataCloud 按刚取得的坐标反向解析城市名；解析失败才显示「当前位置」，坐标仍然准确。用户手动确认城市后，才使用 Open-Meteo geocoding 解析坐标。
 
 定位服务的实测淘汰过程（都可以少踩一遍）：
 
@@ -91,6 +91,8 @@
 | `ipapi.co` | 国内访问被 Cloudflare 拦（403 / challenge） |
 | `ip-api.com` | 免费版只给 HTTP，没 HTTPS，桌面端不该为这个降级 |
 | **`ipwho.is`** | ✅ HTTPS + `?lang=zh-CN` 直接返回中文城市名 |
+| **Windows 系统定位** | ✅ 本机实测返回九江坐标；需要用户授权，部分机器不返回 `CivicAddress` |
+| **BigDataCloud 反向地理编码** | ✅ 无密钥，中文城市名准确；只在系统定位缺少城市名时调用 |
 
 本机实测（出口 IP 在湖北）定位结果为「武汉」，与运营商出口归属一致。
 
@@ -132,7 +134,16 @@ GET https://ipwho.is/?lang=zh-CN
 
 取 `latitude` / `longitude` 作为自动查询坐标；显示名称取 `city` → 回退 `region` → 回退 `country`。`success == false` 时提示用户手填城市。
 
-### 4. WMO 天气代码 → 图标 / 文案
+### 4. 系统坐标 → 城市名
+
+```
+GET https://api.bigdatacloud.net/data/reverse-geocode-client
+    ?latitude=29.6767&longitude=116.0095&localityLanguage=zh-CN
+```
+
+取 `city` → 回退 `locality` → 回退 `principalSubdivision` 作为城市名，`principalSubdivision` / `countryName` 作为地区。只在 Windows 系统定位成功、但 `CivicAddress` 没有城市名时调用；失败保留「当前位置」，不阻断天气请求。
+
+### 5. WMO 天气代码 → 图标 / 文案
 
 接口返回的是 WMO 4677 数字码，需要映射成 10 种图标和中文描述：
 
@@ -199,7 +210,7 @@ GET https://ipwho.is/?lang=zh-CN
 
 ## 七、隐私
 
-- 只向 Open-Meteo 发经纬度（或用户手填的城市名），自动定位时会查询 `ipwho.is` 的网络出口位置，都是无账号的公开接口。
+- 只向 Open-Meteo 发经纬度（或用户手填的城市名）；自动定位优先使用 Windows 系统定位，系统定位没有城市名时把刚取得的坐标发给 BigDataCloud 解析城市名，系统定位不可用时才查询 `ipwho.is` 的网络出口位置，都是无账号的公开接口。
 - 不读取任何登录态、不上报设备标识；`weather.json` 只存本地用于离线展示。
 - README 与 `docs/PRIVACY.md` 说明天气接口、自动定位和本地缓存。
 
