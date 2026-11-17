@@ -54,7 +54,7 @@ pub fn parse_result(value:&Value,source:&str)->Result<Snapshot,String>{
         if let Some(w)=total.zip(remaining).and_then(|(t,r)|window(label,t,r,None,None)){windows.push(w);}
         amounts.push(amount(label,unit,remaining,total,used,false,Scope::Reported));
     }
-    Ok(Snapshot{plan:source.into(),relay:Some(Quota{source:source.into(),amounts,expires_at:None}),windows,at:chrono::Utc::now().timestamp(),..Default::default()})
+    Ok(Snapshot{plan:source.into(),relay:Some(Quota{source:source.into(),amounts,expires_at:None,rate:None,logo:None,points:None}),windows,at:chrono::Utc::now().timestamp(),..Default::default()})
 }
 
 pub fn request(agent:&ureq::Agent,base:&str,credential:&Credential,cancelled:impl Fn()->bool)->Result<Snapshot,(String,u64)>{
