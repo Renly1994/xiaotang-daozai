@@ -18,14 +18,13 @@ pub(crate) fn battery_color(level: u8) -> Color32 {
     if level <= 20 { theme::RED } else if level <= 50 { theme::YELLOW } else { theme::GREEN }
 }
 
-/// 从已连接设备里挑一个最值得展示的：有电量的音频设备优先，其次任意有电量的设备。
+/// 从已连接设备里挑一个最值得展示的：只认有电量的音频设备（耳机 / 音箱）。
+/// 鼠标、键盘等设备的电量由通知条负责，不占这个「耳机电量」角标。
 pub(crate) fn pick_device<'a>(devices: &'a [crate::bt::Device]) -> Option<&'a crate::bt::Device> {
     use crate::bt::DeviceKind::*;
-    fn audio(kind: crate::bt::DeviceKind) -> bool {
-        matches!(kind, Earbuds | Headphones | Bone | Speaker)
-    }
-    devices.iter().find(|d| d.battery.is_some() && audio(d.kind))
-        .or_else(|| devices.iter().find(|d| d.battery.is_some()))
+    devices.iter().find(|d| {
+        d.battery.is_some() && matches!(d.kind, Earbuds | Headphones | Bone | Speaker)
+    })
 }
 
 impl Card<'_> {
@@ -90,12 +89,12 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_any_device_with_battery() {
+    fn ignores_non_audio_devices() {
         let devices = [
             device("键盘", DeviceKind::Keyboard, Some(90)),
             device("耳机", DeviceKind::Headphones, None),
         ];
-        assert_eq!(pick_device(&devices).unwrap().name, "键盘");
+        assert!(pick_device(&devices).is_none());
         assert!(pick_device(&[]).is_none());
         assert!(pick_device(&[device("耳机", DeviceKind::Headphones, None)]).is_none());
     }

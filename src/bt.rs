@@ -161,43 +161,46 @@ fn battery_devices()->Result<Vec<(String,String,u8)>,()> {
     const FRIENDLY: DEVPROPKEY = DEVPROPKEY { fmtid: GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0), pid: 14 };
     // DEVPKEY_Device_DeviceDesc，同一 fmtid，pid 2
     const DESC: DEVPROPKEY = DEVPROPKEY { fmtid: GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0), pid: 2 };
-    let mut out=Vec::new();
-    unsafe {
-        let set=SetupDiGetClassDevsW(None,windows::core::PCWSTR::null(),HWND::default(),DIGCF_PRESENT|DIGCF_ALLCLASSES).map_err(|_|())?;
-        for i in 0..u32::MAX {
-            let mut data=SP_DEVINFO_DATA{cbSize:std::mem::size_of::<SP_DEVINFO_DATA>() as u32,..Default::default()};
-            if SetupDiEnumDeviceInfo(set,i,&mut data).is_err(){break;}
-            let Some(level)=byte_prop(set,&data,&BATTERY).filter(|b|*b<=100) else{continue;};
-            let Some(instance)=instance_id(set,&data) else{continue;};
-            let id=instance.rsplit('\\').next().unwrap_or(&instance).to_ascii_uppercase();
-            if id.is_empty(){continue;}
-            let name=string_prop(set,&data,&FRIENDLY).filter(|s|!s.trim().is_empty())
-                .or_else(||string_prop(set,&data,&DESC).filter(|s|!s.trim().is_empty()))
-                .or_else(||registry_string_prop(set,&data,SPDRP_FRIENDLYNAME).filter(|s|!s.trim().is_empty()))
-                .or_else(||registry_string_prop(set,&data,SPDRP_DEVICEDESC).filter(|s|!s.trim().is_empty()))
-                .unwrap_or_else(||instance.rsplit('\\').next().unwrap_or(&instance).to_string());
-            if name.trim().is_empty(){continue;}
-            out.push((id,name,level));
-        }
-        // 同一个蓝牙地址在设备管理器里有多个服务节点；电量可能在名字为空的节点上，
-        // 再从同地址的其他节点借一个可读名称（优先耳机/音箱，其次鼠标键盘）。
-        for i in 0..u32::MAX {
-            let mut data=SP_DEVINFO_DATA{cbSize:std::mem::size_of::<SP_DEVINFO_DATA>() as u32,..Default::default()};
-            if SetupDiEnumDeviceInfo(set,i,&mut data).is_err(){break;}
-            let Some(instance)=instance_id(set,&data) else{continue;};
-            let id=instance.rsplit('\\').next().unwrap_or(&instance).to_ascii_uppercase();
-            let Some(entry)=out.iter_mut().find(|(node,_,_)|*node==id) else{continue;};
-            let name=string_prop(set,&data,&FRIENDLY).filter(|s|!s.trim().is_empty())
-                .or_else(||string_prop(set,&data,&DESC).filter(|s|!s.trim().is_empty()))
-                .or_else(||registry_string_prop(set,&data,SPDRP_FRIENDLYNAME).filter(|s|!s.trim().is_empty()))
-                .or_else(||registry_string_prop(set,&data,SPDRP_DEVICEDESC).filter(|s|!s.trim().is_empty()));
-            if let Some(name)=name {
-                if name_rank(&name)>name_rank(&entry.1) {entry.1=name;}
+        let mut out=Vec::new();
+        unsafe {
+            let set=SetupDiGetClassDevsW(None,windows::core::PCWSTR::null(),HWND::default(),DIGCF_PRESENT|DIGCF_ALLCLASSES).map_err(|_|())?;
+            for i in 0..u32::MAX {
+                let mut data=SP_DEVINFO_DATA{cbSize:std::mem::size_of::<SP_DEVINFO_DATA>() as u32,..Default::default()};
+                if SetupDiEnumDeviceInfo(set,i,&mut data).is_err(){break;}
+                // 断开后 Windows 会保留设备节点和上次电量；PresenceNotForDevice=true 表示
+                // 节点只是“插过”的残留，物理设备并不在场，必须排除，否则没连耳机也显示 100%。
+                if !node_connected(set,&data){continue;}
+                let Some(level)=byte_prop(set,&data,&BATTERY).filter(|b|*b<=100) else{continue;};
+                let Some(instance)=instance_id(set,&data) else{continue;};
+                let id=node_address(set,&data,&instance);
+                if id.is_empty(){continue;}
+                let name=string_prop(set,&data,&FRIENDLY).filter(|s|!s.trim().is_empty())
+                    .or_else(||string_prop(set,&data,&DESC).filter(|s|!s.trim().is_empty()))
+                    .or_else(||registry_string_prop(set,&data,SPDRP_FRIENDLYNAME).filter(|s|!s.trim().is_empty()))
+                    .or_else(||registry_string_prop(set,&data,SPDRP_DEVICEDESC).filter(|s|!s.trim().is_empty()))
+                    .unwrap_or_else(||instance.rsplit('\\').next().unwrap_or(&instance).to_string());
+                if name.trim().is_empty(){continue;}
+                out.push((id,name,level));
             }
+            // 同一个蓝牙地址在设备管理器里有多个服务节点；电量可能在名字为空的节点上，
+            // 再从同地址的其他节点借一个可读名称（优先耳机/音箱，其次鼠标键盘）。
+            for i in 0..u32::MAX {
+                let mut data=SP_DEVINFO_DATA{cbSize:std::mem::size_of::<SP_DEVINFO_DATA>() as u32,..Default::default()};
+                if SetupDiEnumDeviceInfo(set,i,&mut data).is_err(){break;}
+                let Some(instance)=instance_id(set,&data) else{continue;};
+                let id=node_address(set,&data,&instance);
+                let Some(entry)=out.iter_mut().find(|(node,_,_)|*node==id) else{continue;};
+                let name=string_prop(set,&data,&FRIENDLY).filter(|s|!s.trim().is_empty())
+                    .or_else(||string_prop(set,&data,&DESC).filter(|s|!s.trim().is_empty()))
+                    .or_else(||registry_string_prop(set,&data,SPDRP_FRIENDLYNAME).filter(|s|!s.trim().is_empty()))
+                    .or_else(||registry_string_prop(set,&data,SPDRP_DEVICEDESC).filter(|s|!s.trim().is_empty()));
+                if let Some(name)=name {
+                    if name_rank(&name)>name_rank(&entry.1) {entry.1=name;}
+                }
+            }
+            let _=SetupDiDestroyDeviceInfoList(set);
         }
-        let _=SetupDiDestroyDeviceInfoList(set);
-    }
-    Ok(out)
+        Ok(out)
 }
 
 #[cfg(windows)]
@@ -219,11 +222,11 @@ unsafe fn registry_string_prop(
 )->Option<String>{
     use windows::Win32::Devices::DeviceAndDriverInstallation::SetupDiGetDeviceRegistryPropertyW;
     let mut ty=0u32;
+    let mut buf=vec![0u8;4096];
     let mut size=0u32;
-    SetupDiGetDeviceRegistryPropertyW(set,data,prop,Some(&mut ty),None,Some(&mut size)).ok()?;
-    if ty!=1 || size==0 || size>4096{return None;} // REG_SZ
-    let mut buf=vec![0u8;size as usize];
-    SetupDiGetDeviceRegistryPropertyW(set,data,prop,Some(&mut ty),Some(buf.as_mut_slice()),None).ok()?;
+    // 探测调用必然返回 ERROR_INSUFFICIENT_BUFFER；直接给足缓冲区只调一次。
+    SetupDiGetDeviceRegistryPropertyW(set,data,prop,Some(&mut ty),Some(buf.as_mut_slice()),Some(&mut size)).ok()?;
+    if ty!=1 || size==0 || size as usize>buf.len(){return None;} // REG_SZ
     let words:Vec<u16>=buf.chunks_exact(2).take(size as usize/2).map(|p|u16::from_le_bytes([p[0],p[1]])).collect();
     let end=words.iter().position(|c|*c==0).unwrap_or(words.len());
     Some(String::from_utf16_lossy(&words[..end]))
@@ -238,15 +241,53 @@ unsafe fn string_prop(
     use windows::Win32::Devices::DeviceAndDriverInstallation::SetupDiGetDevicePropertyW;
     use windows::Win32::Devices::Properties::DEVPROPTYPE;
     const STRING: DEVPROPTYPE = DEVPROPTYPE(0x12); // DEVPROP_TYPE_STRING
-    let mut ty=DEVPROPTYPE::default();let mut size=0u32;
-    SetupDiGetDevicePropertyW(set,data,key,&mut ty,None,Some(&mut size),0).ok()?;
-    if ty!=STRING || size==0 || size>4096{return None;}
-    let mut buf=vec![0u8;size as usize];
+    let mut ty=DEVPROPTYPE::default();
+    let mut buf=vec![0u8;4096];
+    let mut size=0u32;
     SetupDiGetDevicePropertyW(set,data,key,&mut ty,Some(&mut buf),Some(&mut size),0).ok()?;
+    if ty!=STRING || size==0 || size as usize>buf.len(){return None;}
     let units=size as usize/2;
     let words:Vec<u16>=buf.chunks_exact(2).take(units).map(|p|u16::from_le_bytes([p[0],p[1]])).collect();
     let end=words.iter().position(|c|*c==0).unwrap_or(words.len());
     Some(String::from_utf16_lossy(&words[..end]))
+}
+
+/// 设备节点是否对应当前真正在场的物理设备。
+/// 蓝牙耳机断开后节点仍留在设备管理器里，并保留上次电量（本机残留为 100%），
+/// 这类节点的 DEVPKEY_Device_PresenceNotForDevice 为 true，必须排除。
+#[cfg(windows)]
+unsafe fn node_connected(
+    set: windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO,
+    data: &windows::Win32::Devices::DeviceAndDriverInstallation::SP_DEVINFO_DATA,
+) -> bool {
+    use windows::Win32::Devices::DeviceAndDriverInstallation::SetupDiGetDevicePropertyW;
+    use windows::Win32::Devices::Properties::{DEVPROPTYPE, DEVPKEY_Device_PresenceNotForDevice};
+    const BOOLEAN: DEVPROPTYPE = DEVPROPTYPE(0x11);
+    let mut ty = DEVPROPTYPE::default();
+    let mut buf = [0u8; 1];
+    let mut size = 0u32;
+    let hr = SetupDiGetDevicePropertyW(set, data, &DEVPKEY_Device_PresenceNotForDevice, &mut ty, Some(&mut buf), Some(&mut size), 0);
+    if hr.is_err() {
+        return true; // 属性不存在时按在场处理，避免误伤其他设备
+    }
+    !(ty == BOOLEAN && size == 1 && buf[0] != 0)
+}
+
+/// 用规范的蓝牙地址作为设备 id；读不到时退回实例 ID 末段。
+#[cfg(windows)]
+unsafe fn node_address(
+    set: windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO,
+    data: &windows::Win32::Devices::DeviceAndDriverInstallation::SP_DEVINFO_DATA,
+    instance: &str,
+) -> String {
+    use windows::core::GUID;
+    use windows::Win32::Devices::Properties::DEVPROPKEY;
+    // DEVPKEY_Bluetooth_DeviceAddress {2BD67D8B-8BEB-48D5-87E0-6CDA3428040A}, 1
+    const ADDRESS: DEVPROPKEY = DEVPROPKEY { fmtid: GUID::from_u128(0x2bd67d8b_8beb_48d5_87e0_6cda3428040a), pid: 1 };
+    string_prop(set, data, &ADDRESS)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| instance.rsplit('\\').next().unwrap_or(instance).to_string())
+        .to_ascii_uppercase()
 }
 
 #[cfg(windows)]
@@ -273,6 +314,7 @@ fn read_batteries(devices:&[Device])->Result<Vec<(String,u8)>,()> {
             if SetupDiEnumDeviceInfo(set, i, &mut data).is_err() {
                 break;
             }
+            if !node_connected(set, &data) { continue; }
             let Some(instance) = instance_id(set, &data) else { continue };
             let upper = instance.to_ascii_uppercase();
             if !devices.iter().any(|device|upper.contains(&device.id)){continue;}
