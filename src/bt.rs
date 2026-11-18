@@ -253,8 +253,11 @@ unsafe fn string_prop(
 }
 
 /// 设备节点是否对应当前真正在场的物理设备。
-/// 蓝牙耳机断开后节点仍留在设备管理器里，并保留上次电量（本机残留为 100%），
-/// 这类节点的 DEVPKEY_Device_PresenceNotForDevice 为 true，必须排除。
+///
+/// ⚠️ 这个属性只能用来判断「顶层 DEV_ 节点」这类没有服务子节点的设备（例如鼠标）。
+/// 蓝牙音频的服务节点（Hands-Free AG / Avrcp 传输）无论设备是否连接，
+/// DEVPKEY_Device_PresenceNotForDevice 恒为 true，不能据此排除——判断连接状态
+/// 一律以 WinRT 的 `IsConnected` 枚举结果为准（见 `query` / `read_batteries`）。
 #[cfg(windows)]
 unsafe fn node_connected(
     set: windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO,
@@ -314,7 +317,9 @@ fn read_batteries(devices:&[Device])->Result<Vec<(String,u8)>,()> {
             if SetupDiEnumDeviceInfo(set, i, &mut data).is_err() {
                 break;
             }
-            if !node_connected(set, &data) { continue; }
+            // 这里不再看 PresenceNotForDevice：蓝牙的服务节点（Hands-Free AG、Avrcp 等）
+            // 即使设备正在连接，该属性也恒为 true，用它判断会把正常耳机一并排除。
+            // `devices` 本身已经只包含 WinRT 报「已连接」的设备，按地址匹配就足够了。
             let Some(instance) = instance_id(set, &data) else { continue };
             let upper = instance.to_ascii_uppercase();
             if !devices.iter().any(|device|upper.contains(&device.id)){continue;}
@@ -325,7 +330,16 @@ fn read_batteries(devices:&[Device])->Result<Vec<(String,u8)>,()> {
         // 每次枚举后释放设备列表句柄。
         let _ = SetupDiDestroyDeviceInfoList(set);
     }
-    Ok(devices.iter().filter_map(|device|batteries.iter().find(|(node,_)|node.contains(&device.id)).map(|(_,level)|(device.id.clone(),*level))).collect())
+    Ok(match_batteries(devices,&batteries))
+}
+
+/// 把「设备节点实例 ID → 电量」整理成与已连接设备一一对应的结果。
+///
+/// 只按地址匹配，不看 `PresenceNotForDevice`：蓝牙音频的服务节点即使设备正连着，
+/// 该属性也是 true。断开设备的残留节点不在这里被排除，而是靠 `devices`
+/// 只包含 WinRT 报「已连接」的设备来天然过滤掉。
+fn match_batteries(devices:&[Device], nodes:&[(String,u8)])->Vec<(String,u8)> {
+    devices.iter().filter_map(|device|nodes.iter().find(|(node,_)|node.contains(&device.id)).map(|(_,level)|(device.id.clone(),*level))).collect()
 }
 
 #[cfg(windows)]
@@ -414,5 +428,32 @@ mod lifecycle_tests {
         let (stop,stopped)=std::sync::mpsc::channel();
         drop(super::Service {rx,stop});
         assert_eq!(stopped.recv_timeout(std::time::Duration::from_millis(100)),Ok(()));
+    }
+}
+
+#[cfg(test)]
+mod battery_match_tests {
+    use super::*;
+
+    fn earbuds(id:&str)->Device {Device{id:id.into(),name:"buds".into(),battery:None,kind:DeviceKind::Earbuds}}
+
+    /// 蓝牙音频的服务节点即使设备正连着，`PresenceNotForDevice` 也是 true；
+    /// 电量必须按地址与「已连接设备」匹配，不能靠这个属性过滤，否则正常耳机的电量会被一起丢掉。
+    #[test]
+    fn battery_nodes_only_count_for_connected_devices(){
+        let connected=vec![earbuds("9C583C5DDFEA")];
+        let nodes=vec![
+            // 已断开的残留耳机：节点还在、电量还是上次的 100%，但不在已连接列表里。
+            (r"BTHENUM\{0000111E-0000-1000-8000-00805F9B34FB}_VID&0001000A_PID&FFFF\8&2020260B&0&2074CFC6B61F_C00000000".to_ascii_uppercase(),100u8),
+            // 正在连接的耳机：同一个服务节点类型，同样标着 PresenceNotForDevice=true。
+            (r"BTHENUM\{0000111E-0000-1000-8000-00805F9B34FB}_VID&0001004C_PID&2011\8&2020260B&0&9C583C5DDFEA_C00000000".to_ascii_uppercase(),87u8),
+        ];
+        assert_eq!(match_batteries(&connected,&nodes),vec![("9C583C5DDFEA".to_string(),87)]);
+    }
+
+    #[test]
+    fn disconnected_devices_get_no_battery(){
+        let nodes=vec![(r"BTHENUM\DEV_2074CFC6B61F\8&2020260B&0&BLUETOOTHDEVICE_2074CFC6B61F".to_ascii_uppercase(),100u8)];
+        assert!(match_batteries(&[],&nodes).is_empty());
     }
 }
