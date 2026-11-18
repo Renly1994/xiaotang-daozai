@@ -879,6 +879,8 @@ pub struct App {
     pub(crate) updates: crate::updates::State,
     pub(crate) resident: bar::Motion,
     pub(crate) resident_power: (Option<u8>,bool),
+    /// 收起态是否有可显示电量的耳机（本帧算好，供 `notice_size` 等不接收 `Env` 的布局函数使用）。
+    pub(crate) bt_badge: bool,
 }
 
 impl App {
@@ -1009,7 +1011,7 @@ impl App {
             weather,
             weather_source,
             updates: crate::updates::State::load(model::config_dir().join("update-check.json")),
-            resident: Default::default(), resident_power:(None,false),
+            resident: Default::default(), resident_power:(None,false), bt_badge:false,
         }
     }
 
@@ -1734,6 +1736,9 @@ impl App {
     fn lyric_bar_width(&self)->f32 {LYRIC_BAR_W+if self.pet_enabled(){48.0}else{0.0}+self.lyric_focus_space()}
     fn notice_size(&self,a:&Alert)->(f32,f32) {
         let (width,height)=if a.meeting.is_some(){(360.0,136.0)}else if a.source==crate::extras::AlertSource::Internal && a.title=="蓝牙设备"{(HUD_W,48.0)}else if a.is_hud(){(HUD_W,38.0)}else{(334.0,44.0)};
+        // 喝水、久坐提醒是收起态最常打断常驻内容的两条：右侧留出电量角标的位置，
+        // 否则每弹一次就把蓝牙电量顶掉几十秒。
+        let width=if a.health().is_some() && self.bt_badge {width+bar::BT_WIDTH+14.0}else{width};
         (width,height)
     }
     pub fn set_pet(&mut self,enabled:bool) {
@@ -1832,6 +1837,7 @@ impl App {
         let bell=self.t<self.notification_bell_until&&!self.compact_notices();
         self.resident_power=(env.battery,env.charging);
         let bt_badge=self.settings.show_bt_battery && crate::bt_battery::pick_device(&env.bt).is_some();
+        self.bt_badge=bt_badge;
         let mut layout=Layout::new(self.settings.show_battery&&env.battery.is_some(),self.quota_bar_indices().len(),self.media.is_music()&&!bell,self.pomo.running,bell,self.pet_enabled(),self.weather_pill().is_some()||bt_badge);
         layout.reorder(&self.settings.resident_order);
         for (position,extra) in self.quota_balance_layout(&ctx){layout.balance_tail(position,extra);}
@@ -2044,7 +2050,12 @@ impl App {
                 self.draw_notice(&overlay,panel,&a,&mut cmds);
             }
         }else if banner {
-            if let Some(a)=self.notice.clone(){self.draw_notice(&Card::new(ui,panel.min+Vec2::new(self.pet_space(),0.0),panel.intersect(ui.max_rect())),panel,&a,&mut cmds);}
+            if let Some(a)=self.notice.clone(){
+                let c=Card::new(ui,panel.min+Vec2::new(self.pet_space(),0.0),panel.intersect(ui.max_rect()));
+                self.draw_notice(&c,panel,&a,&mut cmds);
+                // 提醒条占满收起态时，右侧仍保留蓝牙电量角标（宽度已在 notice_size 里留好）。
+                if a.health().is_some() && self.bt_badge {c.bt_battery_badge_at(env,panel.width()-self.pet_space()-16.0,22.0);}
+            }
         }else if !minimal_pill || pc > 0.0 {
             self.resident_header(&base, panel, cx, if restoring_lyrics{0.0}else{pc}, reveal, env);
         }

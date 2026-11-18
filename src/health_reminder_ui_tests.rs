@@ -237,3 +237,26 @@ fn health_reminder_gallery(){
         }
     }
 }
+
+/// 喝水、久坐提醒会把收起态整条占满，但右侧必须留出蓝牙电量角标的位置。
+#[test]
+fn health_banner_keeps_bluetooth_badge(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.show_bt_battery=true;
+    h.bt=vec![crate::bt::Device{id:"aa".into(),name:"Beats Studio Buds".into(),battery:Some(80),kind:crate::bt::DeviceKind::Earbuds}];
+    h.frame(vec![]);h.frame(vec![]);
+    let pct=|h:&H|h.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()=="80%"=>Some(t.visual_bounding_rect()),_=>None});
+    let bare=h.app.current_width();
+    assert!(pct(&h).is_some(),"收起态应把耳机电量放进常驻槽位");
+    h.app.alert("喝水时间到了","喝点水吧",2,true);
+    for _ in 0..90 {h.frame(vec![]);}
+    assert!(h.app.notice.as_ref().is_some_and(|a|a.title=="喝水时间到了"));
+    let badge=pct(&h).expect("喝水提醒不能顶掉蓝牙电量角标");
+    let button=h.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()=="喝一口"=>Some(t.visual_bounding_rect()),_=>None}).expect("提醒条应有确认按钮");
+    assert!(badge.center().x>button.right(),"角标要排在按钮右侧，不能压在按钮上");
+    assert!(h.app.current_width()>=bare+crate::bar_layout::BT_WIDTH-1.0,"提醒条要为角标留出宽度：{:.0} → {:.0}",bare,h.app.current_width());
+    h.app.notice=None;
+    for _ in 0..90 {h.frame(vec![]);}
+    assert!(pct(&h).is_some(),"提醒结束后角标仍在");
+}
