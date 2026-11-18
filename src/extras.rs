@@ -1399,6 +1399,113 @@ fn setting_choices(ui:&mut egui::Ui,title:&str,value:&mut u32,values:[u32;3],uni
     let options:Vec<(u32,&str)>=values.iter().zip(labels.iter()).map(|(v,l)|(*v,l.as_str())).collect();
     settings_control_row_right(ui,title,|ui|{settings_segmented(ui,value,&options,62.0);});
 }
+/// 液态玻璃参数弹窗：入口按钮在「外观 → 岛体外观」卡（皮肤与形状之间），仅液态皮肤显示。
+/// 调参时按「预览形态」固定展开/收起，方便对比两种形态下的玻璃效果；
+/// 离开外观页或关掉设置窗就自动收起弹窗。
+fn liquid_glass_config_window(app:&mut crate::app::App,ctx:&egui::Context){
+    if !(app.settings_open && app.settings_tab==SETTINGS_TAB_APPEARANCE && app.settings.render_compat) {app.liquid_cfg_open=false;}
+    let mut open=app.liquid_cfg_open;
+    if !open {return;}
+    egui::Window::new(egui::RichText::new("液态玻璃配置").size(14.0).strong())
+        .open(&mut open)
+        .collapsible(false).resizable(false).default_width(560.0)
+        .show(ctx,|ui|{
+            egui::ScrollArea::vertical().max_height(430.0).show(ui,|ui|{
+                ui.set_min_width(ui.available_width());
+                settings_hint(ui,"调参数时岛仔会保持下面选中的形态，方便直接看效果");
+                let forms:[(bool,&str);2]=[(false,"展开态"),(true,"收起态")];
+                settings_control_row_right(ui,"预览形态",|ui|{settings_segmented(ui,&mut app.liquid_preview_collapsed,&forms,62.0);});
+                settings_hint(ui,"展开态看展开后的控件玻璃；收起态看胶囊常驻条的玻璃");
+                ui.separator();
+                let before=app.settings.liquid_prefer_dgpu;
+                setting_row(ui,"优先独立显卡","优先使用独显渲染玻璃，切换后重启岛仔生效",&mut app.settings.liquid_prefer_dgpu);
+                if before!=app.settings.liquid_prefer_dgpu {app.settings.save();}
+                settings_hint(ui,"修改后需重启岛仔生效");
+                ui.separator();
+                settings_control_row(ui,"形变强度",56.0,|ui|ui.horizontal(|ui|{
+                    ui.spacing_mut().slider_width=180.0;
+                    ui.add(egui::Slider::new(&mut app.settings.liquid_morph,0.0..=3.0).fixed_decimals(2));
+                    if ui.add_enabled((app.settings.liquid_morph-1.0).abs()>0.001,egui::Button::new("恢复默认")).clicked(){app.settings.liquid_morph=1.0;}
+                }).response);
+                settings_hint(ui,"展开/折叠瞬间边缘折射的增强倍数；0 = 关闭，默认 1.0");
+                ui.separator();
+                settings_control_row(ui,"折射强度",56.0,|ui|ui.horizontal(|ui|{
+                    ui.spacing_mut().slider_width=180.0;
+                    ui.add(egui::Slider::new(&mut app.settings.liquid_refract_px,0.0..=120.0).fixed_decimals(0));
+                    if ui.add_enabled((app.settings.liquid_refract_px-48.0).abs()>0.05,egui::Button::new("恢复默认")).clicked(){app.settings.liquid_refract_px=48.0;}
+                }).response);
+                settings_hint(ui,"边缘处背景被弯折的像素数（默认 48）；调大像更厚的透镜，调小更平");
+                ui.separator();
+                settings_control_row(ui,"色散强度",56.0,|ui|ui.horizontal(|ui|{
+                    ui.spacing_mut().slider_width=180.0;
+                    ui.add(egui::Slider::new(&mut app.settings.liquid_chroma_px,0.0..=30.0).fixed_decimals(0));
+                    if ui.add_enabled((app.settings.liquid_chroma_px-8.0).abs()>0.05,egui::Button::new("恢复默认")).clicked(){app.settings.liquid_chroma_px=8.0;}
+                }).response);
+                settings_hint(ui,"红蓝彩边的强度，红蓝实际分离是它的两倍（默认 8）；0 = 关掉色散");
+                ui.separator();
+                settings_control_row(ui,"内部模糊",56.0,|ui|ui.horizontal(|ui|{
+                    ui.spacing_mut().slider_width=180.0;
+                    ui.add(egui::Slider::new(&mut app.settings.liquid_blur_px,0.0..=4.0).fixed_decimals(1));
+                    if ui.add_enabled((app.settings.liquid_blur_px-1.5).abs()>0.05,egui::Button::new("恢复默认")).clicked(){app.settings.liquid_blur_px=1.5;}
+                }).response);
+                settings_hint(ui,"折射带里五点采样的步长（默认 1.5）；调大整个折射带更「磨」");
+                ui.separator();
+                settings_control_row(ui,"折射带宽",56.0,|ui|ui.horizontal(|ui|{
+                    ui.spacing_mut().slider_width=180.0;
+                    ui.add(egui::Slider::new(&mut app.settings.liquid_band_px,10.0..=140.0).fixed_decimals(0));
+                    if ui.add_enabled((app.settings.liquid_band_px-87.0).abs()>0.5,egui::Button::new("恢复默认")).clicked(){app.settings.liquid_band_px=87.0;}
+                }).response);
+                settings_hint(ui,"折射从边缘往里延伸多深（默认 87）；小 = 只有边缘一圈在弯");
+                ui.separator();
+                settings_control_row(ui,"白边宽度",56.0,|ui|ui.horizontal(|ui|{
+                    ui.spacing_mut().slider_width=180.0;
+                    ui.add(egui::Slider::new(&mut app.settings.liquid_edge_w_px,0.0..=4.0).fixed_decimals(1));
+                    if ui.add_enabled((app.settings.liquid_edge_w_px-1.5).abs()>0.05,egui::Button::new("恢复默认")).clicked(){app.settings.liquid_edge_w_px=1.5;}
+                }).response);
+                settings_hint(ui,"边缘高光的宽度（默认 1.5）；0 = 关掉白边");
+                ui.separator();
+                settings_control_row(ui,"白边亮度",56.0,|ui|ui.horizontal(|ui|{
+                    ui.spacing_mut().slider_width=180.0;
+                    ui.add(egui::Slider::new(&mut app.settings.liquid_edge_op,0.0..=1.0).fixed_decimals(2));
+                    if ui.add_enabled((app.settings.liquid_edge_op-0.90).abs()>0.005,egui::Button::new("恢复默认")).clicked(){app.settings.liquid_edge_op=0.90;}
+                }).response);
+                settings_hint(ui,"边缘高光亮度（默认 0.90）；随背景明暗自动微调");
+                ui.separator();
+                settings_control_row(ui,"弹簧刚度",56.0,|ui|ui.horizontal(|ui|{
+                    ui.spacing_mut().slider_width=180.0;
+                    ui.add(egui::Slider::new(&mut app.settings.liquid_spring,0.2..=3.0).fixed_decimals(2));
+                    if ui.add_enabled((app.settings.liquid_spring-1.0).abs()>0.005,egui::Button::new("恢复默认")).clicked(){app.settings.liquid_spring=1.0;}
+                }).response);
+                settings_hint(ui,"控件果冻回弹的快慢（默认 1.0）：调大弹得更快");
+                ui.separator();
+                settings_control_row(ui,"阻尼比",56.0,|ui|ui.horizontal(|ui|{
+                    ui.spacing_mut().slider_width=180.0;
+                    ui.add(egui::Slider::new(&mut app.settings.liquid_zeta,0.1..=1.0).fixed_decimals(2));
+                    if ui.add_enabled((app.settings.liquid_zeta-0.5).abs()>0.005,egui::Button::new("恢复默认")).clicked(){app.settings.liquid_zeta=0.5;}
+                }).response);
+                settings_hint(ui,"回弹的「收劲」（默认 0.5）：调小会来回弹跳几下，1.0 = 不弹跳直接到位");
+                ui.separator();
+                settings_control_row(ui,"静止刷新率",56.0,|ui|ui.horizontal(|ui|{
+                    ui.spacing_mut().slider_width=180.0;
+                    ui.add(egui::Slider::new(&mut app.settings.liquid_idle_fps,1..=30).fixed_decimals(0));
+                    if ui.add_enabled(app.settings.liquid_idle_fps!=15,egui::Button::new("恢复默认")).clicked(){app.settings.liquid_idle_fps=15;}
+                }).response);
+                settings_hint(ui,"无悬停、无动画时的重绘帧率（默认 15）：调低更省电；30 = 静止不降档");
+                ui.separator();
+                let before=app.settings.liquid_deep_sleep;
+                setting_row(ui,"收起态深度休眠","收起且完全静止 2 分钟后降到 1Hz，任何输入即时唤醒",&mut app.settings.liquid_deep_sleep);
+                if before!=app.settings.liquid_deep_sleep {app.settings.save();}
+                settings_hint(ui,"默认开；省电可保持开启");
+                ui.separator();
+                let before=app.settings.liquid_shadow;
+                setting_row(ui,"岛体投影","胶囊外围的多层落影",&mut app.settings.liquid_shadow);
+                if before!=app.settings.liquid_shadow {app.settings.save();}
+                settings_hint(ui,"默认开；浅色壁纸上比较明显，关掉外围更干净");
+            });
+        });
+    app.liquid_cfg_open=open;
+}
+
 /// 设置页分页序号。旧序号保持不变（岛上入口、测试都按序号跳转），新增外观与位置两页。
 pub(crate) const SETTINGS_TAB_APPEARANCE: usize = 13;
 pub(crate) const SETTINGS_TAB_POSITION: usize = 14;
@@ -1659,6 +1766,14 @@ impl App {
                             let skins:Vec<(Skin,&str)>=Skin::ALL.iter().map(|s|(*s,s.label())).collect();
                             settings_control_row_right(ui,"皮肤",|ui|{settings_segmented(ui,&mut self.settings.skin,&skins,64.0);});
                             settings_hint(ui,self.settings.skin.description());
+                            // 「配置液态玻璃」入口夹在皮肤与形状之间，仅液态皮肤显示。
+                            // 注意 is_glass() 只含毛玻璃浅/深，不含 Liquid，这里必须用 Skin::Liquid。
+                            if self.settings.skin==Skin::Liquid {
+                                ui.horizontal(|ui|{
+                                    if ui.button("配置液态玻璃").clicked(){self.liquid_cfg_open=!self.liquid_cfg_open;}
+                                    settings_hint(ui,"折射、色散、投影、休眠等液态玻璃专属参数，弹窗里调");
+                                });
+                            }
                             if self.settings.skin.is_glass() {
                                 let mut blur=self.settings.glass_blur;
                                 setting_row(ui,"背景模糊","需开启系统“透明效果”；关闭后改为烟熏半透明",&mut blur);
@@ -1691,6 +1806,16 @@ impl App {
                             settings_advanced(ui,"settings-appearance-advanced",|ui|{
                                 setting_row(ui,"OLED 像素偏移","防止 OLED 屏幕烧屏：收起静止时让岛体缓慢移动几个像素，不改动你保存的位置",&mut self.settings.oled_shift);
                             });
+                        });
+                        // ===== 岛体交互（所有皮肤通用）=====
+                        settings_label(ui,"岛体交互");
+                        settings_card(ui,|ui|{
+                            let anims:Vec<(crate::model::OpenAnim,&str)>=crate::model::OpenAnim::ALL.iter().map(|a|(*a,a.label())).collect();
+                            settings_control_row_right(ui,"展开动效",|ui|{settings_segmented(ui,&mut self.settings.open_anim,&anims,52.0);});
+                            settings_hint(ui,self.settings.open_anim.description());
+                            ui.separator();
+                            setting_number(ui,"悬停触发延时",&mut self.settings.hover_delay_ms,0,500," ms",10.0);
+                            settings_hint(ui,"悬停多久后展开；80–120 ms 可避开鼠标划过");
                         });
                     }
                     SETTINGS_TAB_POSITION=>{
@@ -2294,6 +2419,9 @@ impl App {
                     }
                 });
             });
+            // 液态玻璃参数弹窗挂在视口顶层（非某个 tab 的滚动区里），离开「外观」页时
+            // 守卫才能可靠地清掉 liquid_cfg_open、弹窗随之收起。
+            liquid_glass_config_window(self,ctx);
             self.avoidance.dialog(ctx,&mut self.settings);
             if before!=format!("{:?}",self.settings){self.settings.save();}
             ctx.set_style(original_style);

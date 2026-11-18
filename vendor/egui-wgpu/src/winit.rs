@@ -11,6 +11,277 @@ struct SurfaceState {
     alpha_mode: wgpu::CompositeAlphaMode,
     width: u32,
     height: u32,
+    /// 这个 surface 是否挂在 DirectComposition visual 上。
+    /// 必须是逐 surface 的：`DCOMP_ACTIVE` 是全局的，拿它判断会把设置窗口的
+    /// 普通 HWND 交换链也配成预乘 alpha，DXGI 直接拒绝 → `Surface::configure` 报致命错并崩溃。
+    dcomp: bool,
+}
+
+/// 岛仔定制：DirectComposition 的 device / visual / target 必须比 surface 活得久。
+#[cfg(windows)]
+struct DcompKeepAlive {
+    /// 这套 visual 挂在哪个窗口上。surface 重建时要复用同一套，
+    /// 因为一个 HWND 只能有一个 DComp target。
+    hwnd: isize,
+    _device: windows::Win32::Graphics::DirectComposition::IDCompositionDevice,
+    _visual: windows::Win32::Graphics::DirectComposition::IDCompositionVisual,
+    _target: windows::Win32::Graphics::DirectComposition::IDCompositionTarget,
+}
+
+#[cfg(windows)]
+thread_local! {
+    static DCOMP_KEEPALIVE: std::cell::RefCell<Option<DcompKeepAlive>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// 跨线程可见的「当前是否在用 DComp」。native 的窗口更新和 surface 创建不一定同线程，
+/// 所以不能用 thread_local 判断，否则会继续套 SetWindowRgn，把经典皮肤切出锯齿。
+static DCOMP_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// 认领要跑 DComp 的那个窗口（存 HWND，0 = 未认领）。
+/// 不能用「首个 surface」的一次性布尔：窗口重建时 surface 会被重创，
+/// 一次性标志已经为 true，就会掉回 HWND 交换链，而窗口又没有 GDI 表面 → 整窗空白。
+/// 按 HWND 认领可以覆盖重建，也不会把设置窗口误认成主窗口。
+#[cfg(windows)]
+static DCOMP_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+/// DComp surface 真的建失败过。之后所有窗口一律走 HWND 交换链，不再反复试。
+#[cfg(windows)]
+static DCOMP_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// surface 创建阶段失败后调用：放弃 DComp，让上层回到「轮廓裁剪 + 普通交换链」。
+/// 不能只清 `DCOMP_HWND`——那样下一个窗口会重新认领、再失败一次。
+#[cfg(windows)]
+fn mark_dcomp_failed() {
+    DCOMP_FAILED.store(true, std::sync::atomic::Ordering::SeqCst);
+    DCOMP_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// 判断这个窗口是否该走 DComp（顺带完成认领）。
+#[cfg(windows)]
+fn claim_dcomp_window(window: &winit::window::Window) -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    use winit::raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+
+    if std::env::var_os("DAOZAI_DCOMP").is_none()
+        || DCOMP_FAILED.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        return false;
+    }
+    let Ok(handle) = window.window_handle() else {
+        return false;
+    };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return false;
+    };
+    let hwnd = win32.hwnd.get();
+    match DCOMP_HWND.compare_exchange(0, hwnd, SeqCst, SeqCst) {
+        Ok(_) => true,
+        Err(claimed) => claimed == hwnd,
+    }
+}
+
+/// 运行期兜底第一层：**建窗口之前**先探一次 DirectComposition 能不能用。
+///
+/// 为什么必须在建窗口前探：DComp 要求窗口没有 GDI 重定向表面（`WS_EX_NOREDIRECTIONBITMAP`），
+/// 而这个样式只能在 `CreateWindowEx` 时给，建完之后无法补加。所以一旦“窗口已经去掉表面、
+/// 之后才发现 DComp 不可用”，就只能整进程重开（退到 Vulkan 或 OpenGL）——那是以前的行为。
+/// 先探一次，探不通就**别**去掉表面，直接走老 HWND 交换链，进程都不用重开。
+#[cfg(windows)]
+pub fn direct_composition_available() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static CACHED: AtomicU8 = AtomicU8::new(0); // 0=未测 1=可用 2=不可用
+    match CACHED.load(Ordering::Relaxed) {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+    let ok = probe_direct_composition();
+    if !ok {
+        log::warn!("DirectComposition 不可用，保留 GDI 表面并走普通 HWND 交换链");
+    }
+    CACHED.store(if ok { 1 } else { 2 }, Ordering::Relaxed);
+    ok
+}
+
+#[cfg(not(windows))]
+pub fn direct_composition_available() -> bool {
+    false
+}
+
+/// 只建 D3D11 设备 + DComp device + visual，不碰窗口。
+/// 走的是和真正建 surface 完全相同的入口（D3D11 的 IDXGIDevice → DCompositionCreateDevice2），
+/// 所以这里能过、那边基本也能过；反过来这里失败就说明这台机器确实不该走 DComp。
+#[cfg(windows)]
+fn probe_direct_composition() -> bool {
+    use windows::core::Interface as _;
+    use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11CreateDevice, ID3D11Device, D3D11_SDK_VERSION,
+    };
+    use windows::Win32::Graphics::DirectComposition::{
+        DCompositionCreateDevice2, IDCompositionDevice,
+    };
+    use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+
+    for driver in [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP] {
+        let mut device: Option<ID3D11Device> = None;
+        let created = unsafe {
+            D3D11CreateDevice(
+                None,
+                driver,
+                None,
+                Default::default(),
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                None,
+            )
+        };
+        let Some(device) = device.filter(|_| created.is_ok()) else {
+            continue;
+        };
+        let Ok(dxgi_device) = device.cast::<IDXGIDevice>() else {
+            continue;
+        };
+        let dcomp: IDCompositionDevice = match unsafe { DCompositionCreateDevice2(&dxgi_device) } {
+            Ok(dcomp) => dcomp,
+            Err(_) => continue,
+        };
+        if unsafe { dcomp.CreateVisual() }.is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+/// 当前窗口是否已经在用 DirectComposition 透明交换链。
+/// 用了它就不再需要 `SetWindowRgn` 硬裁轮廓——那会把非液态皮肤的圆角切出锯齿。
+pub fn direct_composition_active() -> bool {
+    #[cfg(windows)]
+    {
+        DCOMP_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// wgpu-hal 只对 visual 调 SetContent，不负责 Commit；surface configure 之后必须补一次，
+/// 否则 DComp 树不提交，窗口就是空的。
+pub fn commit_direct_composition() {
+    #[cfg(windows)]
+    {
+        DCOMP_KEEPALIVE.with(|slot| {
+            if let Some(keep) = slot.borrow().as_ref() {
+                let _ = unsafe { keep._device.Commit() };
+            }
+        });
+    }
+}
+
+/// 用 wgpu 设备自己的 ID3D12Device 创建 DirectComposition visual，
+/// 再把该 visual 交给 wgpu 建 surface。不要用独立 D3D 设备，否则 SetContent 会失败。
+#[cfg(windows)]
+fn create_dcomp_surface(
+    instance: &wgpu::Instance,
+    window: &winit::window::Window,
+    adapter: &wgpu::Adapter,
+) -> Result<wgpu::Surface<'static>, crate::WgpuError> {
+    use windows::core::Interface as _;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11CreateDevice, ID3D11Device, D3D11_SDK_VERSION,
+    };
+    use windows::Win32::Graphics::DirectComposition::{
+        DCompositionCreateDevice2, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
+    };
+    use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+    use winit::raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+
+    let handle = window.window_handle()?.as_raw();
+    let RawWindowHandle::Win32(win32) = handle else {
+        return Err(crate::WgpuError::DirectComposition("不是 Win32 窗口".into()));
+    };
+    let hwnd = HWND(win32.hwnd.get() as *mut _);
+
+    let hwnd_key = win32.hwnd.get();
+
+    // 同一个 HWND 只能有一个 DComp target：第二次 CreateTargetForHwnd 会报
+    // DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED。窗口重建 / 换缩放 / 切屏都会重建 surface，
+    // 所以这里必须复用第一次建好的 visual，而不是重来一遍——
+    // 否则整条透明链路会掉进兜底、退回 SetWindowRgn 硬裁（圆角又变锯齿）。
+    let existing = DCOMP_KEEPALIVE.with(|slot| {
+        let slot = slot.borrow();
+        slot.as_ref()
+            .filter(|keep| keep.hwnd == hwnd_key)
+            .map(|keep| keep._visual.as_raw())
+    });
+
+    let visual_ptr = match existing {
+        Some(ptr) => ptr,
+        None => {
+            // AMD 的 ID3D12Device 不能 QI 到 IDXGIDevice；用同一个 DXGI adapter 建 D3D11 设备，
+            // 再从 D3D11 设备拿 IDXGIDevice 给 DComp。visual 仍由 wgpu 的 D3D12 交换链 SetContent。
+            let dxgi_adapter = unsafe {
+                adapter.as_hal::<wgpu::hal::api::Dx12, _, _>(|hal| {
+                    hal.map(|a| a.raw_dxgi_adapter().clone())
+                })
+            }
+            .ok_or_else(|| crate::WgpuError::DirectComposition("当前适配器不是 DX12".into()))?;
+
+            let mut d3d11: Option<ID3D11Device> = None;
+            unsafe {
+                D3D11CreateDevice(
+                    &dxgi_adapter,
+                    D3D_DRIVER_TYPE_UNKNOWN,
+                    None,
+                    Default::default(),
+                    None,
+                    D3D11_SDK_VERSION,
+                    Some(&mut d3d11),
+                    None,
+                    None,
+                )
+            }
+            .map_err(|e| crate::WgpuError::DirectComposition(format!("D3D11CreateDevice: {e}")))?;
+            let d3d11 = d3d11.ok_or_else(|| {
+                crate::WgpuError::DirectComposition("D3D11CreateDevice 没返回设备".into())
+            })?;
+            let dxgi_device: IDXGIDevice = d3d11.cast().map_err(|e| {
+                crate::WgpuError::DirectComposition(format!("ID3D11Device→IDXGIDevice: {e}"))
+            })?;
+
+            let dcomp: IDCompositionDevice = unsafe { DCompositionCreateDevice2(&dxgi_device) }
+                .map_err(|e| crate::WgpuError::DirectComposition(e.to_string()))?;
+            let visual: IDCompositionVisual = unsafe { dcomp.CreateVisual() }
+                .map_err(|e| crate::WgpuError::DirectComposition(e.to_string()))?;
+            let target: IDCompositionTarget = unsafe { dcomp.CreateTargetForHwnd(hwnd, true) }
+                .map_err(|e| crate::WgpuError::DirectComposition(e.to_string()))?;
+            unsafe { target.SetRoot(&visual) }
+                .map_err(|e| crate::WgpuError::DirectComposition(e.to_string()))?;
+            unsafe { dcomp.Commit() }
+                .map_err(|e| crate::WgpuError::DirectComposition(e.to_string()))?;
+
+            let ptr = visual.as_raw();
+            DCOMP_KEEPALIVE.with(|slot| {
+                *slot.borrow_mut() = Some(DcompKeepAlive {
+                    hwnd: hwnd_key,
+                    _device: dcomp,
+                    _visual: visual,
+                    _target: target,
+                });
+            });
+            ptr
+        }
+    };
+
+    let surface = unsafe {
+        instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CompositionVisual(visual_ptr))?
+    };
+    DCOMP_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+    Ok(surface)
 }
 
 /// Everything you need to paint egui with [`wgpu`] on [`winit`].
@@ -152,8 +423,50 @@ impl Painter {
         if let Some(window) = window {
             let size = window.inner_size();
             if !self.surfaces.contains_key(&viewport_id) {
+                #[cfg(windows)]
+                let mut dcomp = claim_dcomp_window(&window);
+                #[cfg(not(windows))]
+                let mut dcomp = false;
+
+                #[cfg(windows)]
+                let surface = if dcomp {
+                    if self.render_state.is_none() {
+                        self.render_state = Some(
+                            RenderState::create(
+                                &self.configuration,
+                                &self.instance,
+                                None,
+                                self.depth_format,
+                                self.msaa_samples,
+                                self.dithering,
+                            )
+                            .await?,
+                        );
+                    }
+                    let adapter = self
+                        .render_state
+                        .as_ref()
+                        .expect("RenderState 刚创建")
+                        .adapter
+                        .clone();
+                    // 预检过了这里仍可能失败（显卡驱动/远程桌面等）。就地退回普通交换链，
+                    // 让上方按轮廓裁剪兜住形状，不要因为一层透明合成把整个启动打成 Err。
+                    match create_dcomp_surface(&self.instance, &window, &adapter) {
+                        Ok(surface) => surface,
+                        Err(error) => {
+                            log::warn!("DirectComposition surface 创建失败，回退普通交换链：{error}");
+                            mark_dcomp_failed();
+                            dcomp = false;
+                            self.instance.create_surface(window)?
+                        }
+                    }
+                } else {
+                    self.instance.create_surface(window)?
+                };
+                #[cfg(not(windows))]
                 let surface = self.instance.create_surface(window)?;
-                self.add_surface(surface, viewport_id, size).await?;
+                self.add_surface(surface, viewport_id, size, dcomp).await?;
+                commit_direct_composition();
             }
         } else {
             log::warn!("No window - clearing all surfaces");
@@ -178,11 +491,59 @@ impl Painter {
         if let Some(window) = window {
             let size = window.inner_size();
             if !self.surfaces.contains_key(&viewport_id) {
+                #[cfg(windows)]
+                let mut dcomp = claim_dcomp_window(&window);
+                #[cfg(not(windows))]
+                let mut dcomp = false;
+
+                #[cfg(windows)]
+                let surface = if dcomp {
+                    // DComp visual 需要 ID3D12Device，而设备又是随 surface 懒创建的。
+                    // 先不带 surface 建 RenderState，再拿设备建 visual，最后建 surface。
+                    if self.render_state.is_none() {
+                        self.render_state = Some(
+                            RenderState::create(
+                                &self.configuration,
+                                &self.instance,
+                                None,
+                                self.depth_format,
+                                self.msaa_samples,
+                                self.dithering,
+                            )
+                            .await?,
+                        );
+                    }
+                    let adapter = self
+                        .render_state
+                        .as_ref()
+                        .expect("RenderState 刚创建")
+                        .adapter
+                        .clone();
+                    match create_dcomp_surface(&self.instance, window, &adapter) {
+                        Ok(surface) => surface,
+                        Err(error) => {
+                            log::warn!("DirectComposition surface 创建失败，回退普通交换链：{error}");
+                            mark_dcomp_failed();
+                            dcomp = false;
+                            unsafe {
+                                self.instance
+                                    .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_window(&window)?)?
+                            }
+                        }
+                    }
+                } else {
+                    unsafe {
+                        self.instance
+                            .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_window(&window)?)?
+                    }
+                };
+                #[cfg(not(windows))]
                 let surface = unsafe {
                     self.instance
                         .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_window(&window)?)?
                 };
-                self.add_surface(surface, viewport_id, size).await?;
+                self.add_surface(surface, viewport_id, size, dcomp).await?;
+                commit_direct_composition();
             }
         } else {
             log::warn!("No window - clearing all surfaces");
@@ -196,6 +557,7 @@ impl Painter {
         surface: wgpu::Surface<'static>,
         viewport_id: ViewportId,
         size: winit::dpi::PhysicalSize<u32>,
+        dcomp: bool,
     ) -> Result<(), crate::WgpuError> {
         let render_state = if let Some(render_state) = &self.render_state {
             render_state
@@ -211,7 +573,10 @@ impl Painter {
             .await?;
             self.render_state.get_or_insert(render_state)
         };
-        let alpha_mode = if self.support_transparent_backbuffer {
+        let alpha_mode = if dcomp {
+            // DComp visual 的交换链必须预乘 alpha；Auto 在 DX12 上会按不透明处理，整窗变黑矩形。
+            wgpu::CompositeAlphaMode::PreMultiplied
+        } else if self.support_transparent_backbuffer {
             let supported_alpha_modes = surface.get_capabilities(&render_state.adapter).alpha_modes;
 
             // Prefer pre multiplied over post multiplied!
@@ -233,6 +598,7 @@ impl Painter {
                 width: size.width,
                 height: size.height,
                 alpha_mode,
+                dcomp,
             },
         );
         let Some(width) = NonZeroU32::new(size.width) else {

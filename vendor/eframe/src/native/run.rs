@@ -176,8 +176,12 @@ impl<T: WinitApp> WinitAppWrapper<T> {
                     return true; // not yet ready
                 };
 
-                event_loop.set_control_flow(ControlFlow::Poll);
-
+                // 本地补丁（对应 emilk/egui#8398，0.31.1 尚未包含）：这里原来还会
+                // `set_control_flow(ControlFlow::Poll)`，但到期项被全部消费后 Poll 从不
+                // 撤销 —— 事件循环转入忙等，每秒重绘上百次，`request_repaint_after`
+                // 设置的间隔因此形同虚设（实测液态皮肤常年锁在 58fps，调 33ms 也不降）。
+                // `request_redraw()` 本身就会唤醒事件循环并投递 RedrawRequested，
+                // 不需要 Poll；控制流统一在下面按「剩余最早到期时间」重设。
                 if let Some(window) = self.winit_app.window(*window_id) {
                     log::trace!("request_redraw for {window_id:?}");
                     window.request_redraw();
@@ -188,9 +192,11 @@ impl<T: WinitApp> WinitAppWrapper<T> {
             });
 
         let next_repaint_time = self.windows_next_repaint_times.values().min().copied();
-        if let Some(next_repaint_time) = next_repaint_time {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(next_repaint_time));
-        };
+        event_loop.set_control_flow(match next_repaint_time {
+            Some(next_repaint_time) => ControlFlow::WaitUntil(next_repaint_time),
+            // 没有待处理的重绘请求时明确休眠，而不是继续 Poll。
+            None => ControlFlow::Wait,
+        });
     }
 }
 

@@ -105,6 +105,18 @@ version = "0.30.7"
 optional = true
 default-features = false
 
+[target."cfg(windows)".dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_Dxgi",
+]
+default-features = false
+
 [features]
 default = ["fragile-send-sync-non-atomic-wasm"]
 fragile-send-sync-non-atomic-wasm = ["wgpu/fragile-send-sync-non-atomic-wasm"]

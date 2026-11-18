@@ -411,6 +411,17 @@ pub fn chevron(c: &Card, x: f32, y: f32, dir: f32, hover: f32, press: f32) {
     c.path(&[(cx - dir * s * 0.75, y - s), (cx + dir * s * 0.45, y), (cx - dir * s * 0.75, y + s)], 1.6, Color32::WHITE);
 }
 
+/// 液态皮肤的翻页箭头：`scale` 由控件弹簧给（入场张开 + 按压回弹）。
+/// 已由 GPU 画玻璃时只留白色箭头（gpu=true 不再叠矢量玻璃片）；
+/// 没开兼容渲染时回退到矢量玻璃圆盘。箭头本体两种路径都画。
+pub fn chevron_glass(c: &Card, x: f32, y: f32, dir: f32, hover: f32, scale: f32, gpu: bool) {
+    let c = c.scaled(x, y, scale);
+    if !gpu { glass_disc(&c, x, y, 12.0, 0.18 + hover * 0.82); }
+    let nudge = dir * 0.8 * hover;
+    let (cx, s) = (x + nudge + dir * 0.6, 2.7);
+    c.path(&[(cx - dir * s * 0.75, y - s), (cx + dir * s * 0.45, y), (cx - dir * s * 0.75, y + s)], 1.6, Color32::WHITE);
+}
+
 /// 电池环：充电绿色 + 闪电；低电量红色；否则灰色并显示百分比弧。
 pub fn battery(c: &Card, cx: f32, cy: f32, pct: Option<u8>, charging: bool, k: f32) {
     let r = 8.2 * k;
@@ -437,6 +448,75 @@ pub fn battery(c: &Card, cx: f32, cy: f32, pct: Option<u8>, charging: bool, k: f
     } else {
         c.text(cx, cy + 2.4 * k, &format!("{}", pct.unwrap_or(0)), 6.6 * k, W::Bold, col, H::Center);
     }
+}
+
+// ---------- 液态玻璃控件的矢量兜底 ----------
+// 有 wgpu 设备时控件走 gpu_glass 真折射；没有时（未开兼容渲染）用下面这组画「像玻璃」的片。
+// chrome_mark/chrome_since 把图形登记为「材质」：GPU 着色器里白边恒为白线，矢量兜底也必须保白，
+// 否则翻页过渡（控件走不了 GPU 的那半秒）会从黑边跳回白边。
+
+pub(crate) fn chrome_mark(c: &Card) -> usize {
+    crate::skin_paint::shape_count(c.ui.ctx(), c.painter.layer_id())
+}
+
+pub(crate) fn chrome_since(c: &Card, from: usize) {
+    crate::skin_paint::tone_since(c.ui.ctx(), c.painter.layer_id(), from,
+                                  crate::skin_paint::keep_glass_chrome);
+}
+
+/// 圆角玻璃片（标签、chip、胶囊底）：静止时几乎只有一圈边，悬停才亮起来。
+pub fn glass_chip(c: &Card, x: f32, y: f32, w: f32, h: f32, r: f32, level: f32) {
+    if w < 2.0 || h < 2.0 { return; }
+    let from = chrome_mark(c);
+    let lv = level.clamp(0.0, 1.0);
+    let r = r.min(w.min(h) * 0.5);
+    c.fill(x, y, w, h, r, Color32::from_white_alpha((10.0 + 30.0 * lv) as u8));
+    c.vgrad(x, y, w, h, r, Color32::from_white_alpha((22.0 + 24.0 * lv) as u8), Color32::TRANSPARENT);
+    if h >= 8.0 {
+        let inset = r * 0.8;
+        c.fill(x + inset, y + h - 1.0, (w - inset * 2.0).max(1.0), 1.0, 0.5, Color32::from_black_alpha(28));
+    }
+    c.stroke(x + 0.75, y + 0.75, w - 1.5, h - 1.5, (r - 0.75).max(0.0), 1.5,
+             Color32::from_white_alpha((120.0 + 60.0 * lv) as u8));
+    chrome_since(c, from);
+}
+
+/// 圆形玻璃片：播放控制、齿轮、翻页箭头的矢量兜底。
+pub fn glass_disc(c: &Card, cx: f32, cy: f32, r: f32, level: f32) {
+    if r < 2.0 { return; }
+    let from = chrome_mark(c);
+    let lv = level.clamp(0.0, 1.0);
+    c.circle(cx, cy, r, Color32::from_white_alpha((10.0 + 28.0 * lv) as u8));
+    c.arc(cx, cy, r - 0.8, PI * 1.12, PI * 1.88, 1.1, Color32::from_white_alpha((26.0 + 30.0 * lv) as u8));
+    c.ring(cx, cy, (r - 0.75).max(0.5), 1.5, Color32::from_white_alpha((110.0 + 60.0 * lv) as u8));
+    chrome_since(c, from);
+}
+
+/// 玻璃凹槽：进度条底槽用。
+pub fn glass_groove(c: &Card, x: f32, y: f32, w: f32, h: f32) {
+    if w < 2.0 || h < 1.5 { return; }
+    let from = chrome_mark(c);
+    let r = h * 0.5;
+    c.fill(x, y, w, h, r, Color32::from_black_alpha(46));
+    if h >= 6.0 {
+        let inset = (r * 0.9).min(w * 0.4);
+        c.fill(x + inset, y, (w - inset * 2.0).max(1.0), 1.0, 0.5, Color32::from_black_alpha(56));
+    }
+    let inset = (r * 0.9).min(w * 0.4);
+    c.fill(x + inset, y + h - 1.0, (w - inset * 2.0).max(1.0), 1.0, 0.5, Color32::from_white_alpha(26));
+    chrome_since(c, from);
+}
+
+/// 液态玻璃胶囊按钮：悬停提亮、按下轻微缩小。
+pub fn glass_capsule<'a>(
+    c: &Card<'a>, x: f32, y: f32, w: f32, h: f32, id: &str, level: f32, hover_boost: f32,
+) -> (egui::Response, Card<'a>) {
+    let r = c.hit(x, y, w, h, id);
+    let (ht, pt) = c.hover_t(&r);
+    let k = 1.0 - 0.05 * pt;
+    let inner = c.scaled(x + w / 2.0, y + h / 2.0, k);
+    glass_chip(&inner, x, y, w, h, h / 2.0, (level + ht * hover_boost).clamp(0.0, 1.0));
+    (r, inner)
 }
 
 /// 播放 ↔ 暂停形变：`t` = 0 播放三角，1 暂停双竖条。

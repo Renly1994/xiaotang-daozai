@@ -25,14 +25,18 @@ pub struct Palette {
     pub darken: f32,
     /// 深色块（卡片、按钮底）映射时的亮度系数：越小越接近纸色，毛玻璃浅色用它做白色磨砂按钮。
     pub chip: f32,
+    /// 玻璃控件的白边/高光原样保留、不参与整体换色（液态浅材质下避免黑边/白边跳变）。
+    pub glass_chrome: bool,
 }
 
 /// 奶油（参考 Oyen）：暖白底、深棕字、橙色强调。
-pub const CREAM: Palette = Palette { paper: [255, 243, 228], ink: [46, 32, 22], accent: Some([240, 138, 36]), dark_alpha: 1.0, lift: 1.0, darken: 0.78, chip: 1.0 };
+pub const CREAM: Palette = Palette { paper: [255, 243, 228], ink: [46, 32, 22], accent: Some([240, 138, 36]), dark_alpha: 1.0, lift: 1.0, darken: 0.78, chip: 1.0, glass_chrome: false };
 /// 毛玻璃·浅：白色磨砂、近黑字、系统蓝。
-pub const GLASS_LIGHT: Palette = Palette { paper: [255, 255, 255], ink: [22, 22, 26], accent: Some([10, 112, 230]), dark_alpha: 0.8, lift: 1.0, darken: 0.78, chip: 0.6 };
+pub const GLASS_LIGHT: Palette = Palette { paper: [255, 255, 255], ink: [22, 22, 26], accent: Some([10, 112, 230]), dark_alpha: 0.8, lift: 1.0, darken: 0.78, chip: 0.6, glass_chrome: false };
+/// 毛玻璃·浅（液态专用）：白边恒白不换色，深墨字，避免液态浅材质翻页时黑边/白边跳变。
+pub const GLASS_LIGHT_READABLE: Palette = Palette { paper: [255, 255, 255], ink: [22, 22, 26], accent: Some([10, 112, 230]), dark_alpha: 0.8, lift: 0.45, darken: 0.78, chip: 0.6, glass_chrome: true };
 /// 毛玻璃·深：保持黑底白字，只把灰色文字提亮、卡片底调透，适配更通透的深色玻璃。
-pub const GLASS_DARK: Palette = Palette { paper: [0, 0, 0], ink: [255, 255, 255], accent: None, dark_alpha: 0.5, lift: 0.6, darken: 1.0, chip: 1.0 };
+pub const GLASS_DARK: Palette = Palette { paper: [0, 0, 0], ink: [255, 255, 255], accent: None, dark_alpha: 0.5, lift: 0.6, darken: 1.0, chip: 1.0, glass_chrome: false };
 
 /// 单色图标纹理（白色图形 + 透明度，如 AI 厂商标识）：和文字一样参与换色。
 /// 其余纹理（专辑封面、应用图标、文件预览）保持原样。
@@ -85,6 +89,13 @@ fn contrast(a: [f32; 3], b: [f32; 3]) -> f32 {
 
 fn luma(c: [f32; 3]) -> f32 {
     0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
+}
+
+/// 玻璃控件（圆盘 / 胶囊 / 凹槽）专用的换色函数：调色板声明 `glass_chrome` 时原样保留。
+/// 玻璃的白边、柔光、压暗是「材质」而不是「配色」，和 GPU 着色器画出来的那套必须一致
+/// （着色器里白边永远是白线）；只有字色、图标色才跟着深/浅材质走。
+pub fn keep_glass_chrome(c: Color32, p: &Palette) -> Color32 {
+    if p.glass_chrome { c } else { map_color(c, p) }
 }
 
 /// 映射单个颜色（Color32 为预乘 alpha）。

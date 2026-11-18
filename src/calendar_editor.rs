@@ -1,5 +1,5 @@
 //! 岛内本机日程表单。
-use crate::{app::{App,Cmd,CALENDAR_PAGE},local_calendar::{self,Draft},paint::{self,Card,H},theme::{self,W}};
+use crate::{app::{App,Cmd,CALENDAR_PAGE,Ctl},local_calendar::{self,Draft},paint::{self,Card,H},theme::{self,W}};
 use eframe::egui::{self,Color32};
 
 fn fallback_ics_uid(event:&crate::mail::Meeting)->String{
@@ -86,6 +86,16 @@ impl App {
         }
     }
     pub(crate) fn draw_calendar_editor(&mut self,c:&Card){
+        // GPU 玻璃分支要在 d（&mut draft）借走 self 之前把弹簧与「是否已由 GPU 画」
+        // 取出来 —— 借用规则不允许边改草稿边读 self。顺序：0=全天，1..5=提醒分段，
+        // 6=删除，7=取消，8=保存。
+        let glassy=self.glassy();
+        let ctls=[Ctl::CalAllDay,Ctl::CalRem0,Ctl::CalRem1,Ctl::CalRem2,Ctl::CalRem3,Ctl::CalRem4,Ctl::CalDelete,Ctl::CalCancel,Ctl::CalSave];
+        let mut gpu=[false;9]; let mut ctl_s=[1.0f32;9];
+        for (i,ctl) in ctls.iter().enumerate() {
+            gpu[i]=glassy && self.ctl_on_gpu(*ctl);
+            ctl_s[i]=self.ctl_scale(*ctl);
+        }
         let Some(d)=self.calendar.draft.as_mut() else{return;};
         let accent=Color32::from_rgb(82,162,255);
         c.centered_text(43.0,20.0,if d.uid.is_some(){"编辑日程"}else{"新建日程"},13.0,W::Semibold,theme::WHITE,H::Left);
@@ -93,29 +103,83 @@ impl App {
         for (label,y) in [("名称",49.0),("开始",82.0),("结束",114.0),("提醒",147.0)]{c.centered_text(43.0,y,label,10.0,W::Regular,theme::GRAY,H::Left);}
         for (x,y,w) in [(86.0,38.0,284.0),(86.0,71.0,120.0),(86.0,103.0,120.0)]{c.fill(x,y,w,23.0,6.0,theme::CARD);}
         if !d.all_day {for y in [71.0,103.0]{c.fill(214.0,y,66.0,23.0,6.0,theme::CARD);}}
-        let (all_day,b)=paint::capsule(c,294.0,72.0,76.0,21.0,"calendar-editor-all-day",if d.all_day{Color32::from_rgb(28,65,100)}else{theme::BTN},theme::BTN_HOVER);
-        b.centered_text(332.0,82.5,if d.all_day{"✓ 全天"}else{"全天"},10.0,W::Regular,theme::WHITE,H::Center);
+        let (all_day,b)=if gpu[0] {
+            let r=c.hit(294.0,72.0,76.0,21.0,"calendar-editor-all-day");
+            let (hover,_)=c.hover_t(&r);
+            let b=c.scaled(332.0,82.5,ctl_s[0]);
+            if d.all_day || hover>0.01 {
+                // white_alpha 的 premultiplied 亮度很低，浅材质通用换色会把它压成暗雾
+                // 埋掉文字（「提醒那一横排看不清」的同源问题）——登记为玻璃材质原样
+                // 保留；选中态的文字改用强调色，两种材质下都读得清。
+                let from=paint::chrome_mark(c);
+                b.fill(294.0,72.0,76.0,21.0,10.5,Color32::from_white_alpha((14.0+(if d.all_day {14.0}else{0.0})+hover*16.0) as u8));
+                paint::chrome_since(c,from);
+            }
+            (r,b)
+        }else{
+            paint::capsule(c,294.0,72.0,76.0,21.0,"calendar-editor-all-day",if d.all_day{Color32::from_rgb(28,65,100)}else{theme::BTN},theme::BTN_HOVER)
+        };
+        b.centered_text(332.0,82.5,if d.all_day{"✓ 全天"}else{"全天"},10.0,W::Regular,if d.all_day{accent}else{theme::WHITE},H::Center);
         if all_day.clicked(){d.all_day=!d.all_day;d.error.clear();}
         if d.all_day {c.centered_text(214.0,114.0,"包含结束当天",8.5,W::Regular,theme::GRAY,H::Left);}
         let options=if d.all_day{vec![(None,"不提醒"),(Some(0),"当天 09:00")]}else{vec![(None,"不提醒"),(Some(0),"准时"),(Some(5),"提前5分"),(Some(15),"提前15分"),(Some(30),"提前30分")]};
         let width=if d.all_day{126.0}else{54.0};
         for (i,(value,label)) in options.into_iter().enumerate(){
             let x=86.0+i as f32*(width+3.0);let on=if d.all_day{d.reminder.is_some()==value.is_some()}else{d.reminder==value};
-            let (r,b)=paint::capsule(c,x,136.0,width,21.0,&format!("calendar-editor-reminder-{i}"),if on{Color32::from_rgb(28,65,100)}else{theme::BTN},theme::BTN_HOVER);
-            b.centered_text(x+width/2.0,146.5,label,8.4,W::Regular,theme::WHITE,H::Center);
+            let gi=1+i;   // 提醒分段在预取数组里的下标（CalRem0..4）
+            let (r,b)=if gpu[gi] {
+                let r=c.hit(x,136.0,width,21.0,&format!("calendar-editor-reminder-{i}"));
+                let (hover,_)=c.hover_t(&r);
+                let b=c.scaled(x+width/2.0,146.5,ctl_s[gi]);
+                if on || hover>0.01 {
+                    // 选中淡填充套玻璃材质保护（浅材质下否则被压成暗雾埋掉文字）。
+                    let from=paint::chrome_mark(c);
+                    b.fill(x,136.0,width,21.0,10.5,Color32::from_white_alpha((14.0+(if on {14.0}else{0.0})+hover*16.0) as u8));
+                    paint::chrome_since(c,from);
+                }
+                (r,b)
+            }else{
+                paint::capsule(c,x,136.0,width,21.0,&format!("calendar-editor-reminder-{i}"),if on{Color32::from_rgb(28,65,100)}else{theme::BTN},theme::BTN_HOVER)
+            };
+            b.centered_text(x+width/2.0,146.5,label,8.4,W::Regular,if on{accent}else{theme::WHITE},H::Center);
             if r.clicked(){d.reminder=value;}
         }
         let message=if d.error.is_empty(){"日期 年-月-日 · 时间 时:分"}else{&d.error};
         c.centered_text(86.0,172.0,&c.fit(message,9.0,W::Regular,284.0),9.0,W::Regular,if d.error.is_empty(){theme::GRAY}else{theme::RED},H::Left);
         let mut delete=false;
         if d.uid.is_some(){
-            let (r,b)=paint::capsule(c,43.0,188.0,82.0,22.0,"calendar-editor-delete",theme::BTN,theme::BTN_HOVER);
+            let (r,b)=if gpu[6] {
+                let r=c.hit(43.0,188.0,82.0,22.0,"calendar-editor-delete");
+                let (hover,_)=c.hover_t(&r);
+                let b=c.scaled(84.0,199.0,ctl_s[6]);
+                if hover>0.01 {b.fill(43.0,188.0,82.0,22.0,11.0,Color32::from_white_alpha((12.0+hover*16.0) as u8));}
+                (r,b)
+            }else{
+                paint::capsule(c,43.0,188.0,82.0,22.0,"calendar-editor-delete",theme::BTN,theme::BTN_HOVER)
+            };
             b.centered_text(84.0,199.0,if d.confirm_delete{"确认删除"}else{"删除日程"},9.5,W::Regular,theme::RED,H::Center);
             if r.clicked(){if d.confirm_delete{delete=true;}else{d.confirm_delete=true;}}
         }
-        let (cancel,b)=paint::capsule(c,224.0,188.0,64.0,22.0,"calendar-editor-cancel",theme::BTN,theme::BTN_HOVER);
+        let (cancel,b)=if gpu[7] {
+            let r=c.hit(224.0,188.0,64.0,22.0,"calendar-editor-cancel");
+            let (hover,_)=c.hover_t(&r);
+            let b=c.scaled(256.0,199.0,ctl_s[7]);
+            if hover>0.01 {b.fill(224.0,188.0,64.0,22.0,11.0,Color32::from_white_alpha((12.0+hover*16.0) as u8));}
+            (r,b)
+        }else{
+            paint::capsule(c,224.0,188.0,64.0,22.0,"calendar-editor-cancel",theme::BTN,theme::BTN_HOVER)
+        };
         b.centered_text(256.0,199.0,"取消",10.0,W::Regular,theme::WHITE,H::Center);
-        let (save,b)=paint::capsule(c,298.0,188.0,72.0,22.0,"calendar-editor-save",accent,Color32::from_rgb(110,180,255));
+        // 保存是主操作：透镜上叠一层半透明强调色，保住「这是主按钮」的视觉权重。
+        let (save,b)=if gpu[8] {
+            let r=c.hit(298.0,188.0,72.0,22.0,"calendar-editor-save");
+            let (hover,_)=c.hover_t(&r);
+            let b=c.scaled(334.0,199.0,ctl_s[8]);
+            b.fill(298.0,188.0,72.0,22.0,11.0,paint::alpha(accent,0.42+(hover*0.16).min(0.16)));
+            (r,b)
+        }else{
+            paint::capsule(c,298.0,188.0,72.0,22.0,"calendar-editor-save",accent,Color32::from_rgb(110,180,255))
+        };
         b.centered_text(334.0,199.0,"保存到本机",10.0,W::Semibold,theme::WHITE,H::Center);
         if delete{self.delete_calendar_editor();}else if cancel.clicked(){self.calendar.draft=None;}else if save.clicked(){self.save_calendar_editor();}
     }

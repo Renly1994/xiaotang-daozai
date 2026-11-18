@@ -1,5 +1,5 @@
 //! 同心额度环、账号选择及账号设置。
-use crate::{app::{App,Cmd},extras::{settings_control_row},paint::{Card,H},quota::{self,Accent,Account,Amount,Config,Provider,Snapshot},theme::{self,W}};
+use crate::{app::{App,Cmd,Ctl},extras::{settings_control_row},paint::{Card,H},quota::{self,Accent,Account,Amount,Config,Provider,Snapshot},theme::{self,W}};
 use eframe::egui::{self,Color32};
 use std::collections::{HashMap,HashSet};
 use chrono::Datelike;
@@ -164,7 +164,7 @@ fn logo(c:&Card,provider:Provider,x:f32,y:f32,size:f32){
 }
 fn deepseek_badge_svg(skin:crate::model::Skin)->String{
     use crate::model::Skin;
-    let (fill,rim)=match skin{Skin::Classic=>("#e9edff","#cfd7ff"),Skin::Cream=>("#e9edff","#dce2fc"),Skin::GlassLight=>("#f5f7ff","#dfe5fa"),Skin::GlassDark|Skin::Fluid=>("#dce4fa","#b8c9ec")};
+    let (fill,rim)=match skin{Skin::Classic=>("#e9edff","#cfd7ff"),Skin::Cream=>("#e9edff","#dce2fc"),Skin::GlassLight|Skin::Liquid=>("#f5f7ff","#dfe5fa"),Skin::GlassDark|Skin::Fluid=>("#dce4fa","#b8c9ec")};
     let whale=include_str!("../assets/ai-icons/deepseek.svg").replace("currentColor","#4d6bfe").replace("width=\"1em\"","x=\"12.5\" width=\"75\"").replace("height=\"1em\"","y=\"12.5\" height=\"75\"");
     format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><circle cx=\"50\" cy=\"50\" r=\"48\" fill=\"{fill}\" stroke=\"{rim}\" stroke-width=\"3\"/>{whale}</svg>")
 }
@@ -414,7 +414,21 @@ impl App {
         let Some(selected)=self.quota.config.selected_index() else{
             c.text(43.0,61.0,"还没有添加 AI 账号",13.0,W::Bold,theme::WHITE,H::Left);
             c.text(43.0,80.0,"连接 AI 账号，查看剩余额度",10.5,W::Regular,theme::GRAY,H::Left);
-            let(r,b)=crate::paint::capsule(c,43.0,92.0,94.0,24.0,"add-quota-account",theme::BTN,theme::BTN_HOVER);b.text(90.0,108.0,"添加账号",10.0,W::Semibold,theme::WHITE,H::Center);if r.clicked(){self.settings_tab=11;self.open_settings();}return;
+            // GPU 玻璃分支：透镜由着色器画，这里只留命中区/悬停反馈/文字；非液态保持实心胶囊。
+            let(r,b)=if self.glassy() && self.ctl_on_gpu(Ctl::QuotaAdd) {
+                let r=c.hit(43.0,92.0,94.0,24.0,"add-quota-account");
+                let (hover,_)=c.hover_t(&r);
+                let b=c.scaled(90.0,104.0,self.ctl_scale(Ctl::QuotaAdd));
+                if hover>0.01 {
+                    let from=crate::paint::chrome_mark(c);
+                    b.fill(43.0,92.0,94.0,24.0,12.0,Color32::from_white_alpha((12.0+hover*16.0) as u8));
+                    crate::paint::chrome_since(c,from);
+                }
+                (r,b)
+            }else{
+                crate::paint::capsule(c,43.0,92.0,94.0,24.0,"add-quota-account",theme::BTN,theme::BTN_HOVER)
+            };
+            b.text(90.0,108.0,"添加账号",10.0,W::Semibold,theme::WHITE,H::Center);if r.clicked(){self.settings_tab=11;self.open_settings();}return;
         };
         let indices=self.quota.config.ordered_indices(false);
         let pos=indices.iter().position(|i|*i==selected).unwrap_or(0);let start=pos/3*3;let mut picked=None;

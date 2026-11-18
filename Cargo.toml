@@ -29,7 +29,9 @@ imap = { path = "vendor/imap" }
 imap-proto = { path = "vendor/imap-proto" }
 eframe = { path = "vendor/eframe" }
 egui = { path = "vendor/egui" }
+egui-winit = { path = "vendor/egui-winit" }
 egui-wgpu = { path = "vendor/egui-wgpu" }
+wgpu-hal = { path = "vendor/wgpu-hal" }
 ureq = { path = "vendor/ureq" }
 
 [dependencies]
@@ -103,6 +105,10 @@ windows = { version = "0.58", features = [
   "Win32_Devices_Properties",
   "Win32_Devices_Bluetooth",
   "Devices_Bluetooth", "Devices_Enumeration",
+  "Graphics", "Graphics_Capture", "Graphics_DirectX", "Graphics_DirectX_Direct3D11",
+  "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common",
+  "Win32_System_WinRT_Direct3D11", "Win32_System_WinRT_Graphics_Capture",
 ] }
 # v0.5.5 邮件：IMAP 走系统 TLS，凭据进 Windows 凭据管理器。
 imap = "2.4"
