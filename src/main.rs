@@ -15,8 +15,9 @@ mod graphics;
 struct Shell {
     app: App,
     t0: Instant,
+    /// 下一帧的目标时刻（60 帧网格）。见 `update` 里的节奏说明。
     #[cfg(windows)]
-    frame_at: Instant,
+    frame_deadline: Option<Instant>,
     /// 兼容渲染上一次请求读回画面的时刻（无输入的持续动画按约 30 帧/秒读回）。
     #[cfg(windows)]
     readback_at: Option<Instant>,
@@ -97,6 +98,30 @@ struct Shell {
 }
 
 const MODULE_OFF:&str="该功能已在「页面管理」中关闭";
+
+/// 交互与动效的目标帧间隔（60 帧/秒）。
+#[cfg(windows)]
+const FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 60);
+
+/// 岛体在当前画布里的实际像素区域 (x, y, 宽, 高)。
+///
+/// 画布远大于岛体（640×190 逻辑点里岛体收起时只占约 200×46），整块画面交给分层窗口时，
+/// 每帧都要拷贝、哈希并让合成器更新十几倍于可见面积的像素。这里裁出岛体区域，
+/// 尺寸按 64 像素取整，动画中岛体每帧都在变大变小时位图不必反复重建。
+#[cfg(windows)]
+fn crop_for(region:egui::Rect,ppp:f32,size:[usize;2])->Option<(usize,usize,usize,usize)>{
+    let (w,h)=(size[0],size[1]);
+    if w==0||h==0||region.width()<=0.0||region.height()<=0.0{return None;}
+    let x0=(region.min.x*ppp).floor().max(0.0) as usize;
+    let y0=(region.min.y*ppp).floor().max(0.0) as usize;
+    let x1=((region.max.x*ppp).ceil().max(0.0) as usize).min(w);
+    let y1=((region.max.y*ppp).ceil().max(0.0) as usize).min(h);
+    if x1<=x0||y1<=y0{return None;}
+    let quantize=|v:usize|v.div_ceil(64)*64;
+    let cw=quantize(x1-x0).min(w);
+    let ch=quantize(y1-y0).min(h);
+    Some((x0.min(w-cw),y0.min(h-ch),cw,ch))
+}
 
 impl Shell {
     /// 按模块开关启停后台服务：关闭的模块不保留任何线程，重新开启时从头对齐配置。
@@ -182,7 +207,7 @@ impl Shell {
             app,
             t0: Instant::now(),
             #[cfg(windows)]
-            frame_at: Instant::now(),
+            frame_deadline: None,
             #[cfg(windows)]
             readback_at: None,
             media,
@@ -377,10 +402,25 @@ impl eframe::App for Shell {
         #[cfg(windows)] eframe::set_root_viewport_scale(self.app.settings.island_scale());
         #[cfg(windows)]
         {
-            // 用帧间隔限制刷新，绕过部分 Intel 驱动在垂直同步中的忙等待。
-            let delay=Duration::from_secs_f64(1.0/60.0).saturating_sub(self.frame_at.elapsed());
-            if !delay.is_zero(){std::thread::sleep(delay);}
-            self.frame_at=Instant::now();
+            // 帧节奏：对齐到固定的 60 帧网格。按「距上一帧多久」补差时，每帧耗时的波动
+            // （读回那一帧多出 2~3 ms）会直接变成帧间隔的抖动，在 120 Hz 的屏幕上表现成
+            // 14/19 ms 交替——肉眼就是不流畅。改成对齐绝对时间点后，耗时波动由 sleep 吸收。
+            let target = match self.frame_deadline {
+                None => frame_start,
+                Some(previous) => {
+                    let next = previous + FRAME_INTERVAL;
+                    let now = Instant::now();
+                    if next > now {
+                        std::thread::sleep(next - now);
+                        next
+                    } else if now.duration_since(next) > FRAME_INTERVAL {
+                        now // 落后超过一帧（被系统挂起、拖动窗口等），重新对齐网格
+                    } else {
+                        next
+                    }
+                }
+            };
+            self.frame_deadline = Some(target);
         }
         #[cfg(windows)]
         self.poll_tray();
@@ -632,30 +672,26 @@ impl eframe::App for Shell {
             let mirror_on=self.app.settings.mirror_displays;
             let native_wants=self.native.as_ref().is_some_and(|n|n.wants_frames());
             if native_wants || mirror_on {
-                let (shot,other_input)=ctx.input(|i|(
-                    i.events.iter().rev().find_map(|e|match e{egui::Event::Screenshot{image,..}=>Some(image.clone()),_=>None}),
-                    i.events.iter().any(|e|!matches!(e,egui::Event::Screenshot{..})),
-                ));
+                // 直接把截图事件取出来，不复制整块画面（2 倍缩放下每帧 2MB 以上）。
+                let (shot,other_input)=ctx.input_mut(|i|{
+                    let shot=i.events.iter().position(|e|matches!(e,egui::Event::Screenshot{..}))
+                        .and_then(|index|match i.events.remove(index){egui::Event::Screenshot{image,..}=>Some(image),_=>None});
+                    (shot,i.events.iter().any(|e|!matches!(e,egui::Event::Screenshot{..})))
+                });
+                let crop=shot.as_ref().and_then(|image|crop_for(out.region,ctx.pixels_per_point(),image.size));
                 let mut changed=false;
-                if let (true,Some(image),Some(native))=(native_wants,shot.as_ref(),self.native.as_mut()) {
-                    changed|=native.present_frame(image.size,image.as_raw());
+                if let (true,Some(image),Some(crop),Some(native))=(native_wants,shot.as_ref(),crop,self.native.as_mut()) {
+                    changed|=native.present_frame(image.size,crop,image.as_raw());
                 }
                 if mirror_on {
-                    if let Some(image)=shot.as_ref() {
-                        let frame=self.native.as_mut().map(|native|native.mirror_frame(image.size,image.as_raw()));
+                    if let (Some(image),Some(crop))=(shot.as_ref(),crop) {
+                        let ppp=ctx.pixels_per_point();
+                        let frame=self.native.as_mut().and_then(|native|native.mirror_frame(image.size,crop,image.as_raw()));
                         if let Some(frame)=frame {
-                            let ppp=ctx.pixels_per_point();
-                            let region=out.region;
-                            let crop=(
-                                (region.min.x*ppp).round().max(0.0) as u32,
-                                (region.min.y*ppp).round().max(0.0) as u32,
-                                (region.width()*ppp).round().max(1.0) as u32,
-                                (region.height()*ppp).round().max(1.0) as u32,
-                            );
                             changed|=self.mirrors.sync(
                                 &self.app.displays,&self.app.settings.display_id,&self.app.settings,
                                 ppp,self.app.placement_offset(),self.oled_shift,
-                                self.fullscreen,crop,image.size,frame.as_ref(),
+                                self.fullscreen,[crop.2,crop.3],frame,
                             );
                         }
                     }
@@ -663,8 +699,10 @@ impl eframe::App for Shell {
                 if shot.is_none() || changed || other_input {
                     // 拖动、悬停等有输入时满帧跟手；歌词滚动这类自己在动的画面约 30 帧/秒读回，
                     // 未到间隔就预约一次重绘，到时补上读回，动画停下时的最后一帧不会漏掉。
+                    // 展开/收起、拖动、切页这些交互形变最容易被看出卡顿，也按满帧读回。
                     let now=Instant::now();
-                    match daozai::layered::readback_delay(self.readback_at,now,other_input) {
+                    let full_rate=other_input || out.transitioning;
+                    match daozai::layered::readback_delay(self.readback_at,now,full_rate) {
                         None=>{self.readback_at=Some(now);ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));}
                         Some(wait)=>ctx.request_repaint_after(wait),
                     }

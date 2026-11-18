@@ -684,6 +684,26 @@ impl GlowWinitRunning<'_> {
             &textures_delta,
         );
 
+        // 本帧的截图命令要在本帧绘制完成后立即读回。
+        //
+        // 视口命令默认在帧末才交给 egui-winit（见下面的 `handle_viewport_output`），
+        // 截图动作因此要等到下一帧的「绘制之后」才执行，画面又晚一帧才能拿到：
+        // 60 帧的渲染只能产生 30 帧可显示的画面（岛仔的兼容渲染/多屏镜像依赖逐帧读回，
+        // 表现为动画明显卡顿）。这里先把截图命令取出来，用刚画好的这一帧读回。
+        let mut viewport_output = viewport_output;
+        if let Some(output) = viewport_output.get_mut(&viewport_id) {
+            if let Some(index) = output.commands.iter().position(|command| matches!(command, egui::ViewportCommand::Screenshot(_))) {
+                if let egui::ViewportCommand::Screenshot(user_data) = output.commands.remove(index) {
+                    let screenshot = painter.read_screen_rgba(screen_size_in_pixels);
+                    egui_winit.egui_input_mut().events.push(egui::Event::Screenshot {
+                        viewport_id,
+                        user_data,
+                        image: screenshot.into(),
+                    });
+                }
+            }
+        }
+
         {
             for action in viewport.actions_requested.drain() {
                 match action {

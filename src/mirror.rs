@@ -32,21 +32,14 @@ impl Mirrors {
         offset: f32,
         shift: (i32, i32),
         fullscreen: Option<crate::display_layout::Bounds>,
-        // crop: 岛体在当前画布里的实际像素区域 (x, y, w, h)。
-        crop: (u32, u32, u32, u32),
+        // 已经裁好的岛体画面尺寸（像素）。
         size: [usize; 2],
         frame: &[u8],
     ) -> bool {
         use crate::display_layout::{hide_for_fullscreen, placement_bounds, selected, side_origin, island_origin_offset, shift_slack};
 
-        let (cx, cy, cw, ch) = crop;
-        let (fw, fh) = (size[0] as u32, size[1] as u32);
-        if cw == 0 || ch == 0 || cx >= fw || cy >= fh { return false; }
-        let (cw, ch) = (cw.min(fw - cx), ch.min(fh - cy));
-        let Some(full)=image::RgbaImage::from_raw(fw,fh,frame.to_vec()) else { return false; };
-        let frame=image::imageops::crop_imm(&full,cx,cy,cw,ch).to_image();
-        let frame=frame.as_raw();
-        let frame_size=[cw as usize,ch as usize];
+        let (cw, ch) = (size[0], size[1]);
+        if cw == 0 || ch == 0 || frame.len() != cw * ch * 4 { return false; }
 
         let selected_id = selected(displays, selected_id).map(|d| d.id.clone()).unwrap_or_default();
         let targets = crate::display_layout::mirror_targets(displays, &selected_id);
@@ -75,7 +68,7 @@ impl Mirrors {
             origins.push(Some((x,y)));
             key.push_str(&format!("{}:{x},{y};", display.id));
         }
-        key.push_str(&format!("s={frame_size:?};c={crop:?};i={selected_id}"));
+        key.push_str(&format!("s={size:?};i={selected_id}"));
         if key != self.key {
             self.key = key;
             for layer in &mut self.layers { layer.invalidate(); }
@@ -100,7 +93,7 @@ impl Mirrors {
                 continue;
             }
             let (x, y) = origins[index].unwrap();
-            match layer.present_at(POINT { x, y }, frame_size, frame) {
+            match layer.present_at(POINT { x, y }, size, frame) {
                 Ok(value) => changed |= value,
                 Err(_) => layer.hide(),
             }
@@ -124,7 +117,6 @@ impl Mirrors {
         _offset: f32,
         _shift: (i32, i32),
         _fullscreen: Option<crate::display_layout::Bounds>,
-        _crop: (u32, u32, u32, u32),
         _size: [usize; 2],
         _frame: &[u8],
     ) -> bool { false }

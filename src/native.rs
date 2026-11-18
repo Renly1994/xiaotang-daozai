@@ -10,7 +10,6 @@
 //! - 原版没有可用的 Esc 收起入口（§2.5），这里也不注册键盘钩子。
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -393,14 +392,14 @@ pub struct Window {
     outline: ShapeAlpha,
 }
 
-/// 按岛体轮廓补出来的 alpha：轮廓每帧随 `update` 更新，蒙版只在轮廓或画面尺寸变化时重算。
+/// 按岛体轮廓补出来的 alpha：轮廓每帧随 `update` 更新，蒙版只在轮廓、裁剪区域或画面尺寸变化时重算。
 #[derive(Default)]
 struct ShapeAlpha {
     /// 读回的画面确实没有透明通道，正在用轮廓补 alpha。
     active: bool,
     key: Vec<i32>,
     polygons: Vec<Vec<(f32, f32)>>,
-    mask: Option<([usize; 2], Vec<i32>, Vec<u8>)>,
+    mask: Option<((usize, usize, usize, usize), Vec<i32>, Vec<u8>)>,
     frame: Vec<u8>,
 }
 
@@ -412,13 +411,24 @@ impl ShapeAlpha {
         self.key = key;
     }
 
-    /// 把读回的画面套上轮廓 alpha，返回交给分层窗口的画面。
-    fn apply(&mut self, size: [usize; 2], rgba: &[u8]) -> &[u8] {
-        if !self.mask.as_ref().is_some_and(|(s, k, _)| *s == size && *k == self.key) {
-            self.mask = Some((size, self.key.clone(), crate::layered::coverage_mask(size, &self.polygons)));
+    /// 把裁剪后的画面套上轮廓 alpha，返回交给分层窗口的画面。
+    /// 蒙版只按裁剪区域计算：岛体收起时区域只有画布的几十分之一，重算和套用的开销随之下降。
+    fn apply(&mut self, size: [usize; 2], crop: (usize, usize, usize, usize), rgba: &[u8]) -> &[u8] {
+        let (cx, cy, cw, ch) = crop;
+        if !self.mask.as_ref().is_some_and(|(c, k, _)| *c == crop && *k == self.key) {
+            let shifted: Vec<Vec<(f32, f32)>> = self.polygons.iter()
+                .map(|poly| poly.iter().map(|&(x, y)| (x - cx as f32, y - cy as f32)).collect())
+                .collect();
+            self.mask = Some((crop, self.key.clone(), crate::layered::coverage_mask([cw, ch], &shifted)));
         }
         let (_, _, mask) = self.mask.as_ref().unwrap();
-        crate::layered::apply_mask(rgba, mask, &mut self.frame);
+        crate::layered::crop_masked(rgba, size, crop, mask, &mut self.frame);
+        &self.frame
+    }
+
+    /// 读得到透明通道时只需裁剪。
+    fn crop(&mut self, size: [usize; 2], crop: (usize, usize, usize, usize), rgba: &[u8]) -> &[u8] {
+        crate::layered::crop_frame(rgba, size, crop, &mut self.frame);
         &self.frame
     }
 }
@@ -502,11 +512,13 @@ impl Window {
     /// 是否需要每帧读回画面交给分层窗口（兼容后端，且分层窗口仍可用）。
     pub fn wants_frames(&self)->bool {self.opaque_surface && !matches!(self.layering,Layering::Unavailable)}
 
-    /// 交一帧读回的画面（RGBA，已预乘）。返回画面是否变化。
+    /// 交一帧读回的画面（RGBA，已预乘）。`crop` 是岛体在画布里的实际像素区域 (x, y, 宽, 高)。
     /// 首帧看读回的画面有没有真正的透明像素：有就原样交给分层窗口；没有（部分 AMD 显卡的 OpenGL）
     /// 就按岛体轮廓补算边缘 alpha——普通模式也不再退回逐像素「有或没有」的轮廓裁剪。
-    pub fn present_frame(&mut self,size:[usize;2],rgba:&[u8])->bool {
+    pub fn present_frame(&mut self,size:[usize;2],crop:(usize,usize,usize,usize),rgba:&[u8])->bool {
         if !self.wants_frames(){return false;}
+        let (cx,cy,cw,ch)=crop;
+        if cw==0||ch==0||cx+cw>size[0]||cy+ch>size[1]||rgba.len()!=size[0]*size[1]*4{return false;}
         if matches!(self.layering,Layering::Pending) {
             let real=crate::layered::has_real_alpha(size,rgba) && outline_test()!=Some(true);
             // 还没收到过岛体轮廓时无从补 alpha，先保持轮廓裁剪，等下一帧。
@@ -525,8 +537,10 @@ impl Window {
             }
         }
         let Layering::Active(layered)=&mut self.layering else {return false};
-        let frame=if self.outline.active {self.outline.apply(size,rgba)} else {rgba};
-        match layered.present(self.hwnd,size,frame) {
+        let frame=if self.outline.active {self.outline.apply(size,crop,rgba)} else {self.outline.crop(size,crop,rgba)};
+        let offset=POINT{x:cx as i32,y:cy as i32};
+        let size=[cw,ch];
+        match layered.present_cropped(self.hwnd,offset,size,frame) {
             // 切到分层窗口后，下一次 update 换回矩形区域（岛仔窗口本身已几乎不可见，只负责命中）。
             Ok(changed)=>changed,
             Err(error)=>{
@@ -539,9 +553,11 @@ impl Window {
         }
     }
 
-    /// 多屏镜像用的画面：兼容渲染没有 alpha 时套上同一份岛体轮廓遮罩。
-    pub fn mirror_frame<'a>(&'a mut self, size: [usize; 2], rgba: &'a [u8]) -> Cow<'a, [u8]> {
-        if self.outline.active { Cow::Borrowed(self.outline.apply(size, rgba)) } else { Cow::Borrowed(rgba) }
+    /// 多屏镜像用的画面：先裁出岛体区域，读不到透明通道时再套上同一份轮廓遮罩。
+    pub fn mirror_frame(&mut self, size: [usize; 2], crop: (usize, usize, usize, usize), rgba: &[u8]) -> Option<&[u8]> {
+        let (cx,cy,cw,ch)=crop;
+        if cw==0||ch==0||cx+cw>size[0]||cy+ch>size[1]||rgba.len()!=size[0]*size[1]*4{return None;}
+        Some(if self.outline.active {self.outline.apply(size,crop,rgba)} else {self.outline.crop(size,crop,rgba)})
     }
 
     pub fn logical_origin(&self,scale:f32)->Option<eframe::egui::Pos2>{
@@ -734,11 +750,11 @@ mod tests {
                 let shapes=[GlassShape::Outline(island)];
                 // 读回的画面：岛体黑色、画布也是黑色，alpha 全部 255——和 AMD OpenGL 读回的一样。
                 let opaque=[0u8,0,0,255].repeat(w*h);
-                assert!(!native.present_frame([w,h],&opaque),"还没收到轮廓时先保持轮廓裁剪");
+                assert!(!native.present_frame([w,h],(0,0,w,h),&opaque),"还没收到轮廓时先保持轮廓裁剪");
                 assert!(matches!(native.layering,Layering::Pending));
                 native.update((0.0,0.0,w as f32,h as f32),(80.0,0.0,240.0,60.0),None,None,Some(&shapes),1.0,false,false);
                 assert!(native.wants_frames());
-                assert!(native.present_frame([w,h],&opaque),"读不到透明通道也要切到分层窗口");
+                assert!(native.present_frame([w,h],(0,0,w,h),&opaque),"读不到透明通道也要切到分层窗口");
                 assert!(matches!(native.layering,Layering::Active(_)) && native.outline.active);
                 let frame=&native.outline.frame;
                 let alpha=|x:usize,y:usize|frame[(y*w+x)*4+3];
@@ -752,7 +768,7 @@ mod tests {
                 let region=CreateRectRgn(0,0,0,0);
                 if GetWindowRgn(hwnd,region).0!=0 {assert!(PtInRegion(region,10,150).as_bool(),"分层显示后窗口区域应回到矩形");}
                 let _=DeleteObject(region);
-                assert!(!native.present_frame([w,h],&opaque),"画面没变时不重复提交");
+                assert!(!native.present_frame([w,h],(0,0,w,h),&opaque),"画面没变时不重复提交");
             }
             *hit().lock().unwrap_or_else(|e|e.into_inner())=saved;
             let _=DestroyWindow(hwnd);

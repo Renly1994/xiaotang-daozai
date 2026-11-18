@@ -430,6 +430,8 @@ pub struct FrameOut {
     pub expanded: bool,
     pub editing: bool,
     pub animating: bool,
+    /// 交互形变（展开/收起、拖动、页面切换等）正在播放：这类动画肉眼最敏感，要按满帧读回。
+    pub transitioning: bool,
     pub repaint_after: std::time::Duration,
     pub cmds: Vec<Cmd>,
 }
@@ -2213,6 +2215,7 @@ impl App {
             expanded: self.open,
             editing: self.is_editing(),
             animating,
+            transitioning,
             repaint_after,
             cmds,
         }

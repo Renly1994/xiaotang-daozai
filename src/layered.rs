@@ -106,6 +106,34 @@ pub fn apply_mask(rgba: &[u8], mask: &[u8], out: &mut Vec<u8>) {
     out.extend(rgba.chunks_exact(4).zip(mask).flat_map(|(p, &a)| [p[0].min(a), p[1].min(a), p[2].min(a), a]));
 }
 
+/// 从整块画面里裁出 `crop`（x, y, 宽, 高，物理像素），逐行拷贝。
+///
+/// 岛体只占画布很小一块（收起时约 200×46 逻辑点，画布是 640×190），整块画面交给分层窗口
+/// 意味着每帧都要拷贝、哈希并让合成器更新十几倍于实际可见面积的像素；裁出来之后这些开销
+/// 与岛体大小成正比，收起态只有原来的几十分之一。
+pub fn crop_frame(src: &[u8], size: [usize; 2], crop: (usize, usize, usize, usize), out: &mut Vec<u8>) {
+    let (cx, cy, cw, ch) = crop;
+    out.clear();
+    out.reserve(cw * ch * 4);
+    for y in 0..ch {
+        let start = ((cy + y) * size[0] + cx) * 4;
+        out.extend_from_slice(&src[start..start + cw * 4]);
+    }
+}
+
+/// 裁剪的同时套上轮廓 alpha（两者都是一次遍历，省掉中间缓冲区）。
+pub fn crop_masked(src: &[u8], size: [usize; 2], crop: (usize, usize, usize, usize), mask: &[u8], out: &mut Vec<u8>) {
+    let (cx, cy, cw, ch) = crop;
+    out.clear();
+    out.reserve(cw * ch * 4);
+    for y in 0..ch {
+        let start = ((cy + y) * size[0] + cx) * 4;
+        let row = &src[start..start + cw * 4];
+        let m = &mask[y * cw..(y + 1) * cw];
+        out.extend(row.chunks_exact(4).zip(m).flat_map(|(p, &a)| [p[0].min(a), p[1].min(a), p[2].min(a), a]));
+    }
+}
+
 /// 显示窗口：鼠标一律穿透、不激活。
 unsafe extern "system" fn display_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
@@ -164,6 +192,8 @@ pub struct Layered {
     bits: *mut u8,
     size: (i32, i32),
     last: Option<u64>,
+    /// 提交的画面相对岛仔窗口左上角的偏移（岛体只占画布一角时，画面从这里开始贴）。
+    offset: POINT,
 }
 
 impl Layered {
@@ -174,7 +204,7 @@ impl Layered {
             unsafe { let _ = DestroyWindow(display); }
             return Err(windows::core::Error::from_win32());
         }
-        Ok(Self { display, dc, bitmap: HBITMAP::default(), old: HGDIOBJ::default(), bits: std::ptr::null_mut(), size: (0, 0), last: None })
+        Ok(Self { display, dc, bitmap: HBITMAP::default(), old: HGDIOBJ::default(), bits: std::ptr::null_mut(), size: (0, 0), last: None, offset: POINT::default() })
     }
 
     pub(crate) fn display(&self) -> HWND { self.display }
@@ -250,28 +280,24 @@ impl Layered {
     /// 把一帧（RGBA，已预乘）交给显示窗口。画面没变返回 Ok(false)；
     /// 尺寸与岛仔窗口当前大小不符（读回之后窗口又改了大小）时跳过，等下一帧。
     pub fn present(&mut self, owner: HWND, size: [usize; 2], rgba: &[u8]) -> windows::core::Result<bool> {
-        let (w, h) = (size[0] as i32, size[1] as i32);
         let mut rect = RECT::default();
         unsafe { GetWindowRect(owner, &mut rect)?; }
-        if (rect.right - rect.left, rect.bottom - rect.top) != (w, h) || rgba.len() != size[0] * size[1] * 4 { return Ok(false); }
-        let hash = image_hash(size, rgba);
-        if self.last == Some(hash) { return Ok(false); }
-        if !self.ensure_bitmap(w, h) { return Err(windows::core::Error::from_win32()); }
-        unsafe {
-            let dst = std::slice::from_raw_parts_mut(self.bits, rgba.len());
-            for (out, p) in dst.chunks_exact_mut(4).zip(rgba.chunks_exact(4)) {
-                out[0] = p[2]; out[1] = p[1]; out[2] = p[0]; out[3] = p[3];
-            }
-            let _ = GdiFlush();
-            let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
-            let (src, dst_pos, sz) = (POINT::default(), POINT { x: rect.left, y: rect.top }, SIZE { cx: w, cy: h });
-            UpdateLayeredWindow(self.display, None, Some(&dst_pos), Some(&sz), self.dc, Some(&src), COLORREF(0), Some(&blend), ULW_ALPHA)?;
+        if (rect.right - rect.left, rect.bottom - rect.top) != (size[0] as i32, size[1] as i32) || rgba.len() != size[0] * size[1] * 4 { return Ok(false); }
+        self.present_cropped(owner, POINT::default(), size, rgba)
+    }
+
+    /// 把画布里 `offset` 处的一小块画面贴到岛仔窗口对应的位置（多屏/裁剪后的主窗口都用这条路径）。
+    pub fn present_cropped(&mut self, owner: HWND, offset: POINT, size: [usize; 2], rgba: &[u8]) -> windows::core::Result<bool> {
+        let mut rect = RECT::default();
+        unsafe { GetWindowRect(owner, &mut rect)?; }
+        self.offset = offset;
+        let changed = self.present_at(POINT { x: rect.left + offset.x, y: rect.top + offset.y }, size, rgba)?;
+        if changed {
             // 显示窗口有了内容之后才把岛仔窗口自身藏起来，避免切换瞬间什么都看不到。
-            hide_owner(owner)?;
+            unsafe { hide_owner(owner)?; }
+            self.sync(owner, false);
         }
-        self.last = Some(hash);
-        self.sync(owner, false);
-        Ok(true)
+        Ok(changed)
     }
 
     /// 每帧跟随岛仔窗口：可见性、位置，以及紧贴在它正上方的层级。
@@ -287,9 +313,11 @@ impl Layered {
             }
             let (mut o, mut d) = (RECT::default(), RECT::default());
             if GetWindowRect(owner, &mut o).is_err() || GetWindowRect(self.display, &mut d).is_err() { return; }
+            // 显示窗口只承载岛体那一小块，位置要带上提交时的偏移，不能直接对齐到岛仔窗口左上角。
+            let (x, y) = (o.left + self.offset.x, o.top + self.offset.y);
             let flags = SWP_NOACTIVATE | SWP_NOSIZE;
-            if (o.left, o.top) != (d.left, d.top) || !display_visible || raise {
-                let _ = SetWindowPos(self.display, HWND_TOPMOST, o.left, o.top, 0, 0, flags | SWP_SHOWWINDOW);
+            if (x, y) != (d.left, d.top) || !display_visible || raise {
+                let _ = SetWindowPos(self.display, HWND_TOPMOST, x, y, 0, 0, flags | SWP_SHOWWINDOW);
             }
             // 岛仔窗口紧贴在显示窗口下面：别的置顶窗口不会夹在两者之间。
             if next_visible(self.display) != Some(owner) {
@@ -380,6 +408,44 @@ mod tests {
         let out = coverage_mask([4, 4], &[vec![(-5.0, -5.0), (9.0, -5.0), (9.0, 9.0), (-5.0, 9.0)]]);
         assert!(out.iter().all(|&v| v == 255));
         assert!(coverage_mask([4, 4], &[]).iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn crop_takes_the_requested_region() {
+        let (w, h) = (4usize, 3usize);
+        let src: Vec<u8> = (0..(w * h)).flat_map(|i| [i as u8, 0, 0, 255]).collect();
+        let mut out = Vec::new();
+        crop_frame(&src, [w, h], (1, 1, 2, 2), &mut out);
+        let reds: Vec<u8> = out.chunks_exact(4).map(|p| p[0]).collect();
+        assert_eq!(reds, vec![5, 6, 9, 10], "裁出的每一行都要按整行步长取");
+        let mut masked = Vec::new();
+        crop_masked(&src, [w, h], (1, 1, 2, 2), &[255, 128, 0, 255], &mut masked);
+        assert_eq!(masked.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>(), vec![255, 128, 0, 255], "裁剪与轮廓 alpha 一次遍历完成");
+        assert_eq!(masked[4], 6, "颜色也要取裁剪后的位置");
+    }
+
+    /// 岛体只占画布一角时，分层窗口只承载裁出来的那一块：位置落在岛仔窗口的偏移处，
+    /// 跟随窗口移动后也不能被拉回左上角（否则画面整体错位、边缘露出空白）。
+    #[test]
+    fn cropped_frame_lands_at_offset() {
+        unsafe {
+            let owner = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, windows::core::w!("BUTTON"), windows::core::w!(""), WS_POPUP | WS_VISIBLE, -9000, -8000, 200, 100, None, None, None, None).unwrap();
+            let mut layered = Layered::new().unwrap();
+            let px = [64u8, 64, 64, 255].repeat(8 * 4);
+            let offset = POINT { x: 30, y: 20 };
+            assert!(layered.present_cropped(owner, offset, [8, 4], &px).unwrap());
+            let mut d = RECT::default();
+            GetWindowRect(layered.display(), &mut d).unwrap();
+            assert_eq!((d.left, d.top, d.right - d.left, d.bottom - d.top), (-8970, -7980, 8, 4), "裁剪后的画面贴在岛仔窗口的偏移处");
+            layered.sync(owner, false);
+            GetWindowRect(layered.display(), &mut d).unwrap();
+            assert_eq!((d.left, d.top), (-8970, -7980), "跟随窗口时保持偏移，不能对齐回左上角");
+            SetWindowPos(owner, None, -8000, -7000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE).unwrap();
+            layered.sync(owner, false);
+            GetWindowRect(layered.display(), &mut d).unwrap();
+            assert_eq!((d.left, d.top), (-7970, -6980), "窗口移动后偏移依然生效");
+            let _ = DestroyWindow(owner);
+        }
     }
 
     #[test]
