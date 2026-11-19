@@ -218,15 +218,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\agent-screen-ocr.ps1
 
 > 说明：上面两张 banner 图是 MCP 截图的**缩放副本**（MCP 的 `save_path` 存的是预览尺寸），只作外观留档；坐标与识别结论均来自脚本自己的 1:1 GDI 截图。正式跑会在 `<时间戳>/` 下生成全流程 1:1 截图。
 
-**正式跑记录（2026-11-20 05:06，最终构建）**
+**正式跑记录（2026-11-20 05:15，交付构建）**
 
 - 二进制：`target\x86_64-pc-windows-msvc\release\daozai.exe`
   - 大小 **22,748,672** 字节
-  - SHA256 **9789C59E62AB775A501F77B0FF30AE50734AB5FBA08A04EA07433CFB37022DC1**
-  - 构建时间 2026-11-20 04:52:48
+  - SHA256 **4F6D68D62EA865CB9BC7B9FC4CB1C14A20406B048B69DB0C3FCB20B7B61D72EB**
+  - 构建时间 2026-11-20 05:14:56（= 当前桌面「岛仔－当前测试版」快捷方式指向的文件）
 - 命令：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts\agent-e2e.ps1 -Scenario all -Exe target\x86_64-pc-windows-msvc\release\daozai.exe`
-- 结果：**exit 0，`summary.json` 的 `ok=true`，三个场景全绿**（approval 32.6s / question 46.0s / done 31.1s，总计约 110s）
-- 证据目录：`docs/superpowers/research/agent-e2e-shots/20261120-050612/`
+- 结果：**exit 0，`summary.json` 的 `ok=true`，三个场景全绿**（approval 26.5s / question 44.4s / done 27.9s，总计约 100s）
+- 证据目录：`docs/superpowers/research/agent-e2e-shots/20261120-051519/`
   - `summary.json`：每步 `steps[].ok=true`，`bridgeOk=true`，`driver` 字段带完整 JSON
   - `approval-driver.json`：`bridge[0].reply={"decision":"allow"}`、`decision="allowed-once"`、`handback=false`
   - `question-driver.json`：`bridge[0].reply={"answers":[{"selected":["冒烟测试"]}],"decision":"answer"}`、`decision.answers[0].selected=["冒烟测试"]`
@@ -245,12 +245,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\agent-screen-ocr.ps1
 4. OCR 从「每个候选词各跑一遍、每遍多倍率」改为**每次轮询只跑 1-2 遍单倍率扫描**（一次子进程 + 本地匹配），点击前耗时从 10s+ 降到 2s 内，避免完成卡在 15s 停留窗口内过期；
 5. 截图裁边：`-CropSave` 按文字包围盒 + `-CropCard` 按「卡片连续深色行列」收边（列统计只在卡片行范围内做，否则矮卡片裁不掉），验收截图只剩卡片本身。
 
-**历史记录（已被上面覆盖）**：03:52 那轮（exe SHA256 9D871E87…678F）也用同一套判据跑通了三场景，用于验证判定逻辑本身；最终交付证据以 05:06 这轮为准。
+**历史记录（已被上面覆盖）**：`20261120-050612`（exe SHA256 9789C59E…2DC1）同样三场景全绿；该构建的完成卡面板高度仍是固定 112，长正文会压到按钮上，因此最终交付证据以 05:15 这轮为准。更早的 03:52（9D871E87…678F）用于验证判定逻辑本身。
 ## 7. 正式跑之前的检查清单
 
 1. 退出所有 daozai 实例：`Get-Process daozai*` 应为空；
 2. 确认要验收的 exe 是最新构建（脚本会打印 exe 时间戳）；
-3. 桌面无人操作（脚本会移动鼠标点击，约 2–3 分钟/场景）；
+3. 桌面无人操作（脚本会移动鼠标点击；实测单场景 30–50s、`-Scenario all` 约 110s）；
 4. 跑：
 
 ```powershell

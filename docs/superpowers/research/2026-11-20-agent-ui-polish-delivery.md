@@ -59,7 +59,7 @@ src/theme.rs           Agent 语义色 + 等宽字体家族
 | 画面导出 | `DAOZAI_AGENT_PREVIEW=<目录> cargo test --lib agent_cards_gallery -- --ignored` 一次导出 11 个场景（审批/长审批/原生授权/队列/单选/多选/多轮/多选项/轻提示/展开卡/结果层） |
 | 提问卡专项导出 | `DAOZAI_QUESTION_PREVIEW_DIR=<目录> cargo test --lib agent_ui::question::tests -- --ignored` 导出 7 个场景（含审阅页未答/已答、异常态） |
 | 真机探针 | `node scripts/agent-card-probe.mjs <DAOZAI_DATA_DIR> approval|question|finished|queue` → 真实窗口截图 + 鼠标点击，桥接返回决定 |
-| 真实 DSH E2E | `scripts/agent-e2e.ps1 -Scenario all`（真实 DSH 插件链 → 岛仔 → OCR 定位 → 真点击 → 校验决定） |
+| 真实 DSH E2E | `scripts/agent-e2e.ps1 -Scenario all`（真实 DSH 插件链 → 岛仔 → OCR 定位 → 真点击 → 校验决定）：**exit 0 / ok=true**，审批 `allowed-once`、提问 `selected=["冒烟测试"]`、完成 `done`；证据 `docs/superpowers/research/agent-e2e-shots/20261120-051519/` |
 
 ### 已知限制
 
@@ -75,7 +75,14 @@ src/theme.rs           Agent 语义色 + 等宽字体家族
 
 ---
 
-## 4. 本机开发环境（重要）
+## 4. 交付
+
+- exe：`target\x86_64-pc-windows-msvc\release\daozai.exe`
+- 大小 **22,748,672** 字节｜SHA256 `4F6D68D62EA865CB9BC7B9FC4CB1C14A20406B048B69DB0C3FCB20B7B61D72EB`
+- 桌面快捷方式「岛仔－当前测试版」已指向该文件（已核对目标/大小/哈希一致）
+- 验收证据：`docs/superpowers/research/agent-e2e-shots/20261120-051519/`（20 个文件，截图已裁到卡片本体）
+
+## 5. 本机开发环境（重要）
 
 本机 VS 18 Community 缺少桌面 CRT（`lib\x64`、`include`），直接用 vcvars 会报 `LNK1104 msvcrt.lib` / `C1083 vcruntime.h`。统一用：
 
