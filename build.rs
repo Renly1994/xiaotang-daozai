@@ -7,6 +7,10 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn find_rc() -> Option<PathBuf> {
+    if let Some(bin) = env::var_os("WindowsSdkVerBinPath") {
+        let rc = PathBuf::from(bin).join("x64/rc.exe");
+        if rc.is_file() { return Some(rc); }
+    }
     let roots = [
         r"C:\Program Files (x86)\Windows Kits\10\bin",
         r"C:\Program Files\Windows Kits\10\bin",
@@ -30,6 +34,7 @@ fn find_rc() -> Option<PathBuf> {
 }
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=WindowsSdkVerBinPath");
     println!("cargo:rerun-if-changed=app.rc");
     println!("cargo:rerun-if-changed=assets/daozai.ico");
     println!("cargo:rerun-if-changed=build.rs");

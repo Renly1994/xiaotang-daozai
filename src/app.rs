@@ -833,6 +833,8 @@ pub struct App {
     pub(crate) subpage:Option<usize>,
     pub(crate) task_dialog:Option<crate::extras::TaskDraft>,
     pub listener_status: String,
+    pub agent_setup: crate::agent_notice::Setup,
+    pub agent_cards: crate::agent_cards::Cards,
     pub(crate) notification_bell_until: f64,
     pub(crate) notification_bell_at: f64,
     pub(crate) notice: Option<Alert>,
@@ -995,6 +997,8 @@ impl App {
             music_artwork: None,
             forced_open_until:0.0, settings_open:false, settings_window:std::sync::Arc::new(std::sync::Mutex::new(crate::settings_window::State::load())), displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_tab:0, settings_category:0, messenger_statuses:Default::default(), notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
             listener_status: "尚未连接".into(),
+            agent_setup: Default::default(),
+            agent_cards: Default::default(),
             notification_bell_until: 0.0, notification_bell_at: -10.0, notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, pending_messengers:Vec::new(), messenger_scroll:0.0, alerts: Default::default(), history: Default::default(), pending: vec![],
             todo_first: 0, todo_choosing: false, pet: Default::default(), last_drink: None,
             toast: None, toast_below: false,
@@ -1635,7 +1639,7 @@ impl App {
     }
 
     pub fn is_editing(&self) -> bool {
-        self.adding || self.editing.is_some() || self.todo_choosing || self.task_dialog.is_some() || self.calendar.draft.is_some() || self.settings_editing
+        self.adding || self.editing.is_some() || self.todo_choosing || self.task_dialog.is_some() || self.calendar.draft.is_some() || self.settings_editing || self.agent_cards.editing()
     }
 
     pub fn filter_todo_input(&mut self,input:&mut egui::RawInput) {
@@ -1711,7 +1715,7 @@ impl App {
         self.settings.island_lyrics && self.settings.visible_pages[0] && self.media.is_music() && self.media.playing
             && !self.browser_minimal_active
     }
-    pub(crate) fn compact_notices(&self)->bool {self.island_lyrics_active()&&!self.open&&!self.notice.as_ref().is_some_and(|a|a.meeting.is_some()||self.settings.notification_preview&&matches!(a.source,crate::extras::AlertSource::External(_)))}
+    pub(crate) fn compact_notices(&self)->bool {self.island_lyrics_active()&&!self.open&&!self.notice.as_ref().is_some_and(|a|a.meeting.is_some()||matches!(a.source,crate::extras::AlertSource::AgentCard(..))||self.settings.agent.expanded&&matches!(a.source,crate::extras::AlertSource::AgentDone(_))||self.settings.notification_preview&&matches!(a.source,crate::extras::AlertSource::External(_)))}
 
     /// 换句、分段和展开高亮共用时间调整；正数延后，负数提前。
     pub(crate) fn lyric_position(&self)->f32 {(self.media.position-self.settings.lyric_delay_ms as f64/1000.0)as f32}
@@ -1768,7 +1772,18 @@ impl App {
     pub(crate) fn pet_space(&self)->f32 {if self.pet_enabled(){44.0}else{0.0}}
     fn lyric_focus_space(&self)->f32 {if self.pomo.running{crate::focus_bar::LYRIC_WIDTH+10.0}else{0.0}}
     fn lyric_bar_width(&self)->f32 {LYRIC_BAR_W+if self.pet_enabled(){48.0}else{0.0}+self.lyric_focus_space()}
+    fn agent_detail_active(&self)->bool {
+        self.open && self.notice_details
+            && self.agent_cards.active().is_some_and(|(id,_,_,_)|self.agent_cards.details_open(id))
+    }
     fn notice_size(&self,a:&Alert)->(f32,f32) {
+        if let crate::extras::AlertSource::AgentCard(_,id)=&a.source {
+            if self.agent_cards.details_open(id) {
+                return self.agent_cards.detail_size(id);
+            }
+            return (360.0,108.0);
+        }
+        if self.settings.agent.expanded && matches!(a.source,crate::extras::AlertSource::AgentDone(_)){return (360.0,108.0);}
         let (width,height)=if a.meeting.is_some(){(360.0,136.0)}else if a.source==crate::extras::AlertSource::Internal && a.title=="蓝牙设备"{(HUD_W,48.0)}else if a.is_hud(){(HUD_W,38.0)}else{(334.0,44.0)};
         (width,height)
     }
@@ -1811,7 +1826,11 @@ impl App {
     }
 
     pub(crate) fn expanded_height(&self)->f32 {
-        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==WEATHER_PAGE {WEATHER_H}else if self.page==6{176.0}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
+        if self.agent_detail_active() {
+            self.agent_cards.active()
+                .map(|(id,_,_,_)|self.agent_cards.detail_size(id).1.max(PH).min(WIN_H-8.0))
+                .unwrap_or(PH)
+        }else if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==WEATHER_PAGE {WEATHER_H}else if self.page==6{176.0}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
     }
 
     // ---------------------------------------------------------------
@@ -1859,15 +1878,30 @@ impl App {
 
         self.tick(env, dt, elapsed);
         self.sync_device(env);
+        if self.agent_cards.hovering || self.agent_cards.result.is_some() || self.fullscreen_hidden || self.open {
+            if let Some(a)=self.notice.as_mut().filter(|a|matches!(a.source,crate::extras::AlertSource::AgentDone(_))){a.at+=f64::from(elapsed);}
+        }
         self.tick_alerts();
+        self.agent_cards.hovering=false;
         let hud_active=self.notice.clone();
-        if hud_active.as_ref().map(|a|&a.title)!=self.hud_notice.as_ref().map(|a|&a.title)||hud_active.is_none(){self.notice_details=false;}
+        let hud_changed=match (&hud_active,&self.hud_notice) {
+            (Some(current),Some(previous))=>current.title!=previous.title||current.body!=previous.body||current.source!=previous.source,
+            (None,Some(_))|(Some(_),None)=>true,
+            (None,None)=>false,
+        };
+        if hud_changed && !self.agent_detail_active() {self.notice_details=false;}
         if let Some(a)=&hud_active {self.hud_notice=Some(a.clone());}
         self.hud_alpha=anim::approach(self.hud_alpha,if hud_active.is_some(){1.0}else{0.0},if hud_active.is_some(){16.0}else{8.0},dt);
         if hud_active.is_none() && self.hud_alpha<0.003 {self.hud_notice=None;}
         let notice_target=if !self.notice.as_ref().is_some_and(|a|a.messenger().is_some()) && self.compact_notices()&&(self.notice.is_some()||self.t<self.notification_bell_until) {44.0}else{0.0};
         self.notice_width.target=notice_target;
-        if self.compact_notices(){self.notice_width.step(dt);}else{self.notice_width.snap(0.0);self.notice_details=false;}
+        let agent_details=self.agent_detail_active();
+        if self.compact_notices(){
+            self.notice_width.step(dt);
+        }else{
+            self.notice_width.snap(0.0);
+            if !agent_details {self.notice_details=false;}
+        }
         self.update_media(env,&ctx);
         let bell=self.t<self.notification_bell_until&&!self.compact_notices();
         self.resident_power=(env.battery,env.charging);
@@ -2074,7 +2108,13 @@ impl App {
         let banner=!self.compact_notices()&&self.notice.is_some()&&!self.open;
         let restoring_lyrics=!self.open&&self.notice.is_none()&&self.island_lyrics_active()&&self.hud_notice.as_ref().is_some_and(|a|a.meeting.is_some()||a.source!=crate::extras::AlertSource::Internal);
         let fading_hud=!self.compact_notices()&&!self.open&&self.hud_notice.as_ref().is_some_and(|a|a.is_hud())&&(banner||self.hud_alpha>0.003);
-        if fading_hud {
+        if agent_details {
+            if let Some(id)=self.agent_cards.active().map(|(id,_,_,_)|id.to_owned()) {
+                let detail_width=360.0_f32.min(panel.width());
+                let detail_origin=panel.min+Vec2::new((panel.width()-detail_width).max(0.0)/2.0,0.0);
+                self.agent_cards.draw_details(&Card::new(ui,detail_origin,panel.intersect(ui.max_rect())),&id);
+            }
+        }else if fading_hud {
             let from=self.resident.target.width;let to=HUD_W+self.pet_space();
             let width_progress=if (to-from).abs()<1.0 {if banner{1.0}else{0.0}}else{((self.w.pos-from)/(to-from)).clamp(0.0,1.0)};
             let (opacity,header_opacity)=if banner {(self.hud_alpha*smoothstep(0.45,0.85,width_progress),1.0-smoothstep(0.05,0.40,width_progress))}
@@ -2095,12 +2135,29 @@ impl App {
             if let Some(a)=self.hud_notice.clone() {
                 let opacity=self.hud_alpha*smoothstep(0.45,0.95,self.notice_width.pos/44.0);
                 let c=c.faded(opacity);let c=if self.notice.is_none()||opacity<0.85 {c.ghost()}else{c};
-                if a.source!=crate::extras::AlertSource::Internal {
+                if let Some(provider)=a.agent_provider() {
+                    crate::extras::agent_icon(&c,18.0,15.0,22.0,provider);
+                    if env.cursor.is_some_and(|p|rect.contains(p)){self.agent_cards.hovering=true;}
+                }else if a.source!=crate::extras::AlertSource::Internal {
                     paint::bell(&c.scaled(18.0,15.0,0.85),18.0,15.0,theme::WHITE,paint::bell_swing(self.t-a.at));
                     c.circle(22.0,10.5,2.0,Color32::from_rgb(255,72,72));
                 }else{crate::extras::notice_badge(&c,18.0,15.0,&a);}
                 let button=crate::quota_ui::bar_tooltip(c.hit(0.0,0.0,36.0,BAR_H,"notice-badge"),format!("{}\n{}",a.title,a.body));
-                if button.clicked(){if let Some(kind)=a.health(){self.confirm_health_reminder(kind);}else{self.notice_details=!self.notice_details;}}
+                if button.clicked(){
+                    if let Some(kind)=a.health(){
+                        self.confirm_health_reminder(kind);
+                    }else if let crate::extras::AlertSource::AgentCard(_,id)=&a.source {
+                        if self.notice_details {
+                            self.agent_cards.close_detail(id);
+                            self.notice_details=false;
+                        }else{
+                            self.agent_cards.detail(id);
+                            self.notice_details=true;
+                        }
+                    }else{
+                        self.notice_details=!self.notice_details;
+                    }
+                }
             }else if self.t<self.notification_bell_until {
                 paint::bell(&c.scaled(20.0,14.0,1.2),20.0,14.0,theme::WHITE,paint::bell_swing(self.t-self.notification_bell_at));
                 c.circle(24.0,9.5,2.0,Color32::from_rgb(255,72,72));
@@ -2120,7 +2177,7 @@ impl App {
             }
             keep_colors.push((from,crate::skin_paint::shape_count(&ctx,layer)));
         }
-        let notice_details=self.notice_details_rect(cx,top);
+        let notice_details=(!agent_details).then(||self.notice_details_rect(cx,top)).flatten();
         if let Some(rect)=notice_details {
             let radius=if self.hud_notice.as_ref().is_some_and(|a|a.meeting.is_some()){14.0}else{10.0};
             let from=crate::skin_paint::shape_count(&ctx,layer);
@@ -2130,8 +2187,30 @@ impl App {
                 painter.rect_stroke(rect,radius,egui::Stroke::new(1.0_f32,self.glass_rim()),egui::StrokeKind::Inside);
             }
             keep_colors.push((from,crate::skin_paint::shape_count(&ctx,layer)));
-            self.draw_notice(&Card::new(ui,rect.min,rect.intersect(ui.max_rect())),rect,&self.hud_notice.clone().unwrap(),&mut cmds);
-            if ctx.input(|i|i.pointer.any_pressed()&&i.pointer.interact_pos().is_some_and(|p|!rect.contains(p)&&!notice_rect.is_some_and(|r|r.contains(p)))){self.notice_details=false;}
+            let detail_card=Card::new(ui,rect.min,rect.intersect(ui.max_rect()));
+            let detail_notice=self.hud_notice.clone().unwrap();
+            if let crate::extras::AlertSource::AgentCard(_,id)=&detail_notice.source {
+                if self.agent_cards.details_open(id) {
+                    self.agent_cards.draw_details(&detail_card,id);
+                } else {
+                    self.draw_notice(&detail_card,rect,&detail_notice,&mut cmds);
+                }
+            } else {
+                self.draw_notice(&detail_card,rect,&detail_notice,&mut cmds);
+            }
+            if ctx.input(|i|i.pointer.any_pressed()&&i.pointer.interact_pos().is_some_and(|p|!rect.contains(p)&&!notice_rect.is_some_and(|r|r.contains(p)))){
+                if let crate::extras::AlertSource::AgentCard(_,id)=&detail_notice.source {self.agent_cards.close_detail(id);}
+                self.notice_details=false;
+            }
+        }
+        if agent_details {
+            if let Some(id)=self.agent_cards.active().map(|(id,_,_,_)|id.to_owned()) {
+                let outside=ctx.input(|i|i.pointer.any_pressed()&&i.pointer.interact_pos().is_some_and(|p|!panel.contains(p)));
+                if outside {
+                    self.agent_cards.close_detail(&id);
+                    self.notice_details=false;
+                }
+            }
         }
         let pet_alpha=self.pet_a*(1.0-smoothstep(0.0,0.3,pc));
         if pet_alpha>0.004 && !minimal_pill {
@@ -2142,7 +2221,7 @@ impl App {
         }
         let previous_scroll=self.content_scroll.take();
         let mut page_transition=false;
-        if reveal > 0.004 && !banner && !restoring_lyrics {
+        if reveal > 0.004 && !banner && !restoring_lyrics && !agent_details {
             let c = base.shifted(0.0, (1.0 - reveal) * -5.0).faded(reveal);
             let c = if reveal < 0.6 { c.ghost() } else { c };
             if self.calendar.draft.is_some(){self.draw_calendar_editor(&c);}else if self.task_dialog.is_some(){self.draw_task_editor(&c);}else{page_transition=self.panel_body(&c, env, &mut cmds);}
@@ -2487,12 +2566,23 @@ impl App {
     }
     fn notice_details_rect(&self,cx:f32,top:f32)->Option<Rect>{
         let a=self.hud_notice.as_ref().filter(|_|self.notice_details&&self.notice.is_some())?;
+        if matches!(a.source,crate::extras::AlertSource::AgentCard(..)) {return None;}
         let badge=self.notice_rect(cx,top)?;let (width,height)=self.notice_size(a);
         let mut x=badge.left();
         // 岛体靠近屏幕右缘时，详情卡片向左展开，始终完整留在屏幕内。
         if let Some(screen)=self.screen {x=x.min(screen.right()-width-8.0).max(screen.left()+8.0);}
         Some(Rect::from_min_size(Pos2::new(x,badge.bottom()+6.0),Vec2::new(width,height)))
     }
+    pub(crate) fn open_notice_details(&mut self){
+        self.notice_details=true;
+        self.open=true;
+        self.forced_open_until=self.t+6.0;
+        self.w.tune(OPEN_W.0,OPEN_W.1);
+        self.h.tune(OPEN_H.0,OPEN_H.1);
+        self.w.target=PW;
+        self.h.target=self.expanded_height();
+    }
+    pub(crate) fn notice_details_active(&self)->bool{self.notice_details}
 
     /// 当前皮肤的换色调色板（经典为 None）。
     pub(crate) fn skin_palette(&self)->Option<crate::skin_paint::Palette> {
@@ -2833,7 +2923,12 @@ impl App {
             if self.open {
                 let since = *self.leave_since.get_or_insert(t);
                 if t - since >= LEAVE_DELAY {
+                    let was_agent_detail=self.agent_detail_active();
                     self.open = false;
+                    if was_agent_detail {
+                        if let Some(id)=self.agent_cards.active().map(|(id,_,_,_)|id.to_owned()){self.agent_cards.close_detail(&id);}
+                        self.notice_details=false;
+                    }
                     self.music_volume_open=false;
                     self.leave_since = None;
                     self.w.tune(CLOSE.0, CLOSE.1);

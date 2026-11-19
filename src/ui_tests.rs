@@ -6850,6 +6850,125 @@ fn compact_canvas_preserves_panel_and_notice_pixels(){
 }
 
 #[test]
+fn agent_notice_respects_each_source_and_master_without_windows_notification_access(){
+    use crate::agent_notice::{Notice, Provider::{Codex,Dsh}, Status::{Finished,Question}};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();h.frame(vec![]);
+    h.app.receive_agent_notice(Notice(Codex,Finished));
+    assert!(h.app.alerts.is_empty());
+    h.app.settings.codex_notifications=true;
+    h.app.settings.save();
+    let saved=crate::model::Settings::load();
+    assert!(saved.codex_notifications && !saved.dsh_notifications && !saved.read_notifications);
+    h.app.receive_agent_notice(Notice(Dsh,Question));
+    h.app.receive_agent_notice(Notice(Codex,Finished));
+    h.app.receive_agent_notice(Notice(Codex,Finished));
+    assert_eq!(h.app.alerts.len(),1);
+    h.app.tick_alerts();
+    assert_eq!(h.app.notice.as_ref().unwrap().body,Finished.label());
+    h.app.settings.codex_notifications=false;
+    h.app.settings.dsh_notifications=true;
+    h.app.receive_agent_notice(Notice(Dsh,Question));h.app.tick_alerts();
+    assert_eq!(h.app.notice.as_ref().unwrap().title,"DeepSeek Harness");
+    h.app.settings.notifications=false;h.app.tick_alerts();
+    h.app.receive_agent_notice(Notice(Dsh,Question));
+    assert!(h.app.notice.is_none() && h.app.alerts.is_empty() && h.app.history.is_empty());
+    assert!(!h.app.pending.iter().any(|cmd|matches!(cmd,crate::app::Cmd::Notify(..))));
+}
+
+#[test]
+fn agent_notice_interactive_queue_outlives_toasts_and_releases_on_disconnect(){
+    use crate::agent_notice::Provider::Dsh;
+    use crate::extras::AlertSource;
+    use serde_json::json;
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();h.frame(vec![]);h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.dwell=12;h.app.settings.agent.handoff=10;h.app.settings.agent.content=1;
+    h.app.settings.save();assert_eq!(crate::model::Settings::load().agent,h.app.settings.agent);
+    h.app.agent_finished(Dsh,"test completion".into());h.app.tick_alerts();
+    for id in ["first","second"]{h.app.agent_cards.receive(json!({"id":id,"kind":"approval","provider":"dsh",
+        "data":{"tool":"example","operation":"test only"}}),&h.app.settings);}
+    h.app.tick_alerts();h.app.t+=60.0;h.app.tick_alerts();
+    assert!(matches!(&h.app.notice.as_ref().unwrap().source,AlertSource::AgentCard(_,id) if id=="first"));
+    assert!(!h.app.compact_notices());assert_eq!(h.app.agent_cards.count(),2);
+    assert!(h.app.agent_cards.details_open("first"));
+    assert_eq!(h.app.agent_cards.countdown(1.,5,false),None);
+    h.app.agent_cards.receive(json!({"cancel":"first"}),&h.app.settings);h.app.tick_alerts();
+    assert!(matches!(&h.app.notice.as_ref().unwrap().source,AlertSource::AgentCard(_,id) if id=="second"));
+    assert!(h.app.agent_cards.details_open("second"));
+    assert_eq!(h.app.agent_cards.countdown(8.,5,false),None);
+    h.app.agent_cards.hand_back("second");h.app.tick_alerts();
+    assert_eq!(h.app.notice.as_ref().unwrap().body,"test completion");
+    h.app.t+=11.0;h.app.tick_alerts();assert!(h.app.notice.is_some());
+    h.app.t+=2.0;h.app.tick_alerts();assert!(h.app.notice.is_none());
+}
+
+#[test]
+fn agent_notice_card_controls_are_visible_and_clickable_in_lyric_mode(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.dsh_notifications=true;h.app.settings.island_lyrics=true;
+    h.app.agent_cards.receive(serde_json::json!({"id":"fixture","provider":"dsh","kind":"approval","data":{
+        "tool":"Read","operation":"{\"path\":\"example.txt\"}"}}),&h.app.settings);
+    let mut preview_raster=feature_raster();
+    if let Some(dir)=std::env::var_os("DAOZAI_AGENT_PREVIEW"){
+        let dir=std::path::PathBuf::from(dir);std::fs::create_dir_all(&dir).unwrap();
+        shoot_feature(&mut h,&mut preview_raster,&dir,"approval-card",65,None,"2026-11-19");
+    }
+    for _ in 0..65{h.frame(vec![]);}
+    assert!(!h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="查看并审批")),
+        "审批到达后不应再显示中间按钮");
+    if let Some(dir)=std::env::var_os("DAOZAI_AGENT_PREVIEW"){
+        let dir=std::path::PathBuf::from(dir);
+        shoot_feature(&mut h,&mut preview_raster,&dir,"approval-detail-card",45,None,"2026-11-19");
+    }
+    assert_eq!(h.app.agent_cards.countdown(h.t,5,false),None);
+    assert!(h.app.agent_cards.details_open("fixture"),"审批详情应在现有岛内详情层展开");
+    assert!(h.app.notice_details_active(),"审批详情标记应保持打开");
+    for label in ["拒绝","仅允许这一次","回客户端"] {
+        assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()==label)),
+            "岛内审批详情缺少按钮 {label}");
+    }
+    h.click_text("回客户端");h.frame(vec![]);assert_eq!(h.app.agent_cards.count(),0);
+}
+
+#[test]
+fn agent_notice_question_is_answered_inside_the_island(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.dsh_notifications=true;h.app.settings.island_lyrics=true;
+    h.app.agent_cards.receive(serde_json::json!({"id":"question","provider":"dsh","kind":"question","data":{
+        "questions":[{"id":"q","question":"需要选择哪个方案？","options":[{"label":"方案 A"},{"label":"方案 B"}]}]}}),&h.app.settings);
+    for _ in 0..65 {h.frame(vec![]);}
+    for _ in 0..45 {h.frame(vec![]);}
+    for label in ["需要选择哪个方案？","方案 A","方案 B","提交回答","回客户端"] {
+        assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()==label)),
+            "岛内提问详情缺少内容 {label}");
+    }
+    h.click_text("方案 A");h.click_text("提交回答");h.frame(vec![]);
+    assert_eq!(h.app.agent_cards.count(),0);
+}
+
+#[test]
+fn agent_notice_questions_page_one_at_a_time_supports_back_and_custom_input(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.dsh_notifications=true;h.app.settings.island_lyrics=true;
+    h.app.agent_cards.receive(serde_json::json!({"id":"multi-question","provider":"dsh","kind":"question","data":{
+        "questions":[
+            {"id":"q1","question":"第一轮：能正常显示吗？","options":[{"label":"能正常显示"},{"label":"显示异常"}]},
+            {"id":"q2","question":"第二轮：可以分别作答吗？","options":[{"label":"可以分别作答"},{"label":"只能答一个"}]}
+        ]}}),&h.app.settings);
+    for _ in 0..90 {h.frame(vec![]);}
+    assert!(h.app.agent_cards.details_open("multi-question"));
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="第一轮：能正常显示吗？")));
+    assert!(!h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="第二轮：可以分别作答吗？")));
+    h.click_text("自定义回答");h.frame(vec![egui::Event::Text("第一轮补充".into())]);
+    h.click_text("下一轮");h.frame(vec![]);
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="第二轮：可以分别作答吗？")));
+    assert!(!h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="第一轮：能正常显示吗？")));
+    h.click_text("上一轮");h.frame(vec![]);
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="第一轮：能正常显示吗？")));
+}
+
+#[test]
 fn external_notice_respects_permissions_masks_preview_and_never_reemits(){
  let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.frame(vec![]);
  h.app.receive_notification("系统音量".into(),"external.test".into(),"验证码 123456".into());assert!(h.app.alerts.is_empty());

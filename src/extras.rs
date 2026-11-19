@@ -6,7 +6,8 @@ use crate::theme::{self, size, W};
 use eframe::egui::{self, Color32, Rect};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum AlertSource { Internal, Messenger(crate::app::Messenger), External(String) }
+pub(crate) enum AlertSource { Internal, Messenger(crate::app::Messenger), External(String), Agent(crate::agent_notice::Provider),
+    AgentDone(crate::agent_notice::Provider), AgentCard(crate::agent_notice::Provider,String) }
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub(crate) enum HealthReminder {Water,Sit}
@@ -43,6 +44,8 @@ pub(crate) struct Alert {
     pub unread: Option<crate::app::Unread>,
 }
 impl Alert {
+    pub(crate) fn agent_provider(&self)->Option<crate::agent_notice::Provider>{match self.source{
+        AlertSource::Agent(p)|AlertSource::AgentDone(p)|AlertSource::AgentCard(p,_)=>Some(p),_=>None}}
     pub(crate) fn health(&self)->Option<HealthReminder> {
         if self.source!=AlertSource::Internal{return None;}
         HealthReminder::ALL.into_iter().find(|kind|self.title==kind.title())
@@ -95,7 +98,15 @@ pub(crate) fn notice_badge(c:&Card,x:f32,y:f32,a:&Alert){
     }else{notice_icon(&c.scaled(x,y,0.85),x,y,a);}
 }
 pub(crate) fn messenger_icon(c:&Card,x:f32,y:f32,source:crate::app::Messenger){(source.adapter().paint_icon)(c,x,y);}
+pub(crate) fn agent_icon(c:&Card,x:f32,y:f32,size:f32,provider:crate::agent_notice::Provider){
+    let rect=c.rect(x-size/2.0,y-size/2.0,size,size);
+    let icon=provider.icon().fit_to_exact_size(rect.size());
+    if let Ok(egui::load::TexturePoll::Ready{texture})=icon.load_for_size(c.ui.ctx(),rect.size()){
+        c.painter.image(texture.id,rect,Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)),Color32::WHITE);
+    }
+}
 fn notice_icon(c:&Card,x:f32,y:f32,a:&Alert) {
+    if let Some(provider)=a.agent_provider() { agent_icon(c,x,y,22.0,provider);return; }
     if a.source!=AlertSource::Internal{crate::paint::bell(c,x,y,theme::WHITE,0.0);return;}
     match a.title.as_str() {
         "系统音量"=>{
@@ -400,6 +411,26 @@ impl App {
         }else{"收到新通知 · 内容已隐藏".into()};
         self.enqueue_alert(Alert{source:AlertSource::External(id),title,body,page:usize::MAX,at:self.t,duration:4.5,bluetooth:None,meeting:None,unread},false);
     }
+    pub fn receive_agent_notice(&mut self, crate::agent_notice::Notice(provider,status):crate::agent_notice::Notice) {
+        if !provider.enabled(&self.settings) {return;}
+        if status==crate::agent_notice::Status::Finished{self.agent_finished(provider,String::new());return;}
+        self.agent_setup.received(provider);
+        self.notification_bell_at=self.t;
+        self.notification_bell_until=self.t+4.5;
+        self.enqueue_alert(Alert{source:AlertSource::Agent(provider),title:provider.label().into(),
+            body:status.label().into(),page:usize::MAX,at:self.t,duration:4.5,bluetooth:None,meeting:None,unread:None},false);
+    }
+    pub fn agent_finished(&mut self,provider:crate::agent_notice::Provider,body:String) {
+        if !provider.enabled(&self.settings){return;}
+        self.agent_setup.received(provider);
+        if !self.settings.agent.completion{return;}
+        if self.settings.agent.system_toast&&self.settings.system_notify {
+            self.pending.push(Cmd::Notify(provider.label().into(),"本轮已结束".into(),if self.settings.sound{NotificationSound::System}else{NotificationSound::Silent}));
+        }
+        let body=if body.is_empty()||self.settings.agent.content==0{crate::agent_notice::Status::Finished.label().to_owned()}else{body};
+        self.enqueue_alert(Alert{source:AlertSource::AgentDone(provider),title:provider.label().into(),body,
+            page:usize::MAX,at:self.t,duration:self.settings.agent.dwell as f64,bluetooth:None,meeting:None,unread:None},false);
+    }
     pub fn reveal_messenger_notice(&mut self,unread:crate::app::Unread){
         if !unread.source.adapter().dismiss_unread || !self.pending_messengers.contains(&unread){return;}
         let body=if unread.pid==0{"消息账号暂无法确认"}else{"暂时无法打开对应窗口"};
@@ -408,16 +439,27 @@ impl App {
         self.notification_bell_at=self.t;self.notification_bell_until=self.t+4.5;
     }
     pub(crate) fn tick_alerts(&mut self) {
+        // 跳转失败要回到岛上提示，不能静默：用户点了按钮却没有任何反应是最糟的体验。
+        if let Some(error)=self.agent_cards.take_jump_error(){self.say(error);}
         self.pending_messengers.retain(|u|u.source.enabled(&self.settings) && (u.source.adapter().capture!=crate::messenger::Capture::SystemToast
             || self.notification_apps.items.iter().any(|(key,_,on)|key==u.source.adapter().notification_id && *on)));
         let allowed=|a:&Alert|match &a.source {
             AlertSource::Internal=>!self.fullscreen_hidden || a.health().is_none(),
+            AlertSource::Agent(provider)=>provider.enabled(&self.settings),
+            AlertSource::AgentDone(provider)=>provider.enabled(&self.settings)&&self.settings.agent.completion,
+            AlertSource::AgentCard(provider,id)=>provider.enabled(&self.settings)&&self.settings.agent.interactive&&self.agent_cards.active().is_some_and(|r|r.0==id),
             AlertSource::Messenger(client)=>client.enabled(&self.settings),
             AlertSource::External(id)=>self.settings.read_notifications && crate::messenger::NotificationFilter::for_settings(&self.settings).allows(id) && self.settings.notifications && !crate::messenger::suppresses_toast(&a.title,id,crate::messenger::toast_suppression(&self.settings)) && self.notification_apps.items.iter().any(|(key,_,on)|key==id && *on),
         };
         self.alerts.retain(&allowed);
         if self.notice.as_ref().is_some_and(|a|!allowed(a)){self.notice=None;}
         if self.hud_notice.as_ref().is_some_and(|a|!allowed(a)){self.hud_notice=None;}
+        if self.settings.agent.content<2 {
+            for a in self.alerts.iter_mut().chain(self.notice.iter_mut()).chain(self.hud_notice.iter_mut()).filter(|a|matches!(a.source,AlertSource::AgentDone(_))){
+                if self.settings.agent.content==0 {if a.body!=crate::agent_notice::Status::Finished.label(){a.body=crate::agent_notice::Status::Finished.label().into();}}
+                else if a.body.len()>1200 {if let Some((end,_))=a.body.char_indices().nth(1200){a.body.truncate(end);}}
+            }
+        }
         if self.fullscreen_hidden {
             self.pending.retain(|cmd|!matches!(cmd,Cmd::Notify(title,..)if HealthReminder::ALL.into_iter().any(|kind|title==kind.title())));
         }
@@ -433,6 +475,30 @@ impl App {
         {
             self.notice = None;
         }
+        let active=self.agent_cards.active().map(|(id,p,title,summary)|{
+            (id.to_owned(),p,title.to_owned(),summary.to_owned())
+        });
+        if let Some((id,p,title,summary))=active{
+            if !self.notice.as_ref().is_some_and(|a|matches!(&a.source,AlertSource::AgentCard(_,current) if current==&id)){
+                if let Some(mut prev)=self.notice.take(){prev.duration=(prev.duration-(self.t-prev.at)).max(0.0);self.alerts.push_front(prev);}
+                self.notice=Some(Alert{source:AlertSource::AgentCard(p,id.clone()),title:title.clone(),body:summary,page:usize::MAX,
+                    at:self.t,duration:f64::INFINITY,bluetooth:None,meeting:None,unread:None});
+                self.agent_setup.received(p);
+                if title=="需要你回答" {
+                    // 提问是阻塞式请求：到达后直接展开答题面板，跳过中间提示卡。
+                    self.agent_cards.detail(&id);
+                    self.open_notice_details();
+                } else if !self.is_editing() {
+                    if title=="等待你审批" {
+                        // 审批是阻塞式请求：到达后直接展开岛内审批面板，跳过中间提示卡。
+                        self.agent_cards.detail(&id);
+                        self.open_notice_details();
+                    } else {
+                        self.open=false;
+                    }
+                }
+            }
+        }
         if self.notice.is_none() {
             if let Some(mut a) = self.alerts.pop_front() {
                 a.at = self.t;
@@ -442,6 +508,43 @@ impl App {
     }
     pub(crate) fn draw_notice(&mut self, c:&Card,panel:Rect,a:&Alert,_cmds:&mut Vec<Cmd>){
         let nc=c.clipped(0.0,0.0,panel.width(),panel.height());
+        if let AlertSource::AgentCard(p,ref id)=a.source {
+            if self.notice_details_active() && self.agent_cards.details_open(id) {
+                self.agent_cards.draw_details(&nc,id);
+                return;
+            }
+            self.agent_cards.hovering=c.live&&c.ui.rect_contains_pointer(panel);
+            let left=self.agent_cards.countdown(self.t,self.settings.agent.handoff,self.fullscreen_hidden);
+            if left==Some(0){self.agent_cards.hand_back(id);return;}
+            agent_icon(&nc,26.0,24.0,26.0,p);
+            nc.centered_text(48.0,23.0,&format!("{} · {}",p.label(),a.title),13.0,W::Semibold,theme::WHITE,H::Left);
+            let count=self.agent_cards.count();if count>1{nc.centered_text(340.0,23.0,&format!("1 / {count}"),11.0,W::Regular,theme::GRAY,H::Right);}
+            nc.centered_text(18.0,49.0,&nc.fit(&a.body,12.0,W::Regular,320.0),12.0,W::Regular,theme::WHITE,H::Left);
+            if let Some(s)=left{nc.centered_text(18.0,82.0,&format!("{s} 秒后交回"),10.5,W::Regular,theme::GRAY,H::Left);}
+            if notice_button(&nc,152.0,72.0,90.0,"回客户端","agent-return"){self.agent_cards.hand_back(id);}
+            if notice_button(&nc,250.0,72.0,90.0,if a.title=="等待你审批"{"查看并审批"}else{"查看并回答"},"agent-review"){
+                self.agent_cards.detail(id);
+                self.open_notice_details();
+            }
+            return;
+        }
+        if let AlertSource::AgentDone(p)=a.source {
+            self.agent_cards.hovering=c.live&&c.ui.rect_contains_pointer(panel);
+            let wide=self.settings.agent.expanded;
+            agent_icon(&nc,24.0,22.0,26.0,p);
+            nc.centered_text(44.0,if wide{21.0}else{14.0},p.label(),12.0,W::Semibold,theme::WHITE,H::Left);
+            if wide {
+                nc.centered_text(340.0,21.0,"本轮已结束",11.0,W::Regular,theme::GRAY,H::Right);
+            }
+            let line=a.body.split_whitespace().take(100).collect::<Vec<_>>().join(" ");
+            let text=nc.fit(&line,11.0,W::Regular,if wide{320.0}else{176.0});
+            nc.centered_text(if wide{18.0}else{44.0},if wide{49.0}else{30.0},&text,11.0,W::Regular,theme::GRAY,H::Left);
+            let y=if wide{72.0}else{12.0};
+            if self.settings.agent.content>0 && a.body!=crate::agent_notice::Status::Finished.label()
+                && notice_button(&nc,if wide{166.0}else{224.0},y,50.0,"查看","agent-result"){self.agent_cards.result=Some((p,a.body.clone()));}
+            if notice_button(&nc,if wide{248.0}else{278.0},y,50.0,"关闭","agent-done-close"){self.notice=None;}
+            return;
+        }
         if let Some(source)=a.messenger(){
             messenger_icon(&nc,22.0,22.0,source);
             nc.circle(31.0,14.0,2.6,Color32::from_rgb(255,72,72));
@@ -455,10 +558,14 @@ impl App {
             return;
         }
         if a.source!=AlertSource::Internal {
-            crate::paint::bell(&nc,310.0,22.0,theme::GRAY,crate::paint::bell_swing(self.t-a.at));
-            nc.circle(314.0,17.5,2.0,Color32::from_rgb(255,72,72));
-            nc.centered_text(16.0,14.0,&nc.fit(&a.title,11.0,W::Semibold,198.0),11.0,W::Semibold,theme::WHITE,H::Left);
-            nc.centered_text(16.0,30.0,&nc.fit(&a.body,10.5,W::Regular,198.0),10.5,W::Regular,theme::GRAY,H::Left);
+            let left=if let AlertSource::Agent(provider)=a.source {
+                agent_icon(&nc,23.0,22.0,26.0,provider);44.0
+            }else{
+                crate::paint::bell(&nc,310.0,22.0,theme::GRAY,crate::paint::bell_swing(self.t-a.at));
+                nc.circle(314.0,17.5,2.0,Color32::from_rgb(255,72,72));16.0
+            };
+            nc.centered_text(left,14.0,&nc.fit(&a.title,11.0,W::Semibold,214.0-left),11.0,W::Semibold,theme::WHITE,H::Left);
+            nc.centered_text(left,30.0,&nc.fit(&a.body,10.5,W::Regular,214.0-left),10.5,W::Regular,theme::GRAY,H::Left);
             if notice_button(&nc,226.0,12.0,60.0,"关闭","external-dismiss"){
                 self.notice=None;
                 self.notification_bell_until=0.0;
@@ -1918,6 +2025,26 @@ impl App {
                                     });});
                                 }
                                 if before_apps!=self.notification_apps.items{self.notification_apps.save();}
+                            });
+                        });
+                        settings_label(ui,"AI 助手");
+                        settings_card(ui,|ui|{
+                            ui.add_enabled_ui(master,|ui|{
+                                use crate::agent_notice::{Connection,Provider};
+                                for p in Provider::ALL {
+                                    let value=p.setting_mut(&mut self.settings);
+                                    let state=self.agent_setup.state(p);
+                                    let description=if p==Provider::Dsh && *value && self.agent_cards.dsh_ready {
+                                        "交互插件已连接"
+                                    }else{state.description(p)};
+                                    ui.horizontal(|ui|{
+                                        ui.add(p.icon().fit_to_exact_size(egui::Vec2::splat(27.0)));
+                                        ui.vertical(|ui|setting_row(ui,p.label(),description,value));
+                                    });
+                                    if *value && matches!(state,Connection::Failed(_)) && ui.small_button("重试接入").clicked(){self.agent_setup.retry(p);}
+                                }
+                                ui.separator();
+                                self.settings.agent.ui(ui);
                             });
                         });
                         let connect_id=egui::Id::new("settings-notify-connect");

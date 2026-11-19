@@ -27,9 +27,8 @@ use windows::Win32::System::Registry::{
 use windows::Win32::System::Threading::{CreateMutexW, ExitProcess};
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIF_INFO, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY,
-    NOTIFYICONDATAW,
-};
-use windows::Win32::UI::WindowsAndMessaging::*;
+    NOTIFYICONDATAW, NOTIFY_ICON_MESSAGE,
+};use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// 原版的托盘回调消息。
 pub const WM_TRAY: u32 = WM_APP + 9;
@@ -37,6 +36,7 @@ pub const WM_TRAY: u32 = WM_APP + 9;
 pub const WM_TRAY_DUMP: u32 = WM_APP + 2;
 /// 在屏幕坐标 (wparam, lparam) 弹出菜单（隐藏桌面取证用）。
 pub const WM_TRAY_MENU: u32 = WM_APP + 3;
+const WM_AGENT_NOTICE: u32 = WM_APP + 6;
 
 const TRAY_UID: u32 = 1;
 const CMD_EXIT: u32 = 1;
@@ -46,6 +46,7 @@ const CMD_ABOUT: u32 = 4;
 const CMD_MINIMAL: u32 = 5;
 const CMD_SETTINGS:u32=6;
 const TIMER_MENU: usize = 12;
+const TIMER_RETRY: usize = 13;
 
 const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const RUN_VALUE: PCWSTR = w!("Daozai");
@@ -71,11 +72,31 @@ struct Ctx {
     before_exit: Box<dyn Fn() + Send>,
     added: AtomicBool,
     adds: AtomicU32,
+    last_result: Mutex<String>,
+    retry: Mutex<Retry>,
 }
 
 impl Ctx {
     fn state(&self) -> State {
         *self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 一次登记尝试：成功则停止重试；失败则记录原因并安排下一次有界重试。
+    fn try_add(&self, hwnd: HWND) -> bool {
+        let result = add_icon(hwnd, self.hicon, WM_TRAY);
+        let mut retry = self.retry.lock().unwrap_or_else(|e| e.into_inner());
+        if result.registered {
+            retry.reset();
+            self.added.store(true, Ordering::Relaxed);
+        } else {
+            self.added.store(false, Ordering::Relaxed);
+            schedule_retry(hwnd, &mut retry);
+        }
+        *self.last_result.lock().unwrap_or_else(|e| e.into_inner()) = match result.advice() {
+            Some(advice) => format!("{}；{}", result.describe(), advice),
+            None => result.describe(),
+        };
+        result.registered
     }
 }
 
@@ -84,6 +105,7 @@ pub enum Event {
     TogglePet,
     OpenSettings,
     OpenCalendar,
+    AgentNotice(crate::agent_notice::Notice),
     ToggleMinimal,
     ToggleAutostart,
 }
@@ -143,23 +165,168 @@ fn load_icon() -> Option<HICON> {
     load_resource_icon().or_else(load_embedded_icon)
 }
 
-fn add_icon(hwnd: HWND, hicon: HICON) -> bool {
+/// 有界重试：任务栏重建或登记成功时重置，避免无限调用。
+#[derive(Default)]
+struct Retry {
+    attempts: u32,
+}
+
+const TRAY_RETRY_LIMIT: u32 = 5;
+
+impl Retry {
+    fn attempts(&self) -> u32 {
+        self.attempts
+    }
+
+    fn spend(&mut self) -> bool {
+        if self.attempts >= TRAY_RETRY_LIMIT {
+            return false;
+        }
+        self.attempts += 1;
+        true
+    }
+
+    fn reset(&mut self) {
+        self.attempts = 0;
+    }
+
+    /// 递增退避：250ms 起，每次尝试再拉长，最长约 2 秒。
+    fn delay(&self, attempt: u32) -> u32 {
+        (250 + attempt.min(TRAY_RETRY_LIMIT - 1) * 350).min(2000)
+    }
+}
+
+/// 安排一次重试；到上限后不再定时，避免无限调用。
+fn schedule_retry(hwnd: HWND, retry: &mut Retry) -> bool {
+    let attempt = retry.attempts();
+    if !retry.spend() {
+        unsafe {
+            let _ = KillTimer(hwnd, TIMER_RETRY);
+        }
+        return false;
+    }
+    unsafe {
+        let _ = SetTimer(hwnd, TIMER_RETRY, retry.delay(attempt), None);
+    }
+    true
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
+    Add,
+    Modify,
+}
+
+struct Registration {
+    registered: bool,
+    retry: bool,
+    stage: Option<Stage>,
+    error: u32,
+}
+
+impl Default for Registration {
+    fn default() -> Self {
+        Self { registered: false, retry: false, stage: None, error: 0 }
+    }
+}
+
+impl Registration {
+    fn describe(&self) -> String {
+        match (self.registered, self.stage) {
+            (true, None) => "ADD".to_string(),
+            (true, Some(_)) => "MODIFY".to_string(),
+            (false, stage) => format!(
+                "失败(阶段={:?}, 系统错误={})",
+                stage.unwrap_or(Stage::Add),
+                self.error
+            ),
+        }
+    }
+
+    /// 错误 5（拒绝访问）说明托盘宿主与岛仔的完整性级别不一致：
+    /// 本机 UAC 把 explorer 提到了高完整性，而岛仔仍以中完整性运行。
+    fn advice(&self) -> Option<&'static str> {
+        (self.error == 5).then(|| {
+            if elevated_self() {
+                "托盘登记被系统拒绝：资源管理器与岛仔完整性级别不一致，请重启资源管理器后重试"
+            } else {
+                "托盘登记被系统拒绝：本机资源管理器以管理员权限运行，请以管理员身份启动岛仔"
+            }
+        })
+    }
+}
+
+/// 登记图标。`add` 返回 false 时用 MODIFY 顶掉 explorer 里的同 ID 残留。
+fn register(u_id: u32, callback: u32, mut add: impl FnMut(u32, u32, u32) -> bool) -> Registration {
+    if add(NIM_ADD.0, u_id, callback) {
+        return Registration { registered: true, retry: false, stage: None, error: 0 };
+    }
+    let registered = add(NIM_MODIFY.0, u_id, callback);
+    Registration {
+        registered,
+        retry: !registered,
+        stage: (!registered).then_some(Stage::Modify),
+        error: 0,
+    }
+}
+
+fn notify_data(hwnd: HWND, hicon: HICON, u_id: u32, callback: u32) -> NOTIFYICONDATAW {
     let mut nid = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
-        uID: TRAY_UID,
+        uID: u_id,
         uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
-        uCallbackMessage: WM_TRAY,
+        uCallbackMessage: callback,
         hIcon: hicon,
         ..Default::default()
     };
     fill_tip(&mut nid.szTip, "岛仔");
-    unsafe {
-        if !Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
-            // explorer 里已有同名残留时，用 MODIFY 顶掉
-            return Shell_NotifyIconW(NIM_MODIFY, &nid).as_bool();
+    nid
+}
+
+/// 真实登记：ADD 失败时回落到 MODIFY，并记录失败阶段与系统错误。
+fn add_icon(hwnd: HWND, hicon: HICON, callback: u32) -> Registration {
+    let nid = notify_data(hwnd, hicon, TRAY_UID, callback);
+    let mut last_error = 0;
+    register(TRAY_UID, callback, |op, _, _| unsafe {
+        let op = NOTIFY_ICON_MESSAGE(op);
+        let ok = Shell_NotifyIconW(op, &nid).as_bool();
+        if !ok {
+            last_error = GetLastError().0;
         }
-        true
+        ok
+    })
+    .with_error(last_error)
+}
+
+impl Registration {
+    fn with_error(mut self, error: u32) -> Self {
+        self.error = error;
+        self
+    }
+}
+
+/// 当前进程是否以管理员权限（高完整性）运行。
+fn elevated_self() -> bool {
+    use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    unsafe {
+        let mut token = windows::Win32::Foundation::HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+            return false;
+        }
+        let mut elevation = TOKEN_ELEVATION::default();
+        let mut size = 0u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            Some((&mut elevation as *mut TOKEN_ELEVATION).cast()),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut size,
+        )
+        .is_ok();
+        let _ = CloseHandle(token);
+        ok && elevation.TokenIsElevated != 0
     }
 }
 
@@ -244,6 +411,14 @@ fn dump_menu(hwnd: HWND, ctx: &Ctx, menu: HMENU) {
         body.push_str(&format!("hwnd=0x{:X}\n", hwnd.0 as usize));
         body.push_str(&format!("icon_added={}\n", ctx.added.load(Ordering::Relaxed)));
         body.push_str(&format!("icon_adds={}\n", ctx.adds.load(Ordering::Relaxed)));
+        body.push_str(&format!(
+            "icon_retries={}\n",
+            ctx.retry.lock().unwrap_or_else(|e| e.into_inner()).attempts()
+        ));
+        body.push_str(&format!(
+            "icon_last_result={}\n",
+            ctx.last_result.lock().unwrap_or_else(|e| e.into_inner())
+        ));
         body.push_str(&format!("autostart={}\n", state.autostart));
         body.push_str(&format!("pet={}\nminimal={}\n", state.pet, state.minimal));
         for (i, (text, checked, sep)) in menu_items(menu).into_iter().enumerate() {
@@ -324,6 +499,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     }
     if msg == WM_APP+4 {return LRESULT(ctx.tx.send(Event::OpenSettings).is_ok() as isize);}
     if msg == WM_APP+5 {return LRESULT(ctx.tx.send(Event::OpenCalendar).is_ok() as isize);}
+    if msg == WM_AGENT_NOTICE {
+        if let Some(notice) = crate::agent_notice::decode(wp.0) {
+            let _ = ctx.tx.send(Event::AgentNotice(notice));
+        }
+        return LRESULT(0);
+    }
+    if msg == WM_TIMER && wp.0 == TIMER_RETRY {
+        ctx.try_add(hwnd);
+        return LRESULT(0);
+    }
     if msg == WM_TRAY_DUMP {
         if let Ok(menu) = popup_menu(ctx.state()) {
             dump_menu(hwnd, ctx, menu);
@@ -338,9 +523,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         return LRESULT(0);
     }
     if ctx.taskbar_msg != 0 && msg == ctx.taskbar_msg {
-        let added = add_icon(hwnd, ctx.hicon);
-        ctx.added.store(added, Ordering::Relaxed);
         ctx.adds.fetch_add(1, Ordering::Relaxed);
+        // 任务栏重建后重新开始一套有界恢复，不必等满上限
+        ctx.retry.lock().unwrap_or_else(|e| e.into_inner()).reset();
+        ctx.try_add(hwnd);
         return LRESULT(0);
     }
     match msg {
@@ -433,11 +619,12 @@ impl Tray {
                     hicon,
                     added: AtomicBool::new(false),
                     adds: AtomicU32::new(0),
+                    last_result: Mutex::new(String::new()),
+                    retry: Mutex::new(Retry::default()),
                 });
                 let ctx_ptr = Box::into_raw(ctx);
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, ctx_ptr as isize);
-                let added = add_icon(hwnd, hicon);
-                (*ctx_ptr).added.store(added, Ordering::Relaxed);
+                let added = (*ctx_ptr).try_add(hwnd);
                 (*ctx_ptr).adds.store(1, Ordering::Relaxed);
                 let _ = ready_tx.send(Ok((hwnd.0 as isize, added)));
 
@@ -447,6 +634,9 @@ impl Tray {
                     DispatchMessageW(&msg);
                 }
                 remove_icon(hwnd);
+                unsafe {
+                    let _ = KillTimer(hwnd, TIMER_RETRY);
+                }
                 let _ = DestroyIcon(hicon);
                 drop(Box::from_raw(ctx_ptr));
             });
@@ -601,6 +791,24 @@ mod tests {
     }
 
     #[test]
+    fn agent_notice_tray_messages_are_fixed_and_ignore_unknown_ids() {
+        let tray=Tray::start(State::default()).unwrap();
+        for id in [0,7,usize::MAX,1,2,3,4,5,6] {
+            unsafe { PostMessageW(tray.hwnd(),WM_AGENT_NOTICE,WPARAM(id),LPARAM(0)).unwrap(); }
+        }
+        for (id,(provider,status)) in [
+            ("dsh","finished"),("dsh","approval"),("dsh","question"),
+            ("codex","finished"),("codex","approval"),("codex","question"),
+        ].into_iter().enumerate() {
+            assert_eq!(crate::agent_notice::wire_id(provider,status),Some(id+1));
+            assert_eq!(tray.events.recv_timeout(Duration::from_secs(2)).unwrap(),
+                Event::AgentNotice(crate::agent_notice::decode(id+1).unwrap()));
+        }
+        assert!(tray.events.try_recv().is_err());
+        assert_eq!(crate::agent_notice::wire_id("codex","unknown"),None);
+    }
+
+    #[test]
     fn menu_order_checks_and_separator() {
         for (state, want) in [
             (State { pet: false, minimal: false, autostart: false }, [false, false, false]),
@@ -645,6 +853,55 @@ mod tests {
             [1, 2, 3, 4, 5]
         );
     }
+
+    #[test]
+    fn tray_registration_falls_back_to_modify_when_add_fails() {
+        let calls = std::cell::RefCell::new(Vec::<(u32, u32, u32)>::new());
+        let result = register(TRAY_UID, WM_TRAY, |op, u_id, _| {
+            calls.borrow_mut().push((op, u_id, 0));
+            op == NIM_MODIFY.0
+        });
+        assert!(result.registered, "ADD 失败后 MODIFY 成功应视为已登记");
+        assert_eq!(calls.borrow().len(), 2, "先 ADD，失败后 MODIFY");
+        assert_eq!(calls.borrow()[0].1, TRAY_UID);
+        assert!(!result.retry);
+    }
+
+    #[test]
+    fn tray_registration_reports_failure_without_claiming_success() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let result = register(TRAY_UID, WM_TRAY, |op, _u_id, _| {
+            calls.borrow_mut().push(op);
+            false
+        });
+        assert!(!result.registered, "持续失败不能当作已登记");
+        assert_eq!(calls.borrow().len(), 2, "ADD 失败后还要尝试 MODIFY 回落");
+        assert!(result.retry, "失败需要安排一次有界重试");
+        assert!(matches!(result.stage, Some(Stage::Modify)), "失败阶段应是 MODIFY");
+    }
+
+    #[test]
+    fn tray_retry_budget_is_bounded_and_resets_on_taskbar_created() {
+        let budget = Retry::default();
+        assert_eq!(budget.attempts(), 0);
+        let mut budget = budget;
+        for _ in 0..TRAY_RETRY_LIMIT {
+            assert!(budget.spend(), "上限内的重试可用");
+        }
+        assert!(!budget.spend(), "到上限后停止自动重试");
+        budget.reset();
+        assert_eq!(budget.attempts(), 0);
+        assert!(budget.spend(), "任务栏重建后重新开始有限重试");
+        assert!(Retry::default().delay(0) < Retry::default().delay(TRAY_RETRY_LIMIT - 1), "退避间隔应递增");
+    }
+
+    #[test]
+    fn registered_icon_stops_further_retry() {
+        let outcome = register(TRAY_UID, WM_TRAY, |op, _id, _| op == NIM_MODIFY.0);
+        assert!(outcome.registered, "ADD 失败一次后应通过 MODIFY 登记");
+        assert!(!outcome.retry, "已登记不应继续安排重试");
+        assert_eq!(outcome.stage, None, "登记成功不记录失败阶段");
+    }
 }
 
 /// 重复启动时请求现有实例打开窗口，限制等待时间以免跟随挂起。
@@ -669,3 +926,11 @@ pub fn activate_existing(calendar:bool)->bool {unsafe{
     let _=AllowSetForegroundWindow(tray_pid);
     request_existing_window(tray,calendar)
 }}
+
+pub fn post_agent_notice(id:usize) {
+    unsafe {
+        if let Ok(tray)=FindWindowW(w!("DaozaiTray"), PCWSTR::null()) {
+            let _=PostMessageW(tray, WM_AGENT_NOTICE, WPARAM(id), LPARAM(0));
+        }
+    }
+}

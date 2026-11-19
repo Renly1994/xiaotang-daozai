@@ -100,6 +100,10 @@ const MODULE_OFF:&str="该功能已在「页面管理」中关闭";
 impl Shell {
     /// 按模块开关启停后台服务：关闭的模块不保留任何线程，重新开启时从头对齐配置。
     fn reconcile_modules(&mut self,ctx:&egui::Context){
+        #[cfg(windows)]
+        self.app.agent_setup.update(&self.app.settings,ctx);
+        #[cfg(windows)]
+        for (p,text) in self.app.agent_cards.update(&self.app.settings,ctx){self.app.agent_finished(p,text);}
         let mail_on=self.app.module_on(app::MAIL_PAGE);
         if mail_on!=self.mail.is_some() {self.mail=mail_on.then(daozai::mail::Service::start);self.mail_sig=None;}
         let cal_on=self.app.module_on(app::CALENDAR_PAGE);
@@ -245,6 +249,7 @@ impl Shell {
             match e {
                 Event::OpenSettings=>self.app.open_settings(),
                 Event::OpenCalendar=>self.app.open_calendar(None),
+                Event::AgentNotice(notice)=>self.app.receive_agent_notice(notice),
                 Event::TogglePet => {
                     self.app.set_pet(!self.app.settings.pet);
                     self.app.say(if self.app.settings.pet { "吉祥物已打开" } else { "吉祥物已关闭" });
@@ -1045,6 +1050,18 @@ mod open_path_tests {
 }
 
 fn main() -> std::process::ExitCode {
+    #[cfg(windows)]
+    {
+        let mut args=std::env::args_os().skip(1);
+        if args.next().as_deref()==Some(std::ffi::OsStr::new("--agent-notice")) {
+            if let (Some(provider),Some(status),None)=(args.next(),args.next(),args.next()) {
+                if let Some(id)=provider.to_str().zip(status.to_str()).and_then(|(p,s)|daozai::agent_notice::wire_id(p,s)) {
+                    daozai::tray::post_agent_notice(id);
+                }
+            }
+            return std::process::ExitCode::SUCCESS;
+        }
+    }
     diagnostics::install();
     // 收集诊断：在单实例检查、创建窗口和初始化显卡之前处理，岛仔启动即崩溃、卡死时也能用。
     #[cfg(windows)]

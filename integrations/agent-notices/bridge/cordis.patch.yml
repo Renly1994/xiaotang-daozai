@@ -1,0 +1,3 @@
+- insert:
+    - id: daozai-agent-notices
+      name: '@daozai/agent-notices'
