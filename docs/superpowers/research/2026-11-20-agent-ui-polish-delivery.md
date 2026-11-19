@@ -16,7 +16,7 @@
 | 审批卡 | 360 宽、字符数估算高度、正文不滚动会截断、胶囊按钮无主次 | **419 宽（=面板宽）**、真实排版测量、工具/操作内容/申请理由分区、长命令滚动不截断、按钮等分（主操作反白）、禁用态可读、入口带「收起」 |
 | 提问卡 | 一题一屏 + 简单选项 | 选项带描述与完整选中态、多选计数、流内自定义输入、最后一题「检查答案」→ 审阅页「确认提交」、禁用原因可见、作答前后按钮不跳位、Ctrl+Enter |
 | 完成通知 | 轻提示/展开卡两套硬编码坐标；「查看」是死按钮 | 两形态统一布局、完成徽标、摘要去 markdown 标记；**「查看回复」打开可滚动结果层**（受限 markdown：标题/列表/引用/代码块，复制内容，关闭即收起） |
-| 状态 | 只有「能否允许」 | 等待（呼吸描边 + 队列 `1 / N` + 交回倒计时）、提交中、提交失败「结果未知」（保留卡片 + 错误行）、队列计数 |
+| 状态 | 只有「能否允许」 | 等待（呼吸描边 + 队列 `1 / N` + 交回倒计时）、提交中（状态行改成「已提交 · 等待客户端确认」+ 底部不确定进度条）、提交失败「结果未知」（状态行 + 错误行 + 进度条，卡片保留可回客户端）、缺少操作内容时解释按钮为何禁用 |
 | 动效 | 高度弹簧，其余硬切 | 卡片入场淡入+上移（200ms，延迟 60ms）、按钮 hover 140ms / 按下 3% 缩放、滚动条、等宽数字（倒计时/队列不跳宽）、阻塞卡片不再随鼠标离开自动收起 |
 | 字体 | 只有比例字体 | 新增等宽家族（Cascadia Mono → Consolas），用于命令行、代码块、倒计时、数字 |
 
@@ -59,7 +59,7 @@ src/theme.rs           Agent 语义色 + 等宽字体家族
 | 画面导出 | `DAOZAI_AGENT_PREVIEW=<目录> cargo test --lib agent_cards_gallery -- --ignored` 一次导出 11 个场景（审批/长审批/原生授权/队列/单选/多选/多轮/多选项/轻提示/展开卡/结果层） |
 | 提问卡专项导出 | `DAOZAI_QUESTION_PREVIEW_DIR=<目录> cargo test --lib agent_ui::question::tests -- --ignored` 导出 7 个场景（含审阅页未答/已答、异常态） |
 | 真机探针 | `node scripts/agent-card-probe.mjs <DAOZAI_DATA_DIR> approval|question|finished|queue` → 真实窗口截图 + 鼠标点击，桥接返回决定 |
-| 真实 DSH E2E | `scripts/agent-e2e.ps1 -Scenario all`（真实 DSH 插件链 → 岛仔 → OCR 定位 → 真点击 → 校验决定）：**exit 0 / ok=true**，审批 `allowed-once`、提问 `selected=["冒烟测试"]`、完成 `done`；证据 `docs/superpowers/research/agent-e2e-shots/20261120-051519/` |
+| 真实 DSH E2E | `scripts/agent-e2e.ps1 -Scenario all`（真实 DSH 插件链 → 岛仔 → OCR 定位 → 真点击 → 校验决定）：**exit 0 / ok=true**，审批 `allowed-once`、提问 `selected=["冒烟测试"]`、完成 `done`；证据 `docs/superpowers/research/agent-e2e-shots/20261120-061922/` |
 
 ### 已知限制
 
@@ -78,9 +78,9 @@ src/theme.rs           Agent 语义色 + 等宽字体家族
 ## 4. 交付
 
 - exe：`target\x86_64-pc-windows-msvc\release\daozai.exe`
-- 大小 **22,748,672** 字节｜SHA256 `4F6D68D62EA865CB9BC7B9FC4CB1C14A20406B048B69DB0C3FCB20B7B61D72EB`
+- 大小 **22,750,720** 字节｜SHA256 `226FBF55887FD47EC7A119EAF792884394AC05192A07D3F66B7C3247543627A9`
 - 桌面快捷方式「岛仔－当前测试版」已指向该文件（已核对目标/大小/哈希一致）
-- 验收证据：`docs/superpowers/research/agent-e2e-shots/20261120-051519/`（20 个文件，截图已裁到卡片本体）
+- 验收证据：`docs/superpowers/research/agent-e2e-shots/20261120-061922/`（21 个文件，截图已裁到卡片本体）
 
 ## 5. 本机开发环境（重要）
 

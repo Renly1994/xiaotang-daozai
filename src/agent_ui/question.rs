@@ -14,7 +14,7 @@ use super::metrics::{
     self as m, galley, hairline, inset, M, BODY_TOP_GAP, BTN_H, FOOT_PAD, HEAD_H, LABEL, PAD,
 };
 use super::widgets::{self, HeadLayout, Status, StatusLayout, Viewport};
-use super::{Action, Answer, Question, QuestionView};
+use super::{Action, Answer, Question, QuestionView, State};
 use crate::paint::{self, Card};
 use crate::theme::{self, W};
 use eframe::egui::{self, Color32};
@@ -277,7 +277,12 @@ pub(crate) fn measure(m: &M, v: &QuestionView, width: f32) -> Layout {
     let multi = v.questions.get(index).is_some_and(|q| q.multi);
 
     // 任务约定：左侧一句状态语义，右侧给进度；审阅页换成「已答 x/N 题 + 还差 / 待确认」。
-    let (tone, status_text, status_right) = if reviewing {
+    // 提交中/结果未知时状态行改成阶段描述，否则用户点完「确认提交」看不到任何变化。
+    let (tone, status_text, status_right) = if v.state == State::Submitting {
+        (theme::AGENT_WORK, "已提交 · 等待客户端确认".to_owned(), String::new())
+    } else if v.state == State::Uncertain {
+        (theme::AGENT_ALERT, "提交结果未知 · 请回客户端确认".to_owned(), String::new())
+    } else if reviewing {
         if all_ready {
             (theme::AGENT_OK, "检查答案".to_owned(), format!("已答 {answered}/{total} 题 · 核对后确认提交"))
         } else {
@@ -511,6 +516,11 @@ pub(crate) fn draw_question(c: &Card, m: &M, v: &mut QuestionView, scroll: f32, 
     }
     // 槽位恒定：有没有提示都推进同样的高度，按钮 y 不随作答状态变化。
     y += layout.hint_h;
+
+    if busy {
+        // 提交中/结果未知：按钮下方一条不确定进度条，明确「点了、还在等」。
+        widgets::progress(&c, PAD, y + BTN_H + 5.0, w - PAD * 2.0, 2.0, v.age);
+    }
 
     let clicked = widgets::draw_footer_with_enabled(&c, y, w, &layout.footer, !busy, |id| match id {
         // 下一题要求本题已作答；检查答案/确认提交要求所有题都已作答。

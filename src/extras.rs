@@ -509,7 +509,7 @@ impl App {
                 self.open,
                 self.notice_details_active(),
                 self.agent_cards.count(),
-                self.agent_cards.active().map(|a| a.0.to_owned()),
+                self.agent_cards.active().map(|a| a.0.to_owned()).map(|id| format!("{id}:details={}", self.agent_cards.details_open(&id))),
                 self.agent_cards.hovering,
             );
             if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(std::env::temp_dir().join("daozai-agent-trace.log")) {

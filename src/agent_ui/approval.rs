@@ -5,7 +5,7 @@
 
 use super::metrics::{self as m, galley, inset, M, BODY_TOP_GAP, BTN_H, CONTENT_W, FOOT_PAD, HEAD_H, LABEL, PAD};
 use super::widgets::{self, HeadLayout, Status, StatusLayout, Viewport};
-use super::{Action, ApprovalView};
+use super::{Action, ApprovalView, State};
 use crate::paint::Card;
 use crate::theme::{self, W};
 use eframe::egui::{self, Color32};
@@ -44,13 +44,16 @@ pub(crate) fn measure(m: &M, v: &ApprovalView, width: f32) -> Layout {
     let w = super::card_width(width);
     let content = w - PAD * 2.0;
     let head = widgets::measure_head(m, &v.head, w);
+    // 状态行同时承载「阶段」：已发出决定后不能还写着「权限请求」，否则用户不知道点了有没有生效。
+    let (tone, text) = match v.state {
+        State::Pending if v.native_scope => (theme::AGENT_WORK, format!("{} · 授权请求", v.head.provider.short())),
+        State::Pending => (theme::AGENT_ALERT, format!("{} · 权限请求", v.head.provider.short())),
+        State::Submitting => (theme::AGENT_WORK, "已提交 · 等待客户端确认".to_owned()),
+        State::Uncertain => (theme::AGENT_ALERT, "提交结果未知 · 请回客户端确认".to_owned()),
+    };
     let status = Status {
-        tone: if v.native_scope { theme::AGENT_WORK } else { theme::AGENT_ALERT },
-        text: if v.native_scope {
-            format!("{} · 授权请求", v.head.provider.short())
-        } else {
-            format!("{} · 权限请求", v.head.provider.short())
-        },
+        tone,
+        text,
         right: if v.queue > 1 { format!("1 / {} 待处理", v.queue) } else { String::new() },
         extra: match v.handoff {
             Some(0) => "已交回客户端".to_owned(),
@@ -108,7 +111,13 @@ pub(crate) fn measure(m: &M, v: &ApprovalView, width: f32) -> Layout {
         body_content += block.block_h;
     }
 
-    let error = v.error.map(str::to_owned);
+    // 提示槽位：优先显示发送失败的原因；没有失败但缺少完整操作时，解释「仅允许这一次」为什么不可点。
+    let allow_ready = !v.operation.trim().is_empty() && !v.tool.trim().is_empty();
+    let note = v.error.map(str::to_owned).or_else(|| {
+        (!v.native_scope && !allow_ready)
+            .then(|| "缺操作内容，无法在岛上允许 · 回客户端或拒绝".to_owned())
+    });
+    let error = note;
     let error_h = widgets::error_height(m, error.as_deref(), w);
     let body_top = m::HEAD_TOP + HEAD_H + m::STATUS_H + BODY_TOP_GAP;
     // 固定区域：头部、状态行、错误行、按钮行与底部留白。
@@ -192,6 +201,10 @@ pub(crate) fn draw_approval(c: &Card, m: &M, v: &ApprovalView, scroll: f32, t: f
     }
     let busy = v.state.busy();
     let allow_ready = !v.operation.trim().is_empty() && !v.tool.trim().is_empty();
+    if busy {
+        // 提交中/结果未知：底部给一条不确定进度条，让「点了」这件事有可见反馈。
+        widgets::progress(&c, PAD, footer_y + BTN_H + 5.0, w - PAD * 2.0, 2.0, t as f32);
+    }
     if let Some(index) = widgets::draw_footer_with_enabled(&c, footer_y, w, &layout.footer, !busy, |id| {
         id != "agent-allow" || allow_ready
     }) {

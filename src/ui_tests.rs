@@ -9471,7 +9471,20 @@ fn agent_cards_gallery(){
     let mut h=H::new();h.app.settings.dsh_notifications=true;h.app.settings.agent.expanded=true;h.app.settings.agent.content=2;
     h.app.agent_finished(crate::agent_notice::Provider::Dsh,"## 本轮完成\n- 更新网关超时与重试\n- 跑了 12 个回归用例\n\n```bash\ncargo test --lib\n```\n全部通过。".into());
     shoot_agent(&mut h,&dest,"done-expanded",60);
-    // 10. 结果查看
+    // 10. 详情卡「收起」后的待处理提示卡
+    let mut h=H::new();h.app.settings.dsh_notifications=true;
+    approval(&mut h,"b1",serde_json::json!({"tool":"bash","operation":"{\"cmd\":\"npm run build\"}","cwd":"C:\\work\\web"}));
+    for _ in 0..40{h.frame(vec![]);}
+    let left=WIN_W/2.0-crate::agent_ui::CARD_W/2.0;
+    h.click(Pos2::new(left+crate::agent_ui::CARD_W-18.0-11.0,13.0+5.0+11.0));
+    shoot_agent(&mut h,&dest,"approval-banner",40);
+    // 11. 提交失败/结果未知（无桥接时点「仅允许这一次」）
+    let mut h=H::new();h.app.settings.dsh_notifications=true;
+    approval(&mut h,"b2",serde_json::json!({"tool":"write","operation":"{\"file_path\":\"a.txt\"}","cwd":"C:\\work"}));
+    for _ in 0..40{h.frame(vec![]);}
+    h.click_text("仅允许这一次");
+    shoot_agent(&mut h,&dest,"approval-uncertain",40);
+    // 12. 结果查看
     let mut h=H::new();h.app.settings.dsh_notifications=true;h.frame(vec![]);
     h.app.agent_cards.open_result(crate::agent_notice::Provider::Dsh,"## 本轮完成\n- 更新网关超时与重试\n- 跑了 12 个回归用例\n\n```bash\ncargo test --lib\n```\n\n全部通过。".into());
     h.app.open_agent_panel();

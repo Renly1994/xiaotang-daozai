@@ -264,3 +264,15 @@ impl Viewport {
 pub(crate) fn placeholder(c: &Card, m: &M, x: f32, y: f32, text: &str) {
     galley(c, x, y, &m.text(text, m::BODY, W::Regular, CONTENT_W), theme::AGENT_SUBTLE);
 }
+
+/// 不确定进度条（提交中/等待收口）：一条细线来回滑动，不承诺具体进度。
+pub(crate) fn progress(c: &Card, x: f32, y: f32, w: f32, h: f32, t: f32) {
+    c.fill(x, y, w, h, h / 2.0, Color32::from_white_alpha(22));
+    let runner = (w * 0.34).max(60.0);
+    // 1.6s 一个来回：两端停得短，看起来像在「尝试」，而不是假的百分比。
+    let phase = ((t / 1.6) % 1.0).clamp(0.0, 1.0);
+    let travel = (w - runner).max(0.0);
+    let ease = phase * phase * (3.0 - 2.0 * phase);
+    let cx = x + travel * ease;
+    c.fill(cx, y, runner, h, h / 2.0, theme::AGENT_WORK);
+}

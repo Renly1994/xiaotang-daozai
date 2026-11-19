@@ -46,6 +46,16 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# 整个 E2E 期间阻止息屏/睡眠：桌面复制与 GDI 截图在显示器休眠时会停在旧帧，OCR 就会「什么都看不见」。
+Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public static class E2EPower {
+  [DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f);
+  public static void On() { SetThreadExecutionState(0x80000000 | 0x00000001 | 0x00000002); }
+  public static void Off() { SetThreadExecutionState(0x80000000); }
+}
+'@
+[E2EPower]::On()
 $script:RepoRoot = Split-Path -Parent $PSScriptRoot
 $script:Failures = @()
 $script:Results = @()
@@ -98,6 +108,20 @@ public static class DaozaiE2EInput {
       return false;
     }, IntPtr.Zero);
     return found;
+  }
+  [DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint flags);
+  // 屏幕闲置/息屏时桌面复制和 GDI 截图会停在最后一帧，OCR 就"什么都看不见"。
+  // E2E 全程要求系统与显示器保持唤醒，并在每轮识别前做 1px 鼠标抖动，确保合成器继续出新帧。
+  public const uint ES_CONTINUOUS = 0x80000000;
+  public const uint ES_SYSTEM_REQUIRED = 0x00000001;
+  public const uint ES_DISPLAY_REQUIRED = 0x00000002;
+  public static void KeepAwake(bool on) {
+    SetThreadExecutionState(on ? (ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED) : ES_CONTINUOUS);
+  }
+  public static void Nudge() {
+    SetCursorPos(4, 4);
+    mouse_event(0x0001, 2, 0, 0, UIntPtr.Zero);
+    mouse_event(0x0001, unchecked((uint)-2), 0, 0, UIntPtr.Zero);
   }
   public static bool Click(int x, int y) {
     if (!SetCursorPos(x, y)) return false;
@@ -297,6 +321,8 @@ function Wait-Text {
   $attempt = 0
   while ((Get-Date) -lt $deadline) {
     $attempt++
+    # 息屏/闲置会让截图停在旧帧，每轮先抖一下鼠标再识别。
+    [DaozaiE2EInput]::Nudge()
     foreach ($scale in @(2, 3)) {
       $ocr = Invoke-OcrScan -Region $Region -Scale $scale
       $match = Find-LineMatch -Ocr $ocr -Texts $Texts

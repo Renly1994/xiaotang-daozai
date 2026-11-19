@@ -281,6 +281,30 @@ mod tests {
     }
 
     #[test]
+    fn submitting_and_uncertain_keep_the_layout_stable() {
+        // 提交中/结果未知只是状态变化，卡片尺寸不能跳（否则按钮会在点击后移位）。
+        let ctx = ctx();
+        let m = Measurer::new(&ctx);
+        for state in [State::Pending, State::Submitting, State::Uncertain] {
+            let mut view = approval(head(), "{\"a\":1}", "原因");
+            view.state = state;
+            assert_eq!(measure_approval(&m, &view, CARD_W), measure_approval(&m, &approval(head(), "{\"a\":1}", "原因"), CARD_W), "审批卡 {state:?} 高度不应变化");
+        }
+        let questions = vec![
+            Question { id: "q1".into(), question: "选一个".into(), detail: String::new(), multi: false,
+                options: vec![Choice { label: "A".into(), description: String::new() }] },
+        ];
+        let mut answers = vec![Answer { id: "q1".into(), ..Default::default() }];
+        let base = measure_question(&m, &QuestionView { head: head(), questions: &questions, answers: &mut answers, index: 0, scroll: 0.0,
+            reviewing: false, queue: 1, handoff: None, state: State::Pending, error: None, age: 1.0 }, CARD_W);
+        for state in [State::Submitting, State::Uncertain] {
+            let got = measure_question(&m, &QuestionView { head: head(), questions: &questions, answers: &mut answers, index: 0, scroll: 0.0,
+                reviewing: false, queue: 1, handoff: None, state, error: None, age: 1.0 }, CARD_W);
+            assert_eq!(got, base, "提问卡 {state:?} 高度不应变化");
+        }
+    }
+
+    #[test]
     fn result_height_stays_within_the_canvas() {
         let ctx = ctx();
         let m = Measurer::new(&ctx);
