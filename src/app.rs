@@ -8,6 +8,7 @@ use crate::anim::{self, lerp, smoothstep, Spring};
 use crate::bar_layout::{self as bar, Layout};
 use crate::calendar;
 use crate::glass;
+use crate::agent_ui;
 use crate::lyrics;
 use crate::mail;
 use crate::model;
@@ -49,7 +50,9 @@ pub const FLARE_H: f32 = 16.0; // 外翻收敛高度
 pub const RAD: f32 = 33.0; // 底部圆角
 pub const WIN_W: f32 = 640.0; // 窗口（透明画布）
 pub const CANVAS_W: f32 = WIN_W + 320.0; // 保留右侧通知及阴影的完整空间，原岛仍按 WIN_W 定位。
-pub const WIN_H: f32 = 270.0;
+/// 透明画布高度。普通形态只用顶部 270，Agent 审批/提问/结果卡需要更高的卡片：
+/// 画布一次性给到 520，由 `SetWindowRgn` 把不可见部分裁掉，命中区仍只覆盖岛体与卡片。
+pub const WIN_H: f32 = 520.0;
 /// 胶囊皮肤与屏幕顶边的间隙。
 pub const PILL_GAP: f32 = 6.0;
 
@@ -842,6 +845,8 @@ pub struct App {
     hud_alpha: f32,
     notice_width: Spring,
     notice_details: bool,
+    /// 上一帧结果层是否打开：关闭结果时同步收起面板，避免留下一个空白岛。
+    result_was_active: bool,
     pub pending_messengers:Vec<Unread>,
     messenger_scroll: f32,
     pub(crate) alerts: std::collections::VecDeque<Alert>,
@@ -998,8 +1003,12 @@ impl App {
             forced_open_until:0.0, settings_open:false, settings_window:std::sync::Arc::new(std::sync::Mutex::new(crate::settings_window::State::load())), displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_tab:0, settings_category:0, messenger_statuses:Default::default(), notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
             listener_status: "尚未连接".into(),
             agent_setup: Default::default(),
-            agent_cards: Default::default(),
-            notification_bell_until: 0.0, notification_bell_at: -10.0, notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, pending_messengers:Vec::new(), messenger_scroll:0.0, alerts: Default::default(), history: Default::default(), pending: vec![],
+            agent_cards: {
+                let mut cards = crate::agent_cards::Cards::default();
+                cards.bind_ctx(ctx);
+                cards
+            },
+            notification_bell_until: 0.0, notification_bell_at: -10.0, notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, result_was_active:false, pending_messengers:Vec::new(), messenger_scroll:0.0, alerts: Default::default(), history: Default::default(), pending: vec![],
             todo_first: 0, todo_choosing: false, pet: Default::default(), last_drink: None,
             toast: None, toast_below: false,
             last_input: 0.0, system_idle: None,
@@ -1776,14 +1785,19 @@ impl App {
         self.open && self.notice_details
             && self.agent_cards.active().is_some_and(|(id,_,_,_)|self.agent_cards.details_open(id))
     }
+    /// 「查看回复」打开的结果层：和详情一样占用展开面板。
+    pub(crate) fn result_active(&self)->bool {
+        self.open && self.agent_cards.result_open()
+    }
+    /// 面板是否正被 Agent 卡片占用（决定宽度、高度与是否画页面内容）。
+    pub(crate) fn agent_panel_active(&self)->bool {
+        self.agent_detail_active() || self.result_active()
+    }
     fn notice_size(&self,a:&Alert)->(f32,f32) {
         if let crate::extras::AlertSource::AgentCard(_,id)=&a.source {
-            if self.agent_cards.details_open(id) {
-                return self.agent_cards.detail_size(id);
-            }
-            return (360.0,108.0);
+            return self.agent_cards.detail_size(id);
         }
-        if self.settings.agent.expanded && matches!(a.source,crate::extras::AlertSource::AgentDone(_)){return (360.0,108.0);}
+        if self.settings.agent.expanded && matches!(a.source,crate::extras::AlertSource::AgentDone(_)){return (agent_ui::CARD_W,112.0);}
         let (width,height)=if a.meeting.is_some(){(360.0,136.0)}else if a.source==crate::extras::AlertSource::Internal && a.title=="蓝牙设备"{(HUD_W,48.0)}else if a.is_hud(){(HUD_W,38.0)}else{(334.0,44.0)};
         (width,height)
     }
@@ -1826,7 +1840,9 @@ impl App {
     }
 
     pub(crate) fn expanded_height(&self)->f32 {
-        if self.agent_detail_active() {
+        if self.result_active() {
+            self.agent_cards.result_size().1.max(PH).min(WIN_H-8.0)
+        } else if self.agent_detail_active() {
             self.agent_cards.active()
                 .map(|(id,_,_,_)|self.agent_cards.detail_size(id).1.max(PH).min(WIN_H-8.0))
                 .unwrap_or(PH)
@@ -1889,13 +1905,19 @@ impl App {
             (None,Some(_))|(Some(_),None)=>true,
             (None,None)=>false,
         };
-        if hud_changed && !self.agent_detail_active() {self.notice_details=false;}
+        if hud_changed && !self.agent_panel_active() {self.notice_details=false;}
         if let Some(a)=&hud_active {self.hud_notice=Some(a.clone());}
         self.hud_alpha=anim::approach(self.hud_alpha,if hud_active.is_some(){1.0}else{0.0},if hud_active.is_some(){16.0}else{8.0},dt);
         if hud_active.is_none() && self.hud_alpha<0.003 {self.hud_notice=None;}
         let notice_target=if !self.notice.as_ref().is_some_and(|a|a.messenger().is_some()) && self.compact_notices()&&(self.notice.is_some()||self.t<self.notification_bell_until) {44.0}else{0.0};
         self.notice_width.target=notice_target;
-        let agent_details=self.agent_detail_active();
+        let agent_details=self.agent_panel_active();
+        if self.result_was_active && !self.result_active() {
+            // 「查看回复」关闭后立即收起面板；否则会留下一个没有内容的空岛。
+            self.open=false;
+            self.forced_open_until=0.0;
+        }
+        self.result_was_active=self.result_active();
         if self.compact_notices(){
             self.notice_width.step(dt);
         }else{
@@ -2109,8 +2131,13 @@ impl App {
         let restoring_lyrics=!self.open&&self.notice.is_none()&&self.island_lyrics_active()&&self.hud_notice.as_ref().is_some_and(|a|a.meeting.is_some()||a.source!=crate::extras::AlertSource::Internal);
         let fading_hud=!self.compact_notices()&&!self.open&&self.hud_notice.as_ref().is_some_and(|a|a.is_hud())&&(banner||self.hud_alpha>0.003);
         if agent_details {
-            if let Some(id)=self.agent_cards.active().map(|(id,_,_,_)|id.to_owned()) {
-                let detail_width=360.0_f32.min(panel.width());
+            if self.result_active() {
+                // 「查看回复」：和详情共用展开面板，卡片宽度跟随面板。
+                let detail_width=agent_ui::CARD_W.min(panel.width());
+                let detail_origin=panel.min+Vec2::new((panel.width()-detail_width).max(0.0)/2.0,0.0);
+                self.agent_cards.draw_result(&Card::new(ui,detail_origin,panel.intersect(ui.max_rect())));
+            }else if let Some(id)=self.agent_cards.active().map(|(id,_,_,_)|id.to_owned()) {
+                let detail_width=agent_ui::CARD_W.min(panel.width());
                 let detail_origin=panel.min+Vec2::new((panel.width()-detail_width).max(0.0)/2.0,0.0);
                 self.agent_cards.draw_details(&Card::new(ui,detail_origin,panel.intersect(ui.max_rect())),&id);
             }
@@ -2204,9 +2231,11 @@ impl App {
             }
         }
         if agent_details {
-            if let Some(id)=self.agent_cards.active().map(|(id,_,_,_)|id.to_owned()) {
-                let outside=ctx.input(|i|i.pointer.any_pressed()&&i.pointer.interact_pos().is_some_and(|p|!panel.contains(p)));
-                if outside {
+            let outside=ctx.input(|i|i.pointer.any_pressed()&&i.pointer.interact_pos().is_some_and(|p|!panel.contains(p)));
+            if outside {
+                if self.result_active() {
+                    self.agent_cards.close_result();
+                } else if let Some(id)=self.agent_cards.active().map(|(id,_,_,_)|id.to_owned()) {
                     self.agent_cards.close_detail(&id);
                     self.notice_details=false;
                 }
@@ -2577,6 +2606,10 @@ impl App {
     }
     pub(crate) fn open_notice_details(&mut self){
         self.notice_details=true;
+        self.open_agent_panel();
+    }
+    /// 展开面板到 Agent 卡片需要的高度（详情、结果层共用）。
+    pub(crate) fn open_agent_panel(&mut self){
         self.open=true;
         self.forced_open_until=self.t+6.0;
         self.w.tune(OPEN_W.0,OPEN_W.1);
@@ -2922,7 +2955,15 @@ impl App {
             }
         } else {
             self.hover_since = None;
-            if self.open {
+            if self.open && self.agent_panel_active() {
+                // 待处理审批/提问与结果查看是阻塞式卡片：不跟随鼠标离开自动收起，
+                // 由「收起」按钮、明确交回/关闭或点击卡片外部来处理。
+                self.leave_since = None;
+                self.w.tune(OPEN_W.0, OPEN_W.1);
+                self.h.tune(OPEN_H.0, OPEN_H.1);
+                self.w.target = PW;
+                self.h.target = self.expanded_height();
+            } else if self.open {
                 let since = *self.leave_since.get_or_insert(t);
                 if t - since >= LEAVE_DELAY {
                     let was_agent_detail=self.agent_detail_active();

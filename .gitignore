@@ -16,3 +16,6 @@ Thumbs.db
 
 # 本地联调用的临时探针脚本，不随仓库分发
 /.tmp/
+
+# 真机验收截图（可能含本机桌面内容），不随仓库分发
+/docs/superpowers/research/agent-e2e-shots/

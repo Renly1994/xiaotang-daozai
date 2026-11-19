@@ -35,6 +35,13 @@ impl Provider {
     }
     fn id(self) -> &'static str { self.meta().key }
     pub fn label(self) -> &'static str { self.meta().label }
+    /// 卡片状态行用的短名（对齐参考项目的 `DSH` chip）。
+    pub fn short(self) -> &'static str {
+        match self {
+            Self::Dsh => "DSH",
+            Self::Codex => "Codex",
+        }
+    }
     pub fn icon(self) -> egui::Image<'static> { (self.meta().icon)() }
     pub fn setting_mut(self, settings: &mut crate::model::Settings) -> &mut bool { (self.meta().setting_mut)(settings) }
     pub fn enabled(self, settings: &crate::model::Settings) -> bool {

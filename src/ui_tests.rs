@@ -6981,11 +6981,21 @@ fn agent_notice_question_is_answered_inside_the_island(){
         "questions":[{"id":"q","question":"需要选择哪个方案？","options":[{"label":"方案 A"},{"label":"方案 B"}]}]}}),&h.app.settings);
     for _ in 0..65 {h.frame(vec![]);}
     for _ in 0..45 {h.frame(vec![]);}
-    for label in ["需要选择哪个方案？","方案 A","方案 B","提交回答","回客户端"] {
-        assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()==label)),
-            "岛内提问详情缺少内容 {label}");
+    let texts:Vec<String>=h.shapes.iter().filter_map(|s|if let egui::Shape::Text(t)=&s.shape{Some(t.galley.text().to_owned())}else{None}).collect();
+    for label in ["需要选择哪个方案？","方案 A","方案 B","检查答案","回客户端"] {
+        assert!(texts.iter().any(|text|text==label),
+            "岛内提问详情缺少内容 {label}；当前文字：{texts:?}");
     }
-    h.click_text("方案 A");h.click_text("提交回答");h.frame(vec![]);
+    // 最后一题不直接提交：先「检查答案」，在审阅页再「确认提交」。
+    h.click_text("方案 A");
+    // 作答后底部提示行消失，按钮会上移；先渲染一帧再按新坐标点击。
+    h.frame(vec![]);
+    h.click_text("检查答案");h.frame(vec![]);
+    let review:Vec<String>=h.shapes.iter().filter_map(|s|if let egui::Shape::Text(t)=&s.shape{Some(t.galley.text().to_owned())}else{None}).collect();
+    for label in ["确认提交","返回修改"] {
+        assert!(review.iter().any(|text|text==label),"审阅页缺少 {label}；当前文字：{review:?}");
+    }
+    h.click_text("确认提交");h.frame(vec![]);
     assert_eq!(h.app.agent_cards.count(),0);
 }
 
@@ -7003,10 +7013,10 @@ fn agent_notice_questions_page_one_at_a_time_supports_back_and_custom_input(){
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="第一轮：能正常显示吗？")));
     assert!(!h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="第二轮：可以分别作答吗？")));
     h.click_text("自定义回答");h.frame(vec![egui::Event::Text("第一轮补充".into())]);
-    h.click_text("下一轮");h.frame(vec![]);
+    h.click_text("下一题");h.frame(vec![]);
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="第二轮：可以分别作答吗？")));
     assert!(!h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="第一轮：能正常显示吗？")));
-    h.click_text("上一轮");h.frame(vec![]);
+    h.click_text("上一题");h.frame(vec![]);
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="第一轮：能正常显示吗？")));
 }
 
@@ -9365,4 +9375,103 @@ fn every_module_settings_tab_maps_to_its_page(){
 /// 设置页的 AI 额度账号默认收起成一行；需要检查明细的测试先把所有账号展开。
 pub(crate) fn open_quota_details(h:&H){
     for account in &h.app.quota.config.accounts {h.ctx.data_mut(|d|d.insert_temp(egui::Id::new(("quota-account-open",account.id.clone())),true));}
+}
+
+// ---------------------------------------------------------------
+// Agent 卡片画面导出（人工验收用，按需运行）
+// ---------------------------------------------------------------
+/// 把当前帧导出成 PNG（Agent 卡片用：更宽的裁切，覆盖 419 宽面板 + 阴影）。
+fn shoot_agent(h:&mut H,dest:&std::path::Path,name:&str,frames:usize){
+    let ppp=2.0;let (w,hgt)=(crate::app::CANVAS_W,WIN_H);
+    let mut raster=crate::preview_raster::Raster::new((w*ppp) as usize,(hgt*ppp) as usize);
+    for f in 0..frames {
+        h.t+=1.0/60.0;
+        let env=Env{t:h.t,clock:"09:41:00".into(),today:"2026-11-20".into(),date:"11月20日 周五".into(),bt_ready:true,..Default::default()};
+        let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(w,hgt))),time:Some(h.t),focused:true,
+            viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(ppp),..Default::default()})).collect(),..Default::default()};
+        let app=&mut h.app;
+        let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{let win=Rect::from_min_size(ui.max_rect().min,Vec2::new(WIN_W,hgt));app.frame(ui,win,&env);});});
+        raster.update_textures(&output.textures_delta);
+        let primitives=h.ctx.tessellate(output.shapes,output.pixels_per_point);
+        if f+1==frames {
+            raster.buf.fill([0.14,0.16,0.22,1.0]);
+            raster.draw(&primitives,output.pixels_per_point);
+            let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+            let image=image::RgbaImage::from_raw((w*ppp) as u32,(hgt*ppp) as u32,rgba).unwrap();
+            let crop_h=(h.app.expanded_height()*ppp+28.0).max(250.0).min(hgt*ppp) as u32;
+            let crop_w=1160u32.min((w*ppp) as u32-160);
+            image::imageops::crop_imm(&image,160,0,crop_w,crop_h).to_image().save(dest.join(format!("{name}.png"))).unwrap();
+        }
+        raster.free_textures(&output.textures_delta);
+    }
+}
+
+#[test]
+#[ignore="按需导出 Agent 审批/提问/完成通知的实际画面"]
+fn agent_cards_gallery(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_AGENT_PREVIEW").expect("需指定 DAOZAI_AGENT_PREVIEW 目录"));
+    std::fs::create_dir_all(&dest).unwrap();
+    let approval=|h:&mut H,id:&str,data:serde_json::Value|{
+        h.app.agent_cards.receive(serde_json::json!({"id":id,"provider":"dsh","kind":"approval","data":data}),&h.app.settings);
+    };
+    // 1. 普通审批
+    let mut h=H::new();h.app.settings.dsh_notifications=true;
+    approval(&mut h,"a1",serde_json::json!({"tool":"write","reason":"应用新的超时与重试策略，发布前需要确认写入生产配置。",
+        "cwd":"C:\\work\\api-gateway","operation":"{\n  \"file_path\": \"config/gateway.yaml\",\n  \"content\": \"upstream.timeout: 30s -> 12s\\nretry: 2\\nroutes: 6\"\n}"}));
+    shoot_agent(&mut h,&dest,"approval",70);
+    // 2. 超长操作 + 长理由（验证滚动）
+    let mut h=H::new();h.app.settings.dsh_notifications=true;
+    let long_operation=format!("{{\"command\":\"{}\"}}","--flag value ".repeat(60));
+    approval(&mut h,"a2",serde_json::json!({"tool":"bash","reason":"需要跑完整回归。".to_owned()+&"这是一段很长的申请理由，用来验证换行与滚动是否正确。".repeat(8),
+        "cwd":"D:\\project-with-a-long-name\\src\\components","operation":long_operation}));
+    shoot_agent(&mut h,&dest,"approval-long",70);
+    // 3. 原生授权范围
+    let mut h=H::new();h.app.settings.dsh_notifications=true;
+    approval(&mut h,"a3",serde_json::json!({"tool":"Allow network access?","reason":"For this session","nativeScope":true,"sessionId":"s-1"}));
+    shoot_agent(&mut h,&dest,"approval-native",70);
+    // 4. 队列
+    let mut h=H::new();h.app.settings.dsh_notifications=true;
+    for i in 0..3{approval(&mut h,&format!("q{i}"),serde_json::json!({"tool":"read","operation":"{\"path\":\"src/main.rs\"}","cwd":"C:\\work"}));}
+    shoot_agent(&mut h,&dest,"approval-queue",70);
+    // 5. 单选提问（带选项描述）
+    let mut h=H::new();h.app.settings.dsh_notifications=true;
+    h.app.agent_cards.receive(serde_json::json!({"id":"q1","provider":"dsh","kind":"question","data":{"questions":[
+        {"id":"choice","question":"发布前用哪种验证策略？","detail":"选择后本轮会按该策略继续执行，可在下一步再调整。",
+         "options":[{"label":"仅跑冒烟测试","description":"约 2 分钟，覆盖登录与支付主链路"},{"label":"跑完整回归","description":"约 18 分钟，覆盖 1317 个用例"},{"label":"先不验证","description":"直接进入发布确认"}]}
+    ]}}),&h.app.settings);
+    shoot_agent(&mut h,&dest,"question-single",80);
+    // 6. 多选提问
+    let mut h=H::new();h.app.settings.dsh_notifications=true;
+    h.app.agent_cards.receive(serde_json::json!({"id":"q2","provider":"dsh","kind":"question","data":{"questions":[
+        {"id":"multi","question":"这轮要一起处理哪些项？","multi":true,
+         "options":[{"label":"更新依赖","description":"升级到最新补丁版本"},{"label":"补测试","description":"为新增分支加用例"},{"label":"改文档","description":"更新 AGENT-NOTICES.md"},{"label":"发版说明","description":"写 CHANGELOG 条目"}]}
+    ]}}),&h.app.settings);
+    shoot_agent(&mut h,&dest,"question-multi",80);
+    // 7. 多轮提问
+    let mut h=H::new();h.app.settings.dsh_notifications=true;
+    h.app.agent_cards.receive(serde_json::json!({"id":"q3","provider":"dsh","kind":"question","data":{"questions":[
+        {"id":"r1","question":"第一轮：这次改动影响哪些平台？","options":[{"label":"仅 Windows"},{"label":"Windows 与 macOS"}]},
+        {"id":"r2","question":"第二轮：需要同时更新接入文档吗？","detail":"文档改动会一并提交到同一分支。","options":[{"label":"需要"},{"label":"不需要"}]}
+    ]}}),&h.app.settings);
+    shoot_agent(&mut h,&dest,"question-rounds",90);
+    // 8. 多选项（验证滚动）
+    let mut h=H::new();h.app.settings.dsh_notifications=true;
+    let options:Vec<_>=(1..=9).map(|i|serde_json::json!({"label":format!("候选方案 {i}"),"description":format!("这是第 {i} 个方案的一句话说明")})).collect();
+    h.app.agent_cards.receive(serde_json::json!({"id":"q4","provider":"dsh","kind":"question","data":{"questions":[
+        {"id":"many","question":"从下列方案中选一个最合适的：","options":options}
+    ]}}),&h.app.settings);
+    shoot_agent(&mut h,&dest,"question-many",80);
+    // 9. 完成通知轻提示 / 展开卡
+    let mut h=H::new();h.app.settings.dsh_notifications=true;
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,"已完成网关配置更新并通过回归测试。".into());
+    shoot_agent(&mut h,&dest,"done-compact",60);
+    let mut h=H::new();h.app.settings.dsh_notifications=true;h.app.settings.agent.expanded=true;h.app.settings.agent.content=2;
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,"## 本轮完成\n- 更新网关超时与重试\n- 跑了 12 个回归用例\n\n```bash\ncargo test --lib\n```\n全部通过。".into());
+    shoot_agent(&mut h,&dest,"done-expanded",60);
+    // 10. 结果查看
+    let mut h=H::new();h.app.settings.dsh_notifications=true;h.frame(vec![]);
+    h.app.agent_cards.open_result(crate::agent_notice::Provider::Dsh,"## 本轮完成\n- 更新网关超时与重试\n- 跑了 12 个回归用例\n\n```bash\ncargo test --lib\n```\n\n全部通过。".into());
+    h.app.open_agent_panel();
+    shoot_agent(&mut h,&dest,"result",70);
 }

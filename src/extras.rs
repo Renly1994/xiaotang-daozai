@@ -516,33 +516,55 @@ impl App {
             self.agent_cards.hovering=c.live&&c.ui.rect_contains_pointer(panel);
             let left=self.agent_cards.countdown(self.t,self.settings.agent.handoff,self.fullscreen_hidden);
             if left==Some(0){self.agent_cards.hand_back(id);return;}
-            agent_icon(&nc,26.0,24.0,26.0,p);
-            nc.centered_text(48.0,23.0,&format!("{} · {}",p.label(),a.title),13.0,W::Semibold,theme::WHITE,H::Left);
-            let count=self.agent_cards.count();if count>1{nc.centered_text(340.0,23.0,&format!("1 / {count}"),11.0,W::Regular,theme::GRAY,H::Right);}
-            nc.centered_text(18.0,49.0,&nc.fit(&a.body,12.0,W::Regular,320.0),12.0,W::Regular,theme::WHITE,H::Left);
-            if let Some(s)=left{nc.centered_text(18.0,82.0,&format!("{s} 秒后交回"),10.5,W::Regular,theme::GRAY,H::Left);}
-            if notice_button(&nc,152.0,72.0,90.0,"回客户端","agent-return"){self.agent_cards.hand_back(id);}
-            if notice_button(&nc,250.0,72.0,90.0,if a.title=="等待你审批"{"查看并审批"}else{"查看并回答"},"agent-review"){
-                self.agent_cards.detail(id);
-                self.open_notice_details();
+            let info=self.agent_cards.banner_info(id);
+            let head=info.as_ref().map(|info|crate::agent_ui::Head{
+                provider:p,
+                kicker:a.title.as_str(),
+                subtitle:info.subtitle.as_str(),
+                jump:info.jump.as_ref(),
+            });
+            if let Some(head)=head {
+                let m=crate::agent_ui::Measurer::new(c.ui.ctx());
+                let view=crate::agent_ui::BannerView{
+                    head,
+                    summary:a.body.as_str(),
+                    handoff:left,
+                    queue:self.agent_cards.count(),
+                    approval:a.title=="等待你审批",
+                    age:(self.t-a.at) as f32,
+                };
+                match crate::agent_ui::draw_banner(&nc,&m,&view,self.t) {
+                    Some(crate::agent_ui::Action::Return)=>{self.agent_cards.hand_back(id);}
+                    Some(crate::agent_ui::Action::Review)=>{
+                        self.agent_cards.detail(id);
+                        self.open_notice_details();
+                    }
+                    Some(crate::agent_ui::Action::Jump)=>{}
+                    _=>{}
+                }
             }
             return;
         }
         if let AlertSource::AgentDone(p)=a.source {
             self.agent_cards.hovering=c.live&&c.ui.rect_contains_pointer(panel);
-            let wide=self.settings.agent.expanded;
-            agent_icon(&nc,24.0,22.0,26.0,p);
-            nc.centered_text(44.0,if wide{21.0}else{14.0},p.label(),12.0,W::Semibold,theme::WHITE,H::Left);
-            if wide {
-                nc.centered_text(340.0,21.0,"本轮已结束",11.0,W::Regular,theme::GRAY,H::Right);
+            let m=crate::agent_ui::Measurer::new(c.ui.ctx());
+            let view=crate::agent_ui::DoneView{
+                provider:p,
+                kicker:"本轮已结束",
+                text:a.body.as_str(),
+                compact:!self.settings.agent.expanded,
+                age:(self.t-a.at) as f32,
+            };
+            match crate::agent_ui::draw_done(&nc,&m,&view,self.t) {
+                Some(crate::agent_ui::Action::ShowResult)=>{
+                    if self.settings.agent.content>0 && a.body!=crate::agent_notice::Status::Finished.label(){
+                        self.agent_cards.open_result(p,a.body.clone());
+                        self.open_agent_panel();
+                    }
+                }
+                Some(crate::agent_ui::Action::Dismiss)=>{self.notice=None;}
+                _=>{}
             }
-            let line=a.body.split_whitespace().take(100).collect::<Vec<_>>().join(" ");
-            let text=nc.fit(&line,11.0,W::Regular,if wide{320.0}else{176.0});
-            nc.centered_text(if wide{18.0}else{44.0},if wide{49.0}else{30.0},&text,11.0,W::Regular,theme::GRAY,H::Left);
-            let y=if wide{72.0}else{12.0};
-            if self.settings.agent.content>0 && a.body!=crate::agent_notice::Status::Finished.label()
-                && notice_button(&nc,if wide{166.0}else{224.0},y,50.0,"查看","agent-result"){self.agent_cards.result=Some((p,a.body.clone()));}
-            if notice_button(&nc,if wide{248.0}else{278.0},y,50.0,"关闭","agent-done-close"){self.notice=None;}
             return;
         }
         if let Some(source)=a.messenger(){

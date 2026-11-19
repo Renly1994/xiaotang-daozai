@@ -161,6 +161,32 @@ impl<'a> Card<'a> {
     }
 
     // ---------- 图形 ----------
+    /// 按宽度真实排版一次（内部走 egui 字体缓存），返回可复用的 galley。
+    ///
+    /// 测量与绘制共用同一份结果：先 `layout` 取 `size().y` 决定高度，再用
+    /// `galley`/`galley_h` 画出来，不会出现「估算一套、实测另一套」的漂移。
+    pub fn layout(&self, t: &str, size: f32, w: W, width: f32, color: Color32) -> std::sync::Arc<egui::Galley> {
+        self.layout_id(t, self.font(size, w), width, color)
+    }
+    /// 等宽排版（命令行、代码块、倒计时）。
+    pub fn layout_mono(&self, t: &str, size: f32, w: W, width: f32, color: Color32) -> std::sync::Arc<egui::Galley> {
+        self.layout_id(t, theme::mono(size * self.s, w), width, color)
+    }
+    fn layout_id(&self, t: &str, font: FontId, width: f32, color: Color32) -> std::sync::Arc<egui::Galley> {
+        self.painter.layout(crate::rtl_text::display(t).into_owned(), font, color, width * self.s)
+    }
+    /// 以左上角定位绘制换行文本（`top` 是行盒顶部，不是基线）。
+    pub fn galley_at(&self, x: f32, top: f32, g: &std::sync::Arc<egui::Galley>) {
+        self.painter.galley(self.pos(x, top), g.clone(), g.job.sections.first().map_or(Color32::WHITE, |s| s.format.color));
+    }
+    /// galley 在局部坐标下的高度。
+    pub fn galley_h(&self, g: &egui::Galley) -> f32 {
+        g.size().y / self.s
+    }
+    pub fn galley_w(&self, g: &egui::Galley) -> f32 {
+        g.size().x / self.s
+    }
+
     pub fn fill(&self, x: f32, y: f32, w: f32, h: f32, r: f32, color: Color32) {
         self.painter.rect_filled(self.rect(x, y, w, h), r * self.s, color);
     }

@@ -31,6 +31,29 @@ pub const ARROW_BG: Color32 = Color32::from_rgb(48, 48, 51);
 pub const WATER_TRACK: Color32 = Color32::from_rgb(15, 38, 64);
 pub const YELLOW: Color32 = Color32::from_rgb(255, 196, 61);
 
+// ---------- Agent 卡片语义色（对齐 island-hud 的 alert / idle / work 体系） ----------
+/// 等待用户处理的警示橙：审批、提问、倒计时。
+pub const AGENT_ALERT: Color32 = Color32::from_rgb(240, 151, 72);
+/// 完成、成功、已选中。
+pub const AGENT_OK: Color32 = Color32::from_rgb(52, 199, 89);
+/// 运行中 / 可跳转。
+pub const AGENT_WORK: Color32 = Color32::from_rgb(78, 128, 237);
+/// 次级文字（正文下一档）。
+pub const AGENT_MUTED: Color32 = Color32::from_rgb(179, 179, 179);
+/// 三级文字（标签、元信息）。
+pub const AGENT_SUBTLE: Color32 = Color32::from_rgb(150, 145, 142);
+/// 卡片内嵌块（代码块、选项）的底色。
+pub const AGENT_INSET: Color32 = Color32::from_rgb(24, 22, 20);
+/// 内嵌块描边。
+pub const AGENT_INSET_EDGE: Color32 = Color32::from_rgb(52, 46, 39);
+/// 主按钮（反白）与其次级按钮。
+pub const AGENT_PRIMARY: Color32 = Color32::from_rgb(232, 232, 234);
+pub const AGENT_PRIMARY_HOVER: Color32 = Color32::from_rgb(255, 255, 255);
+pub const AGENT_SECONDARY: Color32 = Color32::from_rgb(38, 38, 40);
+pub const AGENT_SECONDARY_HOVER: Color32 = Color32::from_rgb(56, 56, 60);
+/// 禁用态整体透明度。
+pub const AGENT_DISABLED: f32 = 0.42;
+
 pub fn alpha_blue(a: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(BLUE.r(), BLUE.g(), BLUE.b(), (255.0 * a) as u8)
 }
@@ -48,6 +71,16 @@ pub fn font(size: f32, w: W) -> FontId {
         W::Regular => FontId::proportional(size),
         W::Semibold => FontId::new(size, FontFamily::Name("semibold".into())),
         W::Bold => FontId::new(size, FontFamily::Name("bold".into())),
+    }
+}
+
+/// 等宽字体：命令行、代码块、倒计时、队列计数与数字列。
+/// 用等宽字体保证逐帧刷新时数字宽度不跳（等价于 CSS 的 `tabular-nums`）。
+pub fn mono(size: f32, w: W) -> FontId {
+    match w {
+        W::Regular => FontId::new(size, FontFamily::Name("mono-regular".into())),
+        W::Semibold => FontId::new(size, FontFamily::Name("mono-semibold".into())),
+        W::Bold => FontId::new(size, FontFamily::Name("mono-bold".into())),
     }
 }
 
@@ -218,7 +251,30 @@ fn build_fonts()->FontDefinitions {
         list.extend(builtin.iter().cloned());
         fonts.families.insert(fam.clone(), list);
     }
-    fonts
+    // 等宽家族：Cascadia Mono（Windows Terminal 自带）→ Consolas → Noto Sans Mono。
+    // 注意：不改写内置的 FontFamily::Monospace —— 设置页等既有 UI 依赖它的默认度量，
+    // 覆盖会让分段控件的文字垂直居中偏移 1.25px（有回归测试盯着）。这里只注册命名家族。
+    let mono = [
+        find(&[("CascadiaMono.ttf", 0), ("consola.ttf", 0), ("NotoSansMono-Regular.ttf", 0)], &dirs),
+        find(&[("CascadiaMono.ttf", 0), ("consolab.ttf", 0), ("consola.ttf", 0)], &dirs),
+        find(&[("consolab.ttf", 0), ("CascadiaMono.ttf", 0), ("consola.ttf", 0)], &dirs),
+    ];
+    let mono_families = [
+        FontFamily::Name("mono-regular".into()),
+        FontFamily::Name("mono-semibold".into()),
+        FontFamily::Name("mono-bold".into()),
+    ];
+    for (i, fam) in mono_families.iter().enumerate() {
+        let mut list = Vec::new();
+        if let Some(k) = add(&mut fonts, &mono[i], format!("mono{i}")) {
+            list.push(k);
+        }
+        if let Some(k) = add(&mut fonts, &cjk[0], "cjk0".into()) {
+            list.push(k);
+        }
+        list.extend(builtin.iter().cloned());
+        fonts.families.insert(fam.clone(), list);
+    }    fonts
 }
 
 /// 各个原生窗口统一使用岛仔品牌图标，避免回落到框架默认图标。

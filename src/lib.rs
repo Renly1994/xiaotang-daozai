@@ -16,6 +16,7 @@ pub mod oled_shift;
 pub mod app;
 pub mod agent_notice;
 pub mod agent_cards;
+mod agent_ui;
 pub mod agent_jump;
 pub mod messenger;
 pub mod child_process;
