@@ -243,47 +243,86 @@ function Invoke-Ocr {
   }
 }
 
-# 轮询直到任意一个候选文字出现；返回 @{found;center;text;line} 或 $null。
+# 单倍率识别一次（不指定 -Find）：一次子进程只跑一遍 OCR，比“每个候选词都跑一遍”快一个数量级。
+function Invoke-OcrScan {
+  param($Region, [int]$Scale = 2, [string]$SaveImage)
+  $Region = Get-LiveRegion $Region
+  $cli = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ocrScript, '-Region', (Get-RegionString $Region), '-Scale', [string]$Scale)
+  if ($SaveImage) { $cli += @('-SaveImage', $SaveImage, '-CropSave', '-CropCard') }
+  $previous = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try { $raw = & powershell @cli 2>&1 | Out-String }
+  finally { $ErrorActionPreference = $previous }
+  try { return ($raw | ConvertFrom-Json) } catch {
+    return [pscustomobject]@{ ok = $false; lines = @(); error = "OCR 输出无法解析: $($raw.Substring(0, [Math]::Min(200, $raw.Length)))" }
+  }
+}
+
+# 在 OCR 结果里找候选词（去空格包含），返回中心坐标；PreferBottom 时取最靠下的一条。
+function Find-LineMatch {
+  param($Ocr, [string[]]$Texts, [switch]$PreferBottom)
+  if (-not $Ocr -or -not $Ocr.ok) { return $null }
+  $lines = @($Ocr.lines)
+  foreach ($text in $Texts) {
+    $needle = ($text -replace '\s+', '')
+    if (-not $needle) { continue }
+    $hits = @()
+    foreach ($line in $lines) {
+      $haystack = [string]$line.compact
+      $at = $haystack.IndexOf($needle, [StringComparison]::OrdinalIgnoreCase)
+      while ($at -ge 0) {
+        $ratio = $at / [Math]::Max(1, $haystack.Length)
+        $lenRatio = $needle.Length / [Math]::Max(1, $haystack.Length)
+        $mx = $line.rect[0] + [int](($ratio + $lenRatio / 2) * $line.rect[2])
+        $my = $line.center[1]
+        $hits += [pscustomobject]@{ center = @($mx, $my); line = $line.text; rect = $line.rect }
+        $at = $haystack.IndexOf($needle, $at + $needle.Length, [StringComparison]::OrdinalIgnoreCase)
+      }
+    }
+    if ($hits.Count) {
+      $pick = $hits[0]
+      if ($PreferBottom -and $hits.Count -gt 1) {
+        $pick = $hits | Sort-Object -Property @{ Expression = { $_.center[1] } } | Select-Object -Last 1
+      }
+      return [pscustomobject]@{ found = $true; center = $pick.center; text = $text; line = $pick.line; matches = $hits }
+    }
+  }
+  return $null
+}
+
+# 轮询直到任意一个候选文字出现；每次轮询只跑 1-2 遍 OCR（2 倍、必要时 3 倍）。
 function Wait-Text {
   param($Region, [string[]]$Texts, [int]$TimeoutSeconds, [string]$ShotOnFound, [string]$ShotOnTimeout)
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
   $attempt = 0
   while ((Get-Date) -lt $deadline) {
     $attempt++
-    $live = Get-LiveRegion $Region
-    foreach ($text in $Texts) {
-      $shot = $null
-      if ($ShotOnFound -and $attempt -eq 1) { $shot = $ShotOnFound }
-      $j = Invoke-Ocr -Region $live -Find $text -SaveImage $shot
-      if ($j.ok -and $j.find -and $j.find.found) {
-        if ($ShotOnFound -and $attempt -gt 1) { $null = Invoke-Ocr -Region $live -Find $text -SaveImage $ShotOnFound }
-        return [pscustomobject]@{ found = $true; center = $j.find.center; text = $text; line = $j.find.line; attempts = $attempt }
+    foreach ($scale in @(2, 3)) {
+      $ocr = Invoke-OcrScan -Region $Region -Scale $scale
+      $match = Find-LineMatch -Ocr $ocr -Texts $Texts
+      if ($match) {
+        if ($ShotOnFound) { $null = Invoke-OcrScan -Region $Region -Scale $scale -SaveImage $ShotOnFound }
+        return [pscustomobject]@{ found = $true; center = $match.center; text = $match.text; line = $match.line; attempts = $attempt }
       }
     }
-    Start-Sleep -Milliseconds 400
+    Start-Sleep -Milliseconds 250
   }
-  if ($ShotOnTimeout) { $null = Invoke-Ocr -Region (Get-LiveRegion $Region) -SaveImage $ShotOnTimeout }
+  if ($ShotOnTimeout) { $null = Invoke-OcrScan -Region (Get-LiveRegion $Region) -Scale 2 -SaveImage $ShotOnTimeout }
   return $null
 }
 
 function Find-AnyText {
   param($Region, [string[]]$Texts, [string]$SaveImage, [int[]]$Scales = @(2, 3, 4, 6), [switch]$PreferBottom)
-  $live = Get-LiveRegion $Region
-  foreach ($text in $Texts) {
-    $j = Invoke-Ocr -Region $live -Find $text -SaveImage $SaveImage -Scales $Scales
-    if ($j.ok -and $j.find -and $j.find.found) {
-      # 同一个词可能同时出现在题干和选项里：选项一定在题干下方，取命中里最靠下的一条。
-      $center = $j.find.center
-      $hits = @($j.find.matches)
-      if ($PreferBottom -and $hits.Count -gt 1) {
-        $center = ($hits | Sort-Object -Property @{ Expression = { $_.center[1] } } | Select-Object -Last 1).center
-      }
-      return [pscustomobject]@{ found = $true; center = $center; text = $text; line = $j.find.line; matches = $hits }
+  foreach ($scale in $Scales) {
+    $ocr = Invoke-OcrScan -Region $Region -Scale $scale
+    $match = Find-LineMatch -Ocr $ocr -Texts $Texts -PreferBottom:$PreferBottom
+    if ($match) {
+      if ($SaveImage) { $null = Invoke-OcrScan -Region $Region -Scale $scale -SaveImage $SaveImage }
+      return [pscustomobject]@{ found = $true; center = $match.center; text = $match.text; line = $match.line; matches = $match.matches }
     }
   }
   return $null
 }
-
 function Click-Point($center) {
   $x = [int]$center[0]; $y = [int]$center[1]
   if ($NoClick) { Write-Step "  （-NoClick）本应点击 ($x,$y)"; return $true }

@@ -9529,3 +9529,53 @@ fn collapsing_a_card_falls_back_to_the_pending_banner_immediately(){
     let texts=h.strings();
     assert!(texts.iter().any(|t|t=="查看并审批"),"应回到待处理提示卡：{texts:?}");
 }
+
+/// 逐帧导出卡片出现过程：用来检查展开动画期间内容是否溢出岛体（一次性排查用，默认忽略）。
+#[test]
+#[ignore]
+fn agent_done_expansion_frames(){
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_AGENT_PREVIEW").expect("DAOZAI_AGENT_PREVIEW"));
+    let dest=dest.join("anim");std::fs::create_dir_all(&dest).unwrap();
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=2;
+    h.app.settings.agent.expanded=true;
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,"## 本轮完成\n- 更新网关超时与重试\n- 跑了 12 个回归用例\n\n```bash\ncargo test --lib\n```\n\n全部通过。".into());
+    let ppp=2.0;let (w,hgt)=(crate::app::CANVAS_W,WIN_H);
+    let mut raster=crate::preview_raster::Raster::new((w*ppp) as usize,(hgt*ppp) as usize);
+    for f in 0..18 {
+        h.t+=1.0/60.0;
+        let env=Env{t:h.t,clock:"09:41:00".into(),today:"2026-11-20".into(),date:"11月20日 周五".into(),bt_ready:true,..Default::default()};
+        let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(w,hgt))),time:Some(h.t),focused:true,
+            viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(ppp),..Default::default()})).collect(),..Default::default()};
+        let app=&mut h.app;
+        let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{let win=Rect::from_min_size(ui.max_rect().min,Vec2::new(WIN_W,hgt));app.frame(ui,win,&env);});});
+        raster.update_textures(&output.textures_delta);
+        let primitives=h.ctx.tessellate(output.shapes,output.pixels_per_point);
+        raster.buf.fill([0.14,0.16,0.22,1.0]);
+        raster.draw(&primitives,output.pixels_per_point);
+        let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+        let image=image::RgbaImage::from_raw((w*ppp) as u32,(hgt*ppp) as u32,rgba).unwrap();
+        let crop_h=(h.app.expanded_height()*ppp+40.0).max(260.0).min(hgt*ppp) as u32;
+        let crop_w=1160u32.min((w*ppp) as u32-160);
+        let crop=image::imageops::crop_imm(&image,160,0,crop_w,crop_h).to_image();
+        crop.save(dest.join(format!("done-{f:02}.png"))).unwrap();
+    }
+}
+
+#[test]
+fn completion_panel_height_tracks_the_measured_card(){
+    // 回归：完成卡正文两行时固定 112 高度会让文字压到按钮上，必须用实测高度。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=2;
+    h.app.settings.agent.expanded=true;
+    let body="第一行很长的完成摘要，需要换行才放得下，所以这里故意写得很长很长。".repeat(3);
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,body.clone());
+    for _ in 0..60 {h.frame(vec![]);}
+    let (_,card_h)=h.app.agent_cards.done_size(crate::agent_notice::Provider::Dsh,&body,!h.app.settings.agent.expanded);
+    assert!(card_h>112.0,"长正文的完成卡应该比旧常量高：{card_h}");
+    let (_,panel_h)=h.app.base_size();
+    assert!(panel_h+0.6>=card_h,"面板高度必须容纳完成卡：{panel_h} vs {card_h}");
+}

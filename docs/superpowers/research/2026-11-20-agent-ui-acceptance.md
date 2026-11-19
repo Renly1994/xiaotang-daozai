@@ -218,24 +218,34 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\agent-screen-ocr.ps1
 
 > 说明：上面两张 banner 图是 MCP 截图的**缩放副本**（MCP 的 `save_path` 存的是预览尺寸），只作外观留档；坐标与识别结论均来自脚本自己的 1:1 GDI 截图。正式跑会在 `<时间戳>/` 下生成全流程 1:1 截图。
 
-**正式跑记录（2026-11-20 03:52，exe = 03:38 构建 22,742,016 字节 / SHA256 9D871E87…678F，`-Scenario all`）**
+**正式跑记录（2026-11-20 05:06，最终构建）**
 
-- 结果：**exit 0，`summary.json` 的 `ok=true`，三个场景全绿**（approval 8.3s / question 16.9s / done 16.1s，总计约 41s）
-- 证据目录：`docs/superpowers/research/agent-e2e-shots/20261120-035246/`
-  - `summary.json`：每步 `steps[].ok=true`，`driver` 字段带完整 JSON
+- 二进制：`target\x86_64-pc-windows-msvc\release\daozai.exe`
+  - 大小 **22,748,672** 字节
+  - SHA256 **9789C59E62AB775A501F77B0FF30AE50734AB5FBA08A04EA07433CFB37022DC1**
+  - 构建时间 2026-11-20 04:52:48
+- 命令：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts\agent-e2e.ps1 -Scenario all -Exe target\x86_64-pc-windows-msvc\release\daozai.exe`
+- 结果：**exit 0，`summary.json` 的 `ok=true`，三个场景全绿**（approval 32.6s / question 46.0s / done 31.1s，总计约 110s）
+- 证据目录：`docs/superpowers/research/agent-e2e-shots/20261120-050612/`
+  - `summary.json`：每步 `steps[].ok=true`，`bridgeOk=true`，`driver` 字段带完整 JSON
   - `approval-driver.json`：`bridge[0].reply={"decision":"allow"}`、`decision="allowed-once"`、`handback=false`
   - `question-driver.json`：`bridge[0].reply={"answers":[{"selected":["冒烟测试"]}],"decision":"answer"}`、`decision.answers[0].selected=["冒烟测试"]`
   - `done-driver.json`：`bridge[0].reply={"done":true}`、`mode=2`、`sent.text` 全文 83 字、`decision="done"`
-  - 截图：`approval-01-banner / 02-detail / 02-operation`、`question-01-question / 02-option / 05-submit / 06-review`、`done-01-done / 01b-body / 02-review / 03-result`
-- 这一轮的 UI 交互路径（新卡片）：
+  - 截图（已裁到卡片，1:1）：`approval-01-banner / 02-detail / 02-operation`、`question-01-question / 02-option / 05-submit / 06-review`、`done-01-done / 02-review / 03-result / 03b-body`
+- 这一轮的 UI 交互路径（最终卡片）：
   - 审批：卡片自动展开详情 → OCR 读「等待你审批 / DSH · 权限请求 / 操作内容 / 申请理由」→ 点「仅允许这一次」(1903,387) → 宿主 `allowed-once`
-  - 提问：OCR 读「需要你回答 / 第 1/1 题 · 单选 · 已答 0」→ 点选项「冒烟测试」→ 点「检查答案」→ 审阅页点「确认提交」→ 宿主拿到 `selected=["冒烟测试"]`
-  - 完成：卡片「本轮已结束 + 正文」→ OCR 命中 `daozai-e2e-done` → 点「查看回复」→ 结果层「本轮回复」
+  - 提问：OCR 读「需要你回答 / 第 1/1 题 · 单选 · 已答 0」→ 点选项「冒烟测试」→ 点「检查答案」→ 审阅页点「确认提交」→ 宿主 `selected=["冒烟测试"]`
+  - 完成：卡片「本轮已结束 + 正文」→ 点「查看回复」→ 结果层「本轮回复」（无序列表已是圆点）→ OCR 命中 `daozai-e2e-done`
 
-**待办**：等主 agent 的最终构建（新哈希）到位后，用它再跑一次 `-Scenario all`，把本节的时间戳/哈希/截图目录替换成最终证据（流程与判据不变）。
+**跑通前的最后修正**（都是这一轮之前发现的脆弱点）：
 
----
+1. done 的「查看回复 / 结果层」改为非致命步骤（完成通知本身不点也算 done），判定 = 卡片出现 + 正文含 `daozai-e2e-done`（结果层优先，卡片兜底）+ 桥接 `done:true`；
+2. 场景通过条件改为 `无致命错误 && 桥接校验通过` 两个都满足（修掉「ok=true 但 error 有值」的不一致）；
+3. OCR 区域取不到窗口矩形时回退「上一次可用矩形 → 屏幕中心竖带」，OCR 子进程失败不再中断整个脚本；
+4. OCR 从「每个候选词各跑一遍、每遍多倍率」改为**每次轮询只跑 1-2 遍单倍率扫描**（一次子进程 + 本地匹配），点击前耗时从 10s+ 降到 2s 内，避免完成卡在 15s 停留窗口内过期；
+5. 截图裁边：`-CropSave` 按文字包围盒 + `-CropCard` 按「卡片连续深色行列」收边（列统计只在卡片行范围内做，否则矮卡片裁不掉），验收截图只剩卡片本身。
 
+**历史记录（已被上面覆盖）**：03:52 那轮（exe SHA256 9D871E87…678F）也用同一套判据跑通了三场景，用于验证判定逻辑本身；最终交付证据以 05:06 这轮为准。
 ## 7. 正式跑之前的检查清单
 
 1. 退出所有 daozai 实例：`Get-Process daozai*` 应为空；

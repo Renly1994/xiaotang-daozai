@@ -1797,7 +1797,10 @@ impl App {
         if let crate::extras::AlertSource::AgentCard(_,id)=&a.source {
             return self.agent_cards.detail_size(id);
         }
-        if self.settings.agent.expanded && matches!(a.source,crate::extras::AlertSource::AgentDone(_)){return (agent_ui::CARD_W,112.0);}
+        if let crate::extras::AlertSource::AgentDone(provider)=a.source {
+            // 完成卡高度必须实测：正文可能是两三行，固定 112 会让文字压到按钮上。
+            return self.agent_cards.done_size(provider,&a.body,!self.settings.agent.expanded);
+        }
         let (width,height)=if a.meeting.is_some(){(360.0,136.0)}else if a.source==crate::extras::AlertSource::Internal && a.title=="蓝牙设备"{(HUD_W,48.0)}else if a.is_hud(){(HUD_W,38.0)}else{(334.0,44.0)};
         (width,height)
     }
@@ -1807,7 +1810,7 @@ impl App {
     pub fn set_minimal(&mut self,enabled:bool) {
         self.settings.minimal=enabled;if enabled {self.settings.pet=false;}self.settings.save();
     }
-    fn base_size(&self) -> (f32, f32) {
+    pub(crate) fn base_size(&self) -> (f32, f32) {
         if !self.compact_notices()&&!self.open {
             if let Some(a)=&self.notice {let (width,height)=self.notice_size(a);return (width+self.pet_space(),height);}
         }

@@ -300,25 +300,36 @@ try {
             try {
               $dark = { param($c) (($c.R + $c.G + $c.B) -lt 150) }
               $rowDark = New-Object 'bool[]' $crop.Height
-              $colDark = New-Object 'bool[]' $crop.Width
               for ($yy = 0; $yy -lt $crop.Height; $yy++) {
                 $cnt = 0
                 for ($xx = 0; $xx -lt $crop.Width; $xx += 4) { $c = $crop.GetPixel($xx, $yy); if (& $dark $c) { $cnt++ } }
                 $rowDark[$yy] = ($cnt -ge [int](($crop.Width / 4) * 0.45))
               }
+              # 行：从顶部找一段连续深色（允许 ≤12 行缺口），卡片一定从窗口顶部开始；
+              # 不能直接用 min/max，否则底部任务栏这类深色行会把裁剪拉到整屏高。
+              $rowEnd = -1; $gap = 0; $seen = $false
+              for ($yy = 0; $yy -lt $crop.Height; $yy++) {
+                if ($rowDark[$yy]) { $rowEnd = $yy; $gap = 0; $seen = $true }
+                elseif ($seen) { $gap++; if ($gap -gt 12) { break } }
+                elseif ($yy -gt 16) { break }
+              }
+              $rowStart = 0
+              for ($yy = 0; $yy -lt $crop.Height; $yy++) { if ($rowDark[$yy]) { $rowStart = $yy; break } }
+              # 列：只在上面找到的卡片行范围内统计，否则矮卡片（如完成通知）的列深色比例不够。
+              $colDark = New-Object 'bool[]' $crop.Width
+              $spanRows = [Math]::Max(1, $rowEnd - $rowStart + 1)
               for ($xx = 0; $xx -lt $crop.Width; $xx++) {
                 $cnt = 0
-                for ($yy = 0; $yy -lt $crop.Height; $yy += 4) { $c = $crop.GetPixel($xx, $yy); if (& $dark $c) { $cnt++ } }
-                $colDark[$xx] = ($cnt -ge [int](($crop.Height / 4) * 0.45))
+                for ($yy = $rowStart; $yy -le $rowEnd; $yy += 2) { $c = $crop.GetPixel($xx, $yy); if (& $dark $c) { $cnt++ } }
+                $colDark[$xx] = ($cnt -ge [int](($spanRows / 2) * 0.45))
               }
-              $ys = @(0..($crop.Height - 1) | Where-Object { $rowDark[$_] })
-              $xs = @(0..($crop.Width - 1) | Where-Object { $colDark[$_] })
-              if ($ys.Count -gt 120 -and $xs.Count -gt 120) {
-                $ny = $ys[0]; $nh = $ys[-1] - $ys[0] + 1
-                $nx = $xs[0]; $nw = $xs[-1] - $xs[0] + 1
+              $colStart = [int]($crop.Width / 2); $colEnd = $colStart
+              while ($colStart -gt 0 -and $colDark[$colStart - 1]) { $colStart-- }
+              while ($colEnd -lt ($crop.Width - 1) -and $colDark[$colEnd + 1]) { $colEnd++ }
+              if ($rowEnd -gt 120 -and ($colEnd - $colStart) -gt 120) {
                 $pad = 10
-                $nx = [Math]::Max(0, $nx - $pad); $ny = [Math]::Max(0, $ny - $pad)
-                $nw = [Math]::Min($crop.Width - $nx, $nw + $pad * 2); $nh = [Math]::Min($crop.Height - $ny, $nh + $pad * 2)
+                $ny = [Math]::Max(0, $rowStart - $pad); $nh = [Math]::Min($crop.Height - $ny, ($rowEnd - $rowStart + 1) + $pad * 2)
+                $nx = [Math]::Max(0, $colStart - $pad); $nw = [Math]::Min($crop.Width - $nx, ($colEnd - $colStart + 1) + $pad * 2)
                 $tight = New-Object System.Drawing.Bitmap($nw, $nh)
                 $g2 = [System.Drawing.Graphics]::FromImage($tight)
                 try { $g2.DrawImage($crop, (New-Object System.Drawing.Rectangle(0, 0, $nw, $nh)), (New-Object System.Drawing.Rectangle($nx, $ny, $nw, $nh)), [System.Drawing.GraphicsUnit]::Pixel) }

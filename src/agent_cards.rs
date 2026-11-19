@@ -235,6 +235,14 @@ impl Cards {
         self.requests.front().is_some_and(|r|r.details&&r.question)
     }
     /// 详情尺寸：展开时按内容实测，收起时给提示卡的固定尺寸。
+    /// 完成通知的实测尺寸（面板高度必须跟卡片一致，否则正文会压到按钮上）。
+    pub(crate) fn done_size(&self, provider: Provider, text: &str, compact: bool) -> (f32, f32) {
+        let Some(m) = self.measurer() else {
+            return (agent_ui::CARD_W, if compact { 44.0 } else { 112.0 });
+        };
+        let view = agent_ui::DoneView { provider, kicker: "本轮已结束", text, compact, age: 1.0 };
+        agent_ui::measure_done(&m, &view)
+    }
     pub(crate) fn detail_size(&self, id:&str)->(f32,f32){
         let Some(r)=self.requests.front().filter(|r|r.id==id) else{return (agent_ui::CARD_W,130.0);};
         if !r.details{return (agent_ui::CARD_W,130.0);}
