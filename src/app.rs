@@ -1772,7 +1772,7 @@ impl App {
     pub(crate) fn pet_space(&self)->f32 {if self.pet_enabled(){44.0}else{0.0}}
     fn lyric_focus_space(&self)->f32 {if self.pomo.running{crate::focus_bar::LYRIC_WIDTH+10.0}else{0.0}}
     fn lyric_bar_width(&self)->f32 {LYRIC_BAR_W+if self.pet_enabled(){48.0}else{0.0}+self.lyric_focus_space()}
-    fn agent_detail_active(&self)->bool {
+    pub(crate) fn agent_detail_active(&self)->bool {
         self.open && self.notice_details
             && self.agent_cards.active().is_some_and(|(id,_,_,_)|self.agent_cards.details_open(id))
     }
@@ -2433,6 +2433,8 @@ impl App {
     }
 
     fn messenger_badge_rect(&self,win:Rect,panel:Rect)->Option<Rect>{
+        // 审批/提问详情展开时只显示卡片内容：未读胶囊会把岛体形状拉成两截。
+        if self.agent_detail_active() {return None;}
         if self.unread_count()==0 || self.browser_minimal_active && !self.open {return None;}
         // 完整横幅已包含该来源图标。歌词模式和横幅收起后使用常驻入口。
         if !self.open && !self.compact_notices() && self.pending_messengers.len()==1 && self.health_badges().is_empty()

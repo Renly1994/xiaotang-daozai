@@ -6932,6 +6932,48 @@ fn agent_notice_card_controls_are_visible_and_clickable_in_lyric_mode(){
 }
 
 #[test]
+fn agent_detail_expansion_does_not_draw_the_unread_capsule_outside_the_panel(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let approval=serde_json::json!({"id":"cap","provider":"dsh","kind":"approval","data":{
+        "tool":"write","operation":"{\"file_path\":\"C:\\\\Temp\\\\x.txt\"}"}});
+    // 实验组：有未读来源，且展开审批详情。
+    let mut detail=H::new();
+    detail.app.settings.dsh_notifications=true;
+    detail.app.settings.wechat_notifications=true;
+    detail.app.pending_messengers.push(crate::messenger::Unread{
+        source:crate::messenger::Messenger::Wechat,pid:0,window:0});
+    detail.app.agent_cards.receive(approval.clone(),&detail.app.settings);
+    for _ in 0..65 {detail.frame(vec![]);}
+    assert!(detail.app.agent_detail_active(),"审批详情应展开，否则本用例前提不成立");
+    // 对照组：同样展开审批详情，但没有未读来源。
+    let mut clean=H::new();
+    clean.app.settings.dsh_notifications=true;
+    clean.app.settings.wechat_notifications=true;
+    clean.app.agent_cards.receive(approval,&clean.app.settings);
+    for _ in 0..65 {clean.frame(vec![]);}
+    assert!(clean.app.agent_detail_active(),"审批详情应展开，否则本用例前提不成立");
+    let detail_right=shape_right(&detail);
+    let clean_right=shape_right(&clean);
+    // 人工复核入口：设置 DAOZAI_AGENT_PREVIEW 后输出实际渲染图（断言前输出，便于对照修复前后）。
+    if let Some(dir)=std::env::var_os("DAOZAI_AGENT_PREVIEW"){
+        let dir=std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut raster=feature_raster();
+        shoot_feature(&mut detail,&mut raster,&dir,"agent-detail-with-unread",45,None,"2026-11-19");
+        let mut raster=feature_raster();
+        shoot_feature(&mut clean,&mut raster,&dir,"agent-detail-clean",45,None,"2026-11-19");
+    }
+    assert!((detail_right-clean_right).abs()<5.0,
+        "详情展开后不应再绘制未读胶囊：有未读 {detail_right} 应与无未读 {clean_right} 一致，实际多出 {}px",
+        detail_right-clean_right);
+}
+
+/// 当前帧所有绘制形状的最右边界，用于判断是否有内容画到面板之外。
+fn shape_right(h:&H)->f32{
+    h.shapes.iter().map(|s|s.shape.visual_bounding_rect().right()).fold(0.0_f32,f32::max)
+}
+
+#[test]
 fn agent_notice_question_is_answered_inside_the_island(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.app.settings.dsh_notifications=true;h.app.settings.island_lyrics=true;

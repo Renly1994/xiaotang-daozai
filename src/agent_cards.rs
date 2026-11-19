@@ -292,7 +292,7 @@ impl Cards {
                 let code_top=98.0+reason_lines.len().max(1) as f32*13.0+3.0;
                 let code_available=((height-29.0)-code_top-8.0).max(26.0);
                 let code_lines=((code_available-12.0)/14.0).floor().max(1.0) as usize;
-                let lines=c.wrap(&r.data.operation,9.0,W::Regular,324.0,code_lines);
+                let lines=c.wrap(&r.data.operation,9.0,W::Regular,300.0,code_lines);
                 let code_height=(lines.len().max(1) as f32*14.0+12.0).min(code_available);
                 c.fill(18.0,code_top,324.0,code_height,8.0,egui::Color32::from_rgb(18,18,20));
                 c.stroke(18.0,code_top,324.0,code_height,8.0,0.7,egui::Color32::from_white_alpha(28));
@@ -509,5 +509,20 @@ mod tests {
         assert_eq!(cards.jump_target("d"),
             Some(crate::agent_jump::Target::Client{name:"DeepSeek Harness",cwd:"C:\\work".to_owned()}),
             "DSH 没有深链协议，应指向客户端窗口并保留目录兜底");
+    }
+
+    #[test]
+    fn long_operation_keeps_detail_card_within_its_width(){
+        let mut settings=dsh_on();
+        settings.codex_notifications=true;
+        let mut cards=Cards::default();
+        let operation="{\"file_path\":\"C:\\\\Windows\\\\Temp\\\\x.txt\",\"justification\":\"".to_owned()
+            + &"很长的说明文字".repeat(40) + "\"}";
+        cards.receive(json!({"id":"wide","provider":"dsh","kind":"approval","data":{
+            "tool":"write","operation":operation,"reason":"测试换行宽度"}}),&settings);
+        cards.detail("wide");
+        let (width,height)=cards.detail_size("wide");
+        assert_eq!(width,360.0,"详情卡宽度是固定值，不能被内容撑开");
+        assert!(height>0.0 && height<=crate::app::WIN_H-8.0,"高度必须留在窗口内");
     }
 }
