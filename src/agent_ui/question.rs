@@ -222,14 +222,15 @@ fn answer_text(a: &Answer) -> String {
         parts.push(custom.to_owned());
     }
     if parts.is_empty() {
-        "未填写（将跳过此题）".to_owned()
+        "未填写 · 提交前请补全".to_owned()
     } else {
         parts.join("；")
     }
 }
 
 fn build_review(m: &M, v: &QuestionView, cw: f32) -> ReviewBody {
-    let heading = m.line(&format!("检查答案 · 共 {} 题", v.questions.len()), m::BODY, W::Semibold);
+    // 状态行已经写了「检查答案」，正文用「作答总览」避免同屏重复。
+    let heading = m.line(&format!("作答总览 · 共 {} 题", v.questions.len()), m::BODY, W::Semibold);
     let mut y = m.height(&heading) + 12.0;
     let mut items = Vec::with_capacity(v.questions.len());
     for (i, q) in v.questions.iter().enumerate() {
@@ -480,8 +481,10 @@ pub(crate) fn draw_question(c: &Card, m: &M, v: &mut QuestionView, scroll: f32, 
     let w = layout.w;
     let (alpha, dy) = super::entrance(v.age);
     let c = c.faded(alpha).shifted(0.0, dy);
-    if widgets::draw_head(&c, &layout.head, &v.head, w) {
-        out.action = Some(Action::Jump);
+    match widgets::draw_head(&c, &layout.head, &v.head, w) {
+        widgets::HeadHit::Jump => out.action = Some(Action::Jump),
+        widgets::HeadHit::Collapse => out.action = Some(Action::Collapse),
+        widgets::HeadHit::None => {}
     }
     widgets::draw_status(&c, &layout.status, &layout.status_g, m::HEAD_TOP + HEAD_H, w);
 

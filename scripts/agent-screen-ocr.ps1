@@ -19,8 +19,8 @@ egui 自绘窗口没有 UIA 文本，只能靠「截图 + Windows OCR」拿到�
   # 识别已有 PNG（MCP 截图存盘的文件），便于离线复现
   ... -ImagePath docs\superpowers\research\agent-e2e-shots\approval.png -Find "拒绝"
 
-  # 留下原始截图 + 结果 JSON
-  ... -Region 700,0,1900,300 -SaveImage out\shot.png -OutFile out\ocr.json
+  # 留下截图 + 结果 JSON（-CropSave 按识别到的文字包围盒再裁一次，避免把桌面内容带进验收文档）
+  ... -Region 700,0,1900,300 -SaveImage out\shot.png -CropSave -OutFile out\ocr.json
 
 为什么需要放大：岛仔卡片正文 11-16px，Windows OCR 在 1:1 像素下对中文识别率很差；
 按整数倍最近邻放大后识别率明显提升，坐标除以倍数还原成屏幕像素。
@@ -46,6 +46,8 @@ param(
   [string]$OutFile,
   # 保存本次截图（放大前、1:1 像素）的副本，便于把 OCR 结论留档。
   [string]$SaveImage,
+  # 把 -SaveImage 再裁到本次 OCR 文字包围盒（±28px），避免把桌面内容带进验收截图。
+  [switch]$CropSave,
   [switch]$Pretty
 )
 
@@ -239,11 +241,12 @@ try {
   if ($RegionValues.Count -eq 4) { $dx = [int]$RegionValues[0]; $dy = [int]$RegionValues[1]; $regionOut = $RegionValues }
   else { $regionOut = @($dx, $dy, $dx + 3440, $dy + 1440) }
 
+  $saveTarget = $null
   if ($SaveImage) {
-    $target = [System.IO.Path]::GetFullPath($SaveImage)
-    $dir = Split-Path -Parent $target
+    $saveTarget = [System.IO.Path]::GetFullPath($SaveImage)
+    $dir = Split-Path -Parent $saveTarget
     if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
-    Copy-Item -LiteralPath $rawPath -Destination $target -Force
+    Copy-Item -LiteralPath $rawPath -Destination $saveTarget -Force
   }
 
   $scales = @()
@@ -269,6 +272,32 @@ try {
     if ($Find -and $null -ne $pass.find -and $pass.find.found) { $chosen = $pass; break }
   }
   foreach ($big in $bigCache.Values) { Remove-Item -LiteralPath $big -Force -ErrorAction SilentlyContinue }
+  if ($saveTarget -and $CropSave -and @($chosen.lines).Count) {
+    # 只留卡片正文区域：按 OCR 行的并集裁剪，±28px 余量。
+    try {
+      $minX = ($chosen.lines | ForEach-Object { $_.rect[0] } | Measure-Object -Minimum).Minimum
+      $minY = ($chosen.lines | ForEach-Object { $_.rect[1] } | Measure-Object -Minimum).Minimum
+      $maxX = ($chosen.lines | ForEach-Object { $_.rect[0] + $_.rect[2] } | Measure-Object -Maximum).Maximum
+      $maxY = ($chosen.lines | ForEach-Object { $_.rect[1] + $_.rect[3] } | Measure-Object -Maximum).Maximum
+      $img = [System.Drawing.Image]::FromFile($rawPath)
+      try {
+        $ix = [int]$minX - $dx - 28; $iy = [int]$minY - $dy - 28
+        $iw = [int]($maxX - $minX) + 56; $ih = [int]($maxY - $minY) + 56
+        if ($ix -lt 0) { $iw += $ix; $ix = 0 }
+        if ($iy -lt 0) { $ih += $iy; $iy = 0 }
+        if ($ix + $iw -gt $img.Width) { $iw = $img.Width - $ix }
+        if ($iy + $ih -gt $img.Height) { $ih = $img.Height - $iy }
+        if ($iw -gt 40 -and $ih -gt 40) {
+          $crop = New-Object System.Drawing.Bitmap($iw, $ih)
+          $g = [System.Drawing.Graphics]::FromImage($crop)
+          try { $g.DrawImage($img, (New-Object System.Drawing.Rectangle(0, 0, $iw, $ih)), (New-Object System.Drawing.Rectangle($ix, $iy, $iw, $ih)), [System.Drawing.GraphicsUnit]::Pixel) }
+          finally { $g.Dispose() }
+          $crop.Save($saveTarget, [System.Drawing.Imaging.ImageFormat]::Png)
+          $crop.Dispose()
+        }
+      } finally { $img.Dispose() }
+    } catch { /* 裁剪失败就保留整图，不影响识别结论 */ }
+  }
   if ($null -eq $chosen) { throw '没有任何可用的放大倍率' }
 
   $findResult = $chosen.find

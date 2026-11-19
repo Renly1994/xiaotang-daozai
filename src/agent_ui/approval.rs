@@ -140,8 +140,10 @@ pub(crate) fn draw_approval(c: &Card, m: &M, v: &ApprovalView, scroll: f32, t: f
     let (alpha, dy) = super::entrance(v.age);
     let c = c.faded(alpha).shifted(0.0, dy);
     let mut action = None;
-    if widgets::draw_head(&c, &layout.head, &v.head, w) {
-        action = Some(Action::Jump);
+    match widgets::draw_head(&c, &layout.head, &v.head, w) {
+        widgets::HeadHit::Jump => action = Some(Action::Jump),
+        widgets::HeadHit::Collapse => action = Some(Action::Collapse),
+        widgets::HeadHit::None => {}
     }
     let status_y = m::HEAD_TOP + HEAD_H;
     widgets::draw_status(&c, &layout.status, &layout.status_g, status_y, w);

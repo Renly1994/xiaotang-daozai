@@ -174,6 +174,12 @@ function Get-ScreenBounds {
   [pscustomobject]@{ left = $v.Left; top = $v.Top; right = $v.Right; bottom = $v.Bottom }
 }
 
+# 岛仔窗口比“岛体”宽：窗口画布 CANVAS_W(960) 逻辑宽，岛体只有 WIN_W(640)，多出来的是透明区。
+# 卡片水平居中在“屏幕中心”上（实测 3440 屏、island_size=140 时卡片 1432..1992，中心 1712≈1720），
+# 所以只取「屏幕中心 ±（419×scale/2 + 40）」这条竖带：既覆盖卡片，又不把桌面其它窗口带进截图。
+$script:UiScale = 1.4              # 与 settings.txt 的 island_size=140 对应
+$script:CardWidthPx = 419 * $script:UiScale
+
 function Get-IslandRect {
   if (-not $script:islandPid) { return $null }
   $hwnd = [DaozaiE2EInput]::FindWindowForProcess([uint32]$script:islandPid)
@@ -182,10 +188,14 @@ function Get-IslandRect {
   if (-not [DaozaiE2EInput]::GetWindowRect($hwnd, [ref]$rect)) { return $null }
   if (($rect.Right - $rect.Left) -le 0 -or ($rect.Bottom - $rect.Top) -le 0) { return $null }
   $screen = Get-ScreenBounds
-  # 给面板展开/阴影留余量；坐标仍是屏幕绝对坐标。
+  $cx = [int](($screen.left + $screen.right) / 2)
+  $half = [int][Math]::Ceiling($script:CardWidthPx / 2) + 70
+  $bottom = [Math]::Min([Math]::Max($rect.Bottom, 260), 640)
   [pscustomobject]@{
-    left = [Math]::Max($screen.left, $rect.Left - 10); top = [Math]::Max($screen.top, $rect.Top - 10)
-    right = [Math]::Min($screen.right, $rect.Right + 10); bottom = [Math]::Min($screen.bottom, $rect.Bottom + 20)
+    left = [Math]::Max($screen.left, $cx - $half)
+    right = [Math]::Min($screen.right, $cx + $half)
+    top = [Math]::Max($screen.top, $rect.Top - 8)
+    bottom = $bottom
   }
 }
 
@@ -214,7 +224,7 @@ function Invoke-Ocr {
   param($Region, [string]$Find, [string]$SaveImage, [int[]]$Scales = @(2, 3, 4, 6))
   $cli = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ocrScript, '-Region', (Get-RegionString $Region), '-FindScales', ($Scales -join ','))
   if ($Find) { $cli += @('-Find', $Find) }
-  if ($SaveImage) { $cli += @('-SaveImage', $SaveImage) }
+  if ($SaveImage) { $cli += @('-SaveImage', $SaveImage, '-CropSave') }
   $raw = & powershell @cli 2>&1 | Out-String
   try { return ($raw | ConvertFrom-Json) } catch {
     return [pscustomobject]@{ ok = $false; error = "OCR 输出无法解析: $($raw.Substring(0, [Math]::Min(200, $raw.Length)))" }
@@ -282,7 +292,13 @@ function Wait-DriverExit([int]$DriverPid, [int]$TimeoutSeconds) {
 
 function Read-DriverJson([string]$StdoutFile) {
   if (-not (Test-Path $StdoutFile)) { return $null }
-  $text = Get-Content -Raw -LiteralPath $StdoutFile
+  try {
+    # 必须显式按 UTF-8 读：Windows PowerShell 5.1 的 Get-Content -Raw 默认按 ANSI 解码，
+    # 会把驱动输出里的中文读到乱码，进而让 ConvertFrom-Json 失败（第一版就栽在这里）。
+    $text = [System.IO.File]::ReadAllText($StdoutFile, (New-Object System.Text.UTF8Encoding($false)))
+  } catch {
+    return $null  # 重定向文件可能正被写入，交给调用方重试
+  }
   if (-not $text) { return $null }
   $line = ($text.Trim() -split "`r?`n" | Where-Object { $_.TrimStart().StartsWith('{') } | Select-Object -Last 1)
   if (-not $line) { return $null }
@@ -349,13 +365,15 @@ function Get-ScenarioSpec([string]$name) {
       }
     }
     'question' {
-      return [pscustomobject]@{ driver = 'question-single'; request = [ordered]@{ options = @('甲选项', '乙选项', '丙选项') }; options = @('甲选项') }
+      # 选项用 OCR 友好的短词：Windows OCR 会把「项」认成「顶」、「查」认成「鱼」，
+      # 所以测试数据不用「甲选项」这类易混字，避免把测试数据的问题当成 UI 问题。
+      return [pscustomobject]@{ driver = 'question-single'; request = [ordered]@{ options = @('冒烟测试', '完整回归', '先不验证') }; options = @('冒烟测试') }
     }
     'question-multi' {
-      return [pscustomobject]@{ driver = 'question-multi'; request = [ordered]@{ options = @('多选甲', '多选乙', '多选丙') }; options = @('多选甲', '多选丙') }
+      return [pscustomobject]@{ driver = 'question-multi'; request = [ordered]@{ options = @('行高', '进度', '滚动') }; options = @('行高', '滚动') }
     }
     'question-multi-turn' {
-      return [pscustomobject]@{ driver = 'question-multi-turn'; request = [ordered]@{ options = @('第一组甲', '第一组乙') }; options = @('第一组甲') }
+      return [pscustomobject]@{ driver = 'question-multi-turn'; request = [ordered]@{ options = @('方案一', '方案二') }; options = @('方案一') }
     }
     'done' {
       return [pscustomobject]@{
@@ -409,8 +427,8 @@ try {
       # 只做“看得见”的检查：卡片是否弹出、关键按钮文字能否被 OCR 读到（不点击、不等决定）。
       $keys = switch ($name) {
         'approval' { @('等待你审批', '查看并审批', '仅允许这一次') }
-        'done' { @('本轮已结束', '查看回复', '本轮回复') }
-        default { @('需要你回答', '提交回答', '甲选项', '多选甲', '第一组甲') }
+        'done' { @('本轮已结束', '本轮已', '查看回复', '本轮回复') }
+        default { @('需要你回答', '检查答案', '提交回答', '冒烟测试', '行高', '方案一') }
       }
       $seen = @()
       $hit = Wait-Text -Region $region -Texts ($keys | Select-Object -First 1) -TimeoutSeconds 25 -ShotOnFound "$shotBase-01-visible.png" -ShotOnTimeout "$shotBase-01-timeout.png"
@@ -478,7 +496,7 @@ try {
             $null = Click-Point $next.center
             Start-Sleep -Milliseconds 700
             $region = Get-IslandRect
-            $hit2 = Find-AnyText -Region $region -Texts @('第二组甲') -SaveImage "$shotBase-04-option2.png" -PreferBottom
+            $hit2 = Find-AnyText -Region $region -Texts @('确认一') -SaveImage "$shotBase-04-option2.png" -PreferBottom
             $verdict.steps += [pscustomobject]@{ step = '点击第 2 题选项'; ok = [bool]$hit2; text = $(if ($hit2) { $hit2.text } else { $null }) }
             if ($hit2) { $null = Click-Point $hit2.center } else { $okOptions = $false }
           } else { $okOptions = $false }
@@ -514,7 +532,7 @@ try {
       }
     }
     elseif ($name -eq 'done') {
-      $hit = Wait-Text -Region $region -Texts @('本轮已结束') -TimeoutSeconds 25 -ShotOnFound "$shotBase-01-done.png" -ShotOnTimeout "$shotBase-01-timeout.png"
+      $hit = Wait-Text -Region $region -Texts @('本轮已结束', '本轮已', '查看回复') -TimeoutSeconds 25 -ShotOnFound "$shotBase-01-done.png" -ShotOnTimeout "$shotBase-01-timeout.png"
       $verdict.steps += [pscustomobject]@{ step = '等到完成通知'; ok = [bool]$hit; text = $(if ($hit) { $hit.text } else { $null }) }
       if (-not $hit) { $verdict.error = '25 秒内没有在岛上看到完成通知' }
       else {
@@ -551,7 +569,14 @@ try {
         $verdict.error = "驱动在 $($WaitSeconds + 5) 秒内没有退出（卡片一直没作答？）"
       }
     }
-    $json = Read-DriverJson $stdout
+    # 驱动进程退出与重定向文件落盘之间有毫秒级窗口，别只读一次：
+    # 第一轮实测就踩到「进程已退、文件还没刷出来」，把成功的场景判成失败。
+    $json = $null
+    $readDeadline = (Get-Date).AddSeconds(5)
+    while ((Get-Date) -lt $readDeadline -and -not $json) {
+      $json = Read-DriverJson $stdout
+      if (-not $json) { Start-Sleep -Milliseconds 200 }
+    }
     $verdict.driver = $json
     if ($NoClick) {
       # 视觉检查模式：驱动被主动结束，不判桥接决定。
@@ -619,6 +644,6 @@ $summary = [pscustomobject]@{
 Save-Summary $summary
 Write-Host ''
 Write-Host "截图与结果：$($script:Shots)"
-Write-Host ($summary | ConvertTo-Json -Depth 4)
+Write-Host ($summary | ConvertTo-Json -Depth 8)
 if ($script:Failures.Count) { exit 3 }
 exit 0

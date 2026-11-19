@@ -232,27 +232,27 @@ async function main() {
       } else if (args.scenario === 'question-single') {
         questions = [{
           id: 'e2e-single',
-          question: args.question || '岛仔 E2E 单选：请选择「甲选项」',
-          options: labels(args.options, ['甲选项', '乙选项', '丙选项']).map(label => ({ label })),
+          question: args.question || '岛仔 E2E 单选：请选择「冒烟测试」',
+          options: labels(args.options, ['冒烟测试', '完整回归', '先不验证']).map(label => ({ label })),
         }];
       } else if (args.scenario === 'question-multi') {
         questions = [{
           id: 'e2e-multi',
-          question: args.question || '岛仔 E2E 多选：请勾选「多选甲」和「多选丙」',
+          question: args.question || '岛仔 E2E 多选：请勾选「行高」和「滚动」',
           multiSelect: true,
-          options: labels(args.options, ['多选甲', '多选乙', '多选丙']).map(label => ({ label })),
+          options: labels(args.options, ['行高', '进度', '滚动']).map(label => ({ label })),
         }];
       } else {
         questions = [
           {
             id: 'e2e-turn-1',
-            question: args.question || '岛仔 E2E 多轮 1/2：请选择「第一组甲」',
-            options: labels(args.options, ['第一组甲', '第一组乙']).map(label => ({ label })),
+            question: args.question || '岛仔 E2E 多轮 1/2：请选择「方案一」',
+            options: labels(args.options, ['方案一', '方案二']).map(label => ({ label })),
           },
           {
             id: 'e2e-turn-2',
-            question: '岛仔 E2E 多轮 2/2：请选择「第二组甲」',
-            options: ['第二组甲', '第二组乙'].map(label => ({ label })),
+            question: '岛仔 E2E 多轮 2/2：请选择「确认一」',
+            options: ['确认一', '确认二'].map(label => ({ label })),
           },
         ];
       }

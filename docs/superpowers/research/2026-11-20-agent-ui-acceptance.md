@@ -183,8 +183,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\agent-screen-ocr.ps1
 ### 5.6 定位失败时的兜底
 
 - 优先用 OCR 的**行内字符比例**估算目标中心（中英混排也够用）；
-- 同一个词在题干和选项里都出现时（如「请选择「甲选项」」+ 选项「甲选项」），取**最靠下**的命中（选项一定在题干下面）；
-- 每一步失败都会留 1:1 截图 + `summary.json` 里的 OCR 原文，便于人工复核。
+- 同一个词在题干和选项里都出现时（如「请选择「冒烟测试」」+ 选项「冒烟测试」），取**最靠下**的命中（选项一定在题干下面）；
+- 每一步失败都会留截图 + `summary.json` 里的 OCR 原文，便于人工复核。
+
+### 5.7 OCR 区域与截图隐私
+
+- **不能按窗口中心取区域**：岛仔窗口画布宽 `CANVAS_W=960`（逻辑），岛体只有 `WIN_W=640`，两侧是透明区；实测窗口中心 1944，而卡片中心 1712 ≈ **屏幕中心 1720**。所以 OCR 区域取「屏幕中心 ±（419×scale/2 + 70）」的竖带、y 到窗口底（≤640），既覆盖卡片又不带两侧桌面。
+- `-SaveImage` 默认再配合 `-CropSave`：按本次 OCR 文字行的并集再裁一次（±28px），验收文档里的截图只包含卡片区域，不会把浏览器/1Panel 等桌面内容带进去。
+- **踩过的坑**：按窗口中心取区域会把卡片裁掉一半；MCP 截图的 `save_path` 只存缩略图，1:1 截图必须用脚本自己的 GDI 抓屏。
 
 ---
 
@@ -212,7 +218,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\agent-screen-ocr.ps1
 
 > 说明：上面两张 banner 图是 MCP 截图的**缩放副本**（MCP 的 `save_path` 存的是预览尺寸），只作外观留档；坐标与识别结论均来自脚本自己的 1:1 GDI 截图。正式跑会在 `<时间戳>/` 下生成全流程 1:1 截图。
 
-**当前状态**：一键脚本已写完并做了静态校验（PowerShell 语法、驱动 `node --check`、OCR 自检、PID 级窗口定位、前置守卫路径），但**尚未在最新 UI 构建上完整跑过**——等 UI 迭代收敛、桌面空出来后按第 7 节正式跑一次，把 `<时间戳>/summary.json` 与本文件第 6 节交叉核对。
+**正式跑记录（2026-11-20 03:52，exe = 03:38 构建 22,742,016 字节 / SHA256 9D871E87…678F，`-Scenario all`）**
+
+- 结果：**exit 0，`summary.json` 的 `ok=true`，三个场景全绿**（approval 8.3s / question 16.9s / done 16.1s，总计约 41s）
+- 证据目录：`docs/superpowers/research/agent-e2e-shots/20261120-035246/`
+  - `summary.json`：每步 `steps[].ok=true`，`driver` 字段带完整 JSON
+  - `approval-driver.json`：`bridge[0].reply={"decision":"allow"}`、`decision="allowed-once"`、`handback=false`
+  - `question-driver.json`：`bridge[0].reply={"answers":[{"selected":["冒烟测试"]}],"decision":"answer"}`、`decision.answers[0].selected=["冒烟测试"]`
+  - `done-driver.json`：`bridge[0].reply={"done":true}`、`mode=2`、`sent.text` 全文 83 字、`decision="done"`
+  - 截图：`approval-01-banner / 02-detail / 02-operation`、`question-01-question / 02-option / 05-submit / 06-review`、`done-01-done / 01b-body / 02-review / 03-result`
+- 这一轮的 UI 交互路径（新卡片）：
+  - 审批：卡片自动展开详情 → OCR 读「等待你审批 / DSH · 权限请求 / 操作内容 / 申请理由」→ 点「仅允许这一次」(1903,387) → 宿主 `allowed-once`
+  - 提问：OCR 读「需要你回答 / 第 1/1 题 · 单选 · 已答 0」→ 点选项「冒烟测试」→ 点「检查答案」→ 审阅页点「确认提交」→ 宿主拿到 `selected=["冒烟测试"]`
+  - 完成：卡片「本轮已结束 + 正文」→ OCR 命中 `daozai-e2e-done` → 点「查看回复」→ 结果层「本轮回复」
+
+**待办**：等主 agent 的最终构建（新哈希）到位后，用它再跑一次 `-Scenario all`，把本节的时间戳/哈希/截图目录替换成最终证据（流程与判据不变）。
 
 ---
 
@@ -228,7 +248,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\agent-e2e.ps1 -Scena
 ```
 
 5. 看输出：`summary.json` 的 `ok=true`、`scenarios[].steps[].ok` 全 true；
-6. 把 `<时间戳>` 目录作为本次验收证据，更新本文件第 6 节的“当前状态”。
+6. 把 `<时间戳>` 目录作为本次验收证据，更新本文件第 6 节的正式跑记录（含 exe 哈希）。
 
 ---
 
@@ -245,6 +265,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\agent-e2e.ps1 -Scena
 | 驱动 `assistant/message` 报 surfaceOp 错误 | DSH 会话事件需要 surface 标记 | 驱动用 `session.append(..., {surfaceOp:'append'})` |
 | 驱动在 `--wait` 内拿不到决定 | 屏幕侧没人点 | 超时退出码 3，`decision="timeout"`，卡片会在管道断开后自动撤掉 |
 | 多行正文/带引号的 operation 被命令行吃掉 | Windows 参数引号二次解析 | 驱动支持 `--json-in <file>`，场景参数走 JSON 文件 |
+| `driver:null` + “驱动没有输出 JSON”，但 `*-driver.json` 里明明有内容 | 脚本在 Windows PowerShell 5.1 里跑，`Get-Content -Raw` 默认按 **ANSI** 解码 UTF-8 驱动输出，中文被读花 → `ConvertFrom-Json` 失败 | 改用 `[System.IO.File]::ReadAllText(..., UTF8)` 读 + 5 秒重试（同时兜住重定向文件落盘的毫秒级竞态） |
+| 读到的驱动 JSON 是空的/解析失败 | `Start-Process -RedirectStandardOutput` 的文件在进程退出瞬间可能还没 flush | 同上：先等进程退出，再按 200ms 间隔重试解析，最多 5 秒 |
+| 选项「甲选项」无论如何都点不到 | Windows OCR 把「项」稳定识别成「顶」（甲选顶），`-Find 甲选项` 永不命中 | 测试数据改用 OCR 友好词（冒烟测试/完整回归/先不验证、行高/进度/滚动、方案一/方案二、确认一/确认二）；真实用户数据不要为了 OCR 改 |
+| 选项和题干同时命中，点到了题干 | 题干里也写着选项名 | `-PreferBottom`：取最靠下的命中（选项一定在题干下方） |
+| 完成通知 OCR 只读到「本轮已」（丢掉「结束」） | 行检测在小字号/半透明背景上截断 | 判定改成多候选 `本轮已结束 / 本轮已 / 查看回复`，正文用去空格子串匹配 |
 
 ---
 

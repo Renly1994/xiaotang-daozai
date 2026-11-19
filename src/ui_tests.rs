@@ -1253,6 +1253,8 @@ impl H {
         self.click(point);
     }
     fn click_notice_badge(&mut self){if self.app.compact_notices(){self.click(Pos2::new(WIN_W/2.0+(self.app.current_width()-44.0)/2.0+26.0,15.0));}}
+    /// 当前帧里所有可见文字，便于断言卡片内容。
+    fn strings(&self)->Vec<String>{self.shapes.iter().filter_map(|s|if let egui::Shape::Text(t)=&s.shape{Some(t.galley.text().to_owned())}else{None}).collect()}
     fn wheel(&mut self,delta:f32) {
         self.frame(vec![egui::Event::MouseWheel{unit:egui::MouseWheelUnit::Point,delta:Vec2::new(0.0,delta),modifiers:Default::default()}]);
     }
@@ -9474,4 +9476,33 @@ fn agent_cards_gallery(){
     h.app.agent_cards.open_result(crate::agent_notice::Provider::Dsh,"## 本轮完成\n- 更新网关超时与重试\n- 跑了 12 个回归用例\n\n```bash\ncargo test --lib\n```\n\n全部通过。".into());
     h.app.open_agent_panel();
     shoot_agent(&mut h,&dest,"result",70);
+}
+
+#[test]
+fn agent_completion_result_opens_scrollable_layer_and_closes_with_the_panel(){
+    // 修复前的「查看」是死按钮：写入 result 却没有任何绘制代码，且会把卡片永久钉住。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=2;
+    h.app.settings.agent.expanded=true;
+    h.app.settings.agent.dwell=15;
+    let body=format!("## 本轮完成\n- 更新连接池上限\n- 回归 42 个用例\n\n```bash\ncargo test\n```\n{}","补充说明。".repeat(120));
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,body);
+    for _ in 0..60{h.frame(vec![]);}
+    assert!(h.app.notice.is_some(),"完成通知应当出现在岛上");
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t=="查看回复"),"完成卡必须有可见的「查看回复」按钮");
+    h.click_text("查看回复");
+    for _ in 0..45{h.frame(vec![]);}
+    assert!(h.app.result_active(),"点查看回复应打开结果层");
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t=="本轮回复"),"结果层要有标题：{texts:?}");
+    assert!(texts.iter().any(|t|t=="复制内容"),"结果层要有复制按钮：{texts:?}");
+    assert!(texts.iter().any(|t|t=="关闭"),"结果层要有关闭按钮");
+    // 关闭结果层必须同时收起面板，不能留下一个空白岛。
+    h.click_text("关闭");
+    for _ in 0..40{h.frame(vec![]);}
+    assert!(!h.app.result_active(),"关闭后结果层应消失");
+    assert!(!h.app.open,"关闭结果层后岛体应收起");
 }

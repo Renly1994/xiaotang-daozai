@@ -24,12 +24,20 @@ pub(crate) struct HeadLayout {
     pub subtitle: Arc<egui::Galley>,
     pub jump: Option<Arc<egui::Galley>>,
     pub jump_w: f32,
+    /// 是否为「收起」图标预留位置（详情卡才有；收起态提示卡没有详情可收）。
+    pub collapse: bool,
 }
 
 pub(crate) fn measure_head(m: &M, head: &Head, w: f32) -> HeadLayout {
+    measure_head_with(m, head, w, true)
+}
+
+/// 同 `measure_head`，可指定是否显示「收起」图标。
+pub(crate) fn measure_head_with(m: &M, head: &Head, w: f32, collapse: bool) -> HeadLayout {
     let jump = head.jump.map(|t| m.line(t.action_label(), META, W::Semibold));
     let jump_w = jump.as_ref().map_or(0.0, |g| m.width(g) + 18.0);
-    let text_w = w - PAD - 32.0 - if jump_w > 0.0 { jump_w + 10.0 } else { 0.0 };
+    let collapse_w = if collapse { 24.0 } else { 0.0 };
+    let text_w = w - PAD - 32.0 - if jump_w > 0.0 { jump_w + 10.0 } else { 0.0 } - collapse_w;
     // 标题用卡片的语义标题（等待你审批 / 需要你回答），副标题给出「来源 · 目录」。
     let title = m.fit(head.kicker, TITLE, W::Semibold, text_w);
     let subtitle_text = if head.subtitle.trim().is_empty() {
@@ -38,11 +46,15 @@ pub(crate) fn measure_head(m: &M, head: &Head, w: f32) -> HeadLayout {
         format!("{} · {}", head.provider.short(), head.subtitle.trim())
     };
     let subtitle = m.fit(&subtitle_text, m::SUBTITLE, W::Regular, text_w);
-    HeadLayout { title, subtitle, jump, jump_w }
+    HeadLayout { title, subtitle, jump, jump_w, collapse }
 }
 
-/// 画头部；返回「点了跳转」。
-pub(crate) fn draw_head(c: &Card, l: &HeadLayout, head: &Head, w: f32) -> bool {
+/// 头部点击结果。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeadHit { None, Jump, Collapse }
+
+/// 画头部；返回点了跳转还是收起。
+pub(crate) fn draw_head(c: &Card, l: &HeadLayout, head: &Head, w: f32) -> HeadHit {
     let top = m::HEAD_TOP;
     crate::extras::agent_icon(c, PAD + m::ICON / 2.0, top + m::ICON / 2.0, m::ICON, head.provider);
     galley(c, PAD + 32.0, top + 1.0, &l.title, theme::WHITE);
@@ -50,17 +62,52 @@ pub(crate) fn draw_head(c: &Card, l: &HeadLayout, head: &Head, w: f32) -> bool {
     if !head.subtitle.trim().is_empty() {
         galley(c, PAD + 32.0, sub_top, &l.subtitle, theme::AGENT_SUBTLE);
     }
+    // 右上角：跳转 chip + 收起图标（跳转在左，收起在最右）。
+    let mut hit = HeadHit::None;
+    let mut edge = w - PAD;
+    if l.collapse {
+        edge -= 22.0;
+        if icon_button(c, edge, top + 5.0, 22.0, "agent-collapse", 2) {
+            hit = HeadHit::Collapse;
+        }
+        edge -= 8.0;
+    }
     if let Some(g) = &l.jump {
-        let x = w - PAD - l.jump_w;
-        if chip(c, x, top + 6.0, l.jump_w, 22.0, "agent-jump-chip", g.text(), theme::AGENT_WORK) {
-            return true;
+        let x = edge - l.jump_w;
+        if chip(c, x, top + 6.0, l.jump_w, 22.0, "agent-jump-chip", g.text(), theme::AGENT_WORK) && hit == HeadHit::None {
+            hit = HeadHit::Jump;
         }
     }
-    false
+    hit
+}
+
+/// 收起图标（两条向下的短线，等价参考项目的 collapse-request）。返回是否点击。
+pub(crate) fn icon_button(c: &Card, x: f32, y: f32, size: f32, id: &str, kind: u8) -> bool {
+    let r = c.hit(x, y, size, size, id);
+    let (hover, press) = c.hover_t(&r);
+    if hover > 0.01 {
+        c.fill(x, y, size, size, 6.0, Color32::from_white_alpha((14.0 * hover) as u8));
+    }
+    let ink = crate::paint::mix(theme::AGENT_SUBTLE, theme::WHITE, hover.max(press));
+    let cx = x + size / 2.0;
+    let cy = y + size / 2.0;
+    match kind {
+        // 收起：向下的双箭头
+        2 => {
+            c.path(&[(cx - 4.0, cy - 3.0), (cx, cy + 1.0), (cx + 4.0, cy - 3.0)], 1.4, ink);
+            c.path(&[(cx - 4.0, cy + 1.0), (cx, cy + 5.0), (cx + 4.0, cy + 1.0)], 1.4, ink);
+        }
+        // 关闭：叉
+        _ => {
+            c.seg((cx - 4.0, cy - 4.0), (cx + 4.0, cy + 4.0), 1.4, ink);
+            c.seg((cx - 4.0, cy + 4.0), (cx + 4.0, cy - 4.0), 1.4, ink);
+        }
+    }
+    r.clicked()
 }
 
 /// 头部高度（含图标与两行文字）。
-pub(crate) fn head_height() -> f32 {
+pub(crate) fn head_height_public() -> f32 {
     m::HEAD_H
 }
 

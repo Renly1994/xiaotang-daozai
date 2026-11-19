@@ -31,7 +31,8 @@ pub(crate) struct Layout {
 
 pub(crate) fn measure(m: &M, v: &BannerView, width: f32) -> Layout {
     let w = super::card_width(width);
-    let head = widgets::measure_head(m, &v.head, w);
+    // 收起态提示卡没有可收起的详情，不显示收起图标。
+    let head = widgets::measure_head_with(m, &v.head, w, false);
     let summary = m.fit(v.summary, m::BODY, W::Regular, w - PAD * 2.0 - 60.0);
     let handoff = m.line_mono(
         &match v.handoff {
@@ -56,7 +57,7 @@ pub(crate) fn draw_banner(c: &Card, m: &M, v: &BannerView, t: f64) -> Option<Act
     let (alpha, dy) = super::entrance(v.age);
     let c = c.faded(alpha).shifted(0.0, dy);
     let mut action = None;
-    if widgets::draw_head(&c, &layout.head, &v.head, w) {
+    if widgets::draw_head(&c, &layout.head, &v.head, w) == widgets::HeadHit::Jump {
         action = Some(Action::Jump);
     }
 
