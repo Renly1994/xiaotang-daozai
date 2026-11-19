@@ -9506,3 +9506,26 @@ fn agent_completion_result_opens_scrollable_layer_and_closes_with_the_panel(){
     assert!(!h.app.result_active(),"关闭后结果层应消失");
     assert!(!h.app.open,"关闭结果层后岛体应收起");
 }
+
+#[test]
+fn collapsing_a_card_falls_back_to_the_pending_banner_immediately(){
+    // 回归：点「收起」后如果只把 details 置 false，面板会等 forced_open 到期才收，
+    // 中间露出一个没有内容的空面板（真机上是媒体页）。这里要求立刻回到待处理提示卡。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.interactive=true;
+    let settings=h.app.settings.clone();
+    h.app.agent_cards.receive(serde_json::json!({"id":"collapse-me","provider":"dsh","kind":"approval",
+        "data":{"tool":"bash","reason":"确认后执行","cwd":"C:\\work","operation":"{\"cmd\":\"ls\"}"}}),&settings);
+    for _ in 0..40 {h.frame(vec![]);}
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t=="仅允许这一次"),"审批卡应自动展开：{texts:?}");
+    let left=WIN_W/2.0-crate::agent_ui::CARD_W/2.0;
+    h.click(Pos2::new(left+crate::agent_ui::CARD_W-18.0-11.0,13.0+5.0+11.0));
+    for _ in 0..40 {h.frame(vec![]);}
+    assert!(!h.app.agent_detail_active(),"收起后详情应关闭");
+    assert!(!h.app.open,"收起后岛体应回到收起态");
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t=="查看并审批"),"应回到待处理提示卡：{texts:?}");
+}

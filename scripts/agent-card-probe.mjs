@@ -4,7 +4,7 @@
 // 用法：
 //   node scripts/agent-card-probe.mjs <DAOZAI_DATA_DIR> approval
 //   node scripts/agent-card-probe.mjs <DAOZAI_DATA_DIR> question
-//   node scripts/agent-card-probe.mjs <DAOZAI_DATA_DIR> question-multi
+//   node scripts/agent-card-probe.mjs <DAOZAI_DATA_DIR> question-multi`n//   node scripts/agent-card-probe.mjs <DAOZAI_DATA_DIR> question-rounds
 //   node scripts/agent-card-probe.mjs <DAOZAI_DATA_DIR> finished
 //   node scripts/agent-card-probe.mjs <DAOZAI_DATA_DIR> queue
 //
@@ -16,7 +16,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 const [, , dataDir, scenario = 'approval'] = process.argv;
 if (!dataDir) {
-  console.error('用法：node scripts/agent-card-probe.mjs <DAOZAI_DATA_DIR> [approval|question|question-multi|finished|queue]');
+  console.error('用法：node scripts/agent-card-probe.mjs <DAOZAI_DATA_DIR> [approval|question|question-multi|question-rounds|finished|queue]');
   process.exit(2);
 }
 const bridgeDir = path.join(dataDir, 'agent-notices', 'bridge');
@@ -53,6 +53,33 @@ const question = (multi) => ({
     },
   ],
 });
+// 两题多轮：检查「第 1/2 题 → 下一题 → 检查答案 → 确认提交」的分页与审阅页。
+const questionRounds = () => ({
+  sessionId: 'probe-session',
+  questions: [
+    {
+      id: 'q-first',
+      question: '这次改动要包含哪些模块？',
+      detail: '可以多选，也可以在下面补充说明。',
+      multi: true,
+      options: [
+        { label: '审批卡', description: '目标 / 操作内容 / 申请理由，长命令可滚动' },
+        { label: '提问卡', description: '选项描述、审阅页与自定义回答' },
+        { label: '完成通知', description: '本轮回复的受限 Markdown 阅读' },
+      ],
+    },
+    {
+      id: 'q-second',
+      question: '要不要保留旧的缩写按钮？',
+      detail: '',
+      multi: false,
+      options: [
+        { label: '保留', description: '沿用 v0.6 的位置' },
+        { label: '去掉', description: '只留岛内详情卡' },
+      ],
+    },
+  ],
+});
 
 const send = (kind, make) => channel.exchange('dsh', kind, make);
 
@@ -66,6 +93,9 @@ switch (scenario) {
     break;
   case 'question-multi':
     result = await send('question', () => question(true));
+    break;
+  case 'question-rounds':
+    result = await send('question', questionRounds);
     break;
   case 'finished':
     result = await send('finished', () => ({ text: process.env.PROBE_TEXT || '## 本轮完成\n- 更新网关超时与重试\n- 跑了 12 个回归用例\n\n```bash\ncargo test --lib\n```\n\n全部通过。' }));

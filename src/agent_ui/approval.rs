@@ -161,9 +161,7 @@ pub(crate) fn draw_approval(c: &Card, m: &M, v: &ApprovalView, scroll: f32, t: f
     if let Some(tool) = &layout.tool {
         // 工具名前的警示三角用矢量画，避免 ⚠ 在微软雅黑里退化成方框。
         let cy = y + c.galley_h(tool) / 2.0;
-        body.poly(&[(PAD + 5.0, cy - 5.0), (PAD + 10.0, cy + 4.5), (PAD, cy + 4.5)], theme::AGENT_ALERT);
-        body.fill(PAD + 4.4, cy - 1.4, 1.2, 3.2, 0.6, Color32::BLACK);
-        body.circle(PAD + 5.0, cy + 3.0, 0.7, Color32::BLACK);
+        widgets::warn_marker(&body, PAD + 5.0, cy);
         galley(&body, PAD + 16.0, y, tool, theme::AGENT_ALERT);
         y += c.galley_h(tool) + 10.0;
     }

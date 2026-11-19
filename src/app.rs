@@ -1912,6 +1912,13 @@ impl App {
         let notice_target=if !self.notice.as_ref().is_some_and(|a|a.messenger().is_some()) && self.compact_notices()&&(self.notice.is_some()||self.t<self.notification_bell_until) {44.0}else{0.0};
         self.notice_width.target=notice_target;
         let agent_details=self.agent_panel_active();
+        // 卡片自己收起（Action::Collapse）或被处理掉后立刻回到收起态提示卡，
+        // 否则要等 forced_open 到期，中间会露出一个没有内容的空面板。
+        if self.open && self.notice_details && !agent_details && self.notice.is_some() {
+            self.open=false;
+            self.notice_details=false;
+            self.forced_open_until=0.0;
+        }
         if self.result_was_active && !self.result_active() {
             // 「查看回复」关闭后立即收起面板；否则会留下一个没有内容的空岛。
             self.open=false;

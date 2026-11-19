@@ -48,6 +48,8 @@ param(
   [string]$SaveImage,
   # 把 -SaveImage 再裁到本次 OCR 文字包围盒（±28px），避免把桌面内容带进验收截图。
   [switch]$CropSave,
+  # 在 -CropSave 基础上再按“深色卡片像素”收边（岛仔默认深色皮肤），把透明区透出来的桌面裁掉。
+  [switch]$CropCard,
   [switch]$Pretty
 )
 
@@ -292,6 +294,40 @@ try {
           $g = [System.Drawing.Graphics]::FromImage($crop)
           try { $g.DrawImage($img, (New-Object System.Drawing.Rectangle(0, 0, $iw, $ih)), (New-Object System.Drawing.Rectangle($ix, $iy, $iw, $ih)), [System.Drawing.GraphicsUnit]::Pixel) }
           finally { $g.Dispose() }
+          if ($CropCard) {
+            # 岛仔默认深色皮肤：卡片是近黑圆角块，透明区透出桌面。
+            # 按“绝大多数像素是深色”的行/列收边；检测失败就保持文字包围盒的结果。
+            try {
+              $dark = { param($c) (($c.R + $c.G + $c.B) -lt 150) }
+              $rowDark = New-Object 'bool[]' $crop.Height
+              $colDark = New-Object 'bool[]' $crop.Width
+              for ($yy = 0; $yy -lt $crop.Height; $yy++) {
+                $cnt = 0
+                for ($xx = 0; $xx -lt $crop.Width; $xx += 4) { $c = $crop.GetPixel($xx, $yy); if (& $dark $c) { $cnt++ } }
+                $rowDark[$yy] = ($cnt -ge [int](($crop.Width / 4) * 0.45))
+              }
+              for ($xx = 0; $xx -lt $crop.Width; $xx++) {
+                $cnt = 0
+                for ($yy = 0; $yy -lt $crop.Height; $yy += 4) { $c = $crop.GetPixel($xx, $yy); if (& $dark $c) { $cnt++ } }
+                $colDark[$xx] = ($cnt -ge [int](($crop.Height / 4) * 0.45))
+              }
+              $ys = @(0..($crop.Height - 1) | Where-Object { $rowDark[$_] })
+              $xs = @(0..($crop.Width - 1) | Where-Object { $colDark[$_] })
+              if ($ys.Count -gt 120 -and $xs.Count -gt 120) {
+                $ny = $ys[0]; $nh = $ys[-1] - $ys[0] + 1
+                $nx = $xs[0]; $nw = $xs[-1] - $xs[0] + 1
+                $pad = 10
+                $nx = [Math]::Max(0, $nx - $pad); $ny = [Math]::Max(0, $ny - $pad)
+                $nw = [Math]::Min($crop.Width - $nx, $nw + $pad * 2); $nh = [Math]::Min($crop.Height - $ny, $nh + $pad * 2)
+                $tight = New-Object System.Drawing.Bitmap($nw, $nh)
+                $g2 = [System.Drawing.Graphics]::FromImage($tight)
+                try { $g2.DrawImage($crop, (New-Object System.Drawing.Rectangle(0, 0, $nw, $nh)), (New-Object System.Drawing.Rectangle($nx, $ny, $nw, $nh)), [System.Drawing.GraphicsUnit]::Pixel) }
+                finally { $g2.Dispose() }
+                $crop.Dispose()
+                $crop = $tight
+              }
+            } catch { /* 收边失败就保持文字包围盒 */ }
+          }
           $crop.Save($saveTarget, [System.Drawing.Imaging.ImageFormat]::Png)
           $crop.Dispose()
         }

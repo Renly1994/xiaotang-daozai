@@ -499,6 +499,23 @@ impl App {
                 }
             }
         }
+        #[cfg(not(test))]
+        if std::env::var_os("DAOZAI_AGENT_TRACE").is_some() && agent_trace_tick() {
+            use std::io::Write;
+            let line = format!(
+                "t={:.2} notice={:?} open={} nd={} count={} active={:?} hover={}\n",
+                self.t,
+                self.notice.as_ref().map(|a| format!("{:?}", a.source)),
+                self.open,
+                self.notice_details_active(),
+                self.agent_cards.count(),
+                self.agent_cards.active().map(|a| a.0.to_owned()),
+                self.agent_cards.hovering,
+            );
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(std::env::temp_dir().join("daozai-agent-trace.log")) {
+                let _ = f.write_all(line.as_bytes());
+            }
+        }
         if self.notice.is_none() {
             if let Some(mut a) = self.alerts.pop_front() {
                 a.at = self.t;
@@ -2483,4 +2500,12 @@ fn support_codes_are_cropped_small_and_released_when_hidden(){
     release_support_codes(&ctx);
     let _=ctx.run(Default::default(),|_|{});
     assert_eq!(ctx.tex_manager().read().allocated().filter(|(_,meta)|meta.name=="qr").count(),0,"收起后应释放收款码贴图");
+}
+
+
+#[cfg(not(test))]
+fn agent_trace_tick()->bool{
+    use std::sync::atomic::{AtomicUsize,Ordering};
+    static N:AtomicUsize=AtomicUsize::new(0);
+    N.fetch_add(1,Ordering::Relaxed)%6==0
 }

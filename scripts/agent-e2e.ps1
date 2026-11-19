@@ -51,6 +51,7 @@ $script:Failures = @()
 $script:Results = @()
 $script:Log = @()
 $script:Shots = $null
+$script:LastRegion = $null
 
 function Write-Step([string]$message) {
   $line = '[{0}] {1}' -f (Get-Date -Format 'HH:mm:ss'), $message
@@ -212,20 +213,31 @@ function Wait-IslandRect([int]$TimeoutSeconds = 15) {
 function Get-RegionString($region) { "$($region.left),$($region.top),$($region.right),$($region.bottom)" }
 
 # 卡片出现/展开会让岛仔窗口变大；每轮都重新取一次窗口矩形，避免只截到收起态的小窗口。
+# 取不到（窗口正在重建/瞬间不可见）时退回上一次可用的矩形，再退回屏幕中心竖带。
 function Get-LiveRegion($fallback) {
   if ($script:islandPid) {
     $fresh = Get-IslandRect
-    if ($fresh) { return $fresh }
+    if ($fresh) { $script:LastRegion = $fresh; return $fresh }
   }
-  return $fallback
+  if ($script:LastRegion) { return $script:LastRegion }
+  if ($fallback) { return $fallback }
+  $screen = Get-ScreenBounds
+  $cx = [int](($screen.left + $screen.right) / 2)
+  $half = [int][Math]::Ceiling($script:CardWidthPx / 2) + 70
+  [pscustomobject]@{ left = $cx - $half; right = $cx + $half; top = $screen.top; bottom = [Math]::Min(640, $screen.bottom) }
 }
 
 function Invoke-Ocr {
   param($Region, [string]$Find, [string]$SaveImage, [int[]]$Scales = @(2, 3, 4, 6))
+  $Region = Get-LiveRegion $Region
   $cli = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ocrScript, '-Region', (Get-RegionString $Region), '-FindScales', ($Scales -join ','))
   if ($Find) { $cli += @('-Find', $Find) }
-  if ($SaveImage) { $cli += @('-SaveImage', $SaveImage, '-CropSave') }
-  $raw = & powershell @cli 2>&1 | Out-String
+  if ($SaveImage) { $cli += @('-SaveImage', $SaveImage, '-CropSave', '-CropCard') }
+  # OCR 子进程失败（参数/编码/引擎）只应让本次识别返回 null，不能把整个验收脚本打断。
+  $previous = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try { $raw = & powershell @cli 2>&1 | Out-String }
+  finally { $ErrorActionPreference = $previous }
   try { return ($raw | ConvertFrom-Json) } catch {
     return [pscustomobject]@{ ok = $false; error = "OCR 输出无法解析: $($raw.Substring(0, [Math]::Min(200, $raw.Length)))" }
   }
@@ -417,7 +429,7 @@ try {
       -RedirectStandardOutput $stdout -RedirectStandardError $stderr
     Write-Step "  驱动 PID=$($driver.Id)"
 
-    $verdict = [pscustomobject]@{ scenario = $name; ok = $false; steps = @(); driver = $null; error = $null; duration = 0 }
+    $verdict = [pscustomobject]@{ scenario = $name; ok = $false; steps = @(); driver = $null; error = $null; bridgeOk = $false; duration = 0 }
 
     $region = Wait-IslandRect 15
     if (-not $region) {
@@ -536,24 +548,31 @@ try {
       $verdict.steps += [pscustomobject]@{ step = '等到完成通知'; ok = [bool]$hit; text = $(if ($hit) { $hit.text } else { $null }) }
       if (-not $hit) { $verdict.error = '25 秒内没有在岛上看到完成通知' }
       else {
-        # 完成通知必须带正文（设置里 completion=true / content=2）；正文里埋了唯一标记。
-        $region = Get-IslandRect
-        $marker = Wait-Text -Region $region -Texts @('daozai-e2e-done', 'e2e-done') -TimeoutSeconds 8 -ShotOnFound "$shotBase-01b-body.png" -ShotOnTimeout "$shotBase-01b-body-timeout.png"
-        $verdict.steps += [pscustomobject]@{ step = '完成卡正文含 e2e 标记'; ok = [bool]$marker; text = $(if ($marker) { $marker.line } else { $null }) }
-        if (-not $marker) { $verdict.error = '完成卡上没有识别到回复正文（检查「任务完成提醒」和「完成内容=本轮回复」）' }
+        # 先抓「查看回复」：完成卡停留时间有限（dwell=15s），先点开结果层再慢慢验正文。
+        # 这一步不是判定项（主 agent 明确：完成通知本身无需点击即可判 done），所以失败只记录不判错。
         $region = Get-IslandRect
         $open = Find-AnyText -Region $region -Texts @('查看回复', '查看') -SaveImage "$shotBase-02-review.png" -Scales @(2, 3, 4, 5, 6, 8)
-        $verdict.steps += [pscustomobject]@{ step = '打开「查看回复」'; ok = [bool]$open; text = $(if ($open) { $open.text } else { $null }) }
+        $verdict.steps += [pscustomobject]@{ step = '打开「查看回复」'; ok = [bool]$open; text = $(if ($open) { $open.text } else { $null }); fatal = $false }
+        $marker = $null
         if ($open) {
           $null = Click-Point $open.center
           Start-Sleep -Milliseconds 900
           $region = Get-IslandRect
           $result = Wait-Text -Region $region -Texts @('本轮回复', '复制内容', '可滚动阅读') -TimeoutSeconds 10 -ShotOnFound "$shotBase-03-result.png" -ShotOnTimeout "$shotBase-03-timeout.png"
-          $verdict.steps += [pscustomobject]@{ step = '看到结果正文层'; ok = [bool]$result; text = $(if ($result) { $result.text } else { $null }) }
-          if (-not $result) { $verdict.error = '没有看到「本轮回复」结果层（完成内容可能不是本轮回复）' }
-        } else {
-          $verdict.error = '完成卡上没有识别到「查看回复/查看」按钮（当前构建的完成卡已降级为轻提示时可能只有 10.5px 小按钮，OCR 命中率低）'
+          $verdict.steps += [pscustomobject]@{ step = '看到结果正文层'; ok = [bool]$result; text = $(if ($result) { $result.text } else { $null }); fatal = $false }
+          if ($result) {
+            # 结果层是「本轮回复」全文，在这里验正文标记最稳（不会过期）。
+            $region = Get-IslandRect
+            $marker = Wait-Text -Region $region -Texts @('daozai-e2e-done', 'e2e-done') -TimeoutSeconds 6 -ShotOnFound "$shotBase-03b-body.png" -ShotOnTimeout "$shotBase-03b-body-timeout.png"
+          }
         }
+        if (-not $marker) {
+          # 兜底：完成卡本身也带正文摘要（completion=true / content=2）。
+          $region = Get-IslandRect
+          $marker = Wait-Text -Region $region -Texts @('daozai-e2e-done', 'e2e-done') -TimeoutSeconds 8 -ShotOnFound "$shotBase-01b-body.png" -ShotOnTimeout "$shotBase-01b-body-timeout.png"
+        }
+        $verdict.steps += [pscustomobject]@{ step = '完成正文含 e2e 标记'; ok = [bool]$marker; text = $(if ($marker) { $marker.line } else { $null }) }
+        if (-not $marker) { $verdict.error = '完成卡/结果层都没有识别到回复正文（检查「任务完成提醒」和「完成内容=本轮回复」）' }
       }
     }
 
@@ -591,7 +610,7 @@ try {
         $entry = if ($bridge.Count -ge 1) { $bridge[0] } else { $null }
         $reply = if ($entry) { $entry.reply } else { $null }
         # 宿主只有在「岛仔返回 allow 且操作内容匹配」时才给 allowed-once，所以它本身就是强证据。
-        if ($json.ok -and $reply -and $reply.decision -eq 'allow' -and $json.decision -eq 'allowed-once' -and -not $json.handback) { $verdict.ok = $true }
+        if ($json.ok -and $reply -and $reply.decision -eq 'allow' -and $json.decision -eq 'allowed-once' -and -not $json.handback) { $verdict.bridgeOk = $true }
         elseif (-not $verdict.error) { $verdict.error = "桥接侧没有收到 allow（decision=$($json.decision), handback=$($json.handback)）" }
       }
       elseif ($name -like 'question*') {
@@ -600,7 +619,7 @@ try {
         if ($json.ok -and $answers.Count -ge 1) {
           $selected = @($answers[0].selected)
           $expectedFirst = $spec.options[0]
-          if ($selected -contains $expectedFirst) { $verdict.ok = $true }
+          if ($selected -contains $expectedFirst) { $verdict.bridgeOk = $true }
           elseif (-not $verdict.error) { $verdict.error = "桥接侧收到 $($selected -join ',')，与屏幕上点的「$expectedFirst」不一致" }
         }
         elseif (-not $verdict.error) { $verdict.error = "桥接侧没有收到重答答案（decision=$($json.decision)）" }
@@ -610,11 +629,13 @@ try {
         $entry = if ($finished.Count -ge 1) { $finished[0] } else { $null }
         $textLength = if ($entry -and $entry.sent -and $entry.sent.text) { $entry.sent.text.Length } else { 0 }
         # content=2（本轮回复）时 makePayload 的 mode 必须是 2，且正文非空：证明全文真的发给了岛仔。
-        if ($json.ok -and $json.decision -eq 'done' -and $entry -and $entry.reply.done -and $entry.mode -eq 2 -and $textLength -gt 0) { $verdict.ok = $true }
+        if ($json.ok -and $json.decision -eq 'done' -and $entry -and $entry.reply.done -and $entry.mode -eq 2 -and $textLength -gt 0) { $verdict.bridgeOk = $true }
         elseif (-not $verdict.error) { $verdict.error = "桥接侧没有确认完成事件（decision=$($json.decision), mode=$($entry.mode), textLen=$textLength）" }
       }
     }
 
+    # 场景通过 = 「屏幕上点的」与「桥接侧收到的」都对上，且没有阻断性错误。
+    if (-not $NoClick) { $verdict.ok = ($null -eq $verdict.error -and $verdict.bridgeOk) }
     $verdict.duration = [Math]::Round(((Get-Date) - $scenarioStart).TotalSeconds, 1)
     $script:Results += $verdict
     if ($verdict.ok) { Write-Step "场景 $name 通过（$($verdict.duration)s）" }

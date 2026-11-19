@@ -53,6 +53,13 @@ pub(crate) fn measure_head_with(m: &M, head: &Head, w: f32, collapse: bool) -> H
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HeadHit { None, Jump, Collapse }
 
+/// 警示三角（矢量，避免 ⚠ 在中文里退化成方框）。`(cx,cy)` 是三角中心附近。
+pub(crate) fn warn_marker(c: &Card, cx: f32, cy: f32) {
+    c.poly(&[(cx + 0.5, cy - 5.0), (cx + 5.5, cy + 4.5), (cx - 4.5, cy + 4.5)], theme::AGENT_ALERT);
+    c.fill(cx - 0.1, cy - 1.4, 1.2, 3.2, 0.6, Color32::BLACK);
+    c.circle(cx + 0.5, cy + 3.0, 0.7, Color32::BLACK);
+}
+
 /// 画头部；返回点了跳转还是收起。
 pub(crate) fn draw_head(c: &Card, l: &HeadLayout, head: &Head, w: f32) -> HeadHit {
     let top = m::HEAD_TOP;

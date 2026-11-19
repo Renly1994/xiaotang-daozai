@@ -68,6 +68,11 @@ src/theme.rs           Agent 语义色 + 等宽字体家族
 - 滚动只处理滚轮，未做拖拽滚动条与惯性滚动。
 - 视图不能选中文字（egui 自绘），复制走结果层的「复制内容」。
 
+### 排查开关
+
+真机上看不出卡片状态时（比如「卡片该出现却没出现」），用 **debug 构建**加环境变量 `DAOZAI_AGENT_TRACE=1` 启动，每 6 帧把 notice/open/details/队列/active/hover 追加写入
+`%TEMP%\daozai-agent-trace.log`（release 也带这段代码，但只在设置该变量时才写）。排查完记得把变量去掉。
+
 ---
 
 ## 4. 本机开发环境（重要）

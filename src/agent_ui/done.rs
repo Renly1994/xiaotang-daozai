@@ -263,7 +263,8 @@ pub(crate) fn draw_result(c: &Card, m: &M, v: &ResultView, t: f64) -> Option<Act
             Seg::H2(g) => galley(&body, PAD, y, g, theme::WHITE),
             Seg::Paragraph(g) => galley(&body, PAD, y, g, theme::AGENT_MUTED),
             Seg::Bullet(g) => {
-                widgets::check(&body, PAD + 3.0, y + c.galley_h(g) / 2.0, 9.0, theme::AGENT_OK);
+                // 无序列表用圆点而不是勾：勾会被读成「已完成事项」，正文里只是普通条目。
+                body.circle(PAD + 5.0, y + 7.0, 2.0, theme::AGENT_SUBTLE);
                 galley(&body, PAD + 14.0, y, g, theme::AGENT_MUTED);
             }
             Seg::Quote(g) => {
