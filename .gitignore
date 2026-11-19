@@ -13,3 +13,6 @@
 *.key
 .DS_Store
 Thumbs.db
+
+# 本地联调用的临时探针脚本，不随仓库分发
+/.tmp/
