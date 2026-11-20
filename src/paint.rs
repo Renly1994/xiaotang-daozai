@@ -172,6 +172,22 @@ impl<'a> Card<'a> {
             egui::StrokeKind::Middle,
         );
     }
+    /// 圆形头像：egui 没有圆形裁剪，这里按圆形 UV 自建三角扇贴图；先垫一圈白边把头像和图标分开。
+    pub fn avatar_circle(&self,x:f32,y:f32,r:f32,texture:&egui::TextureHandle) {
+        self.circle(x,y,r+0.9,Color32::from_rgba_unmultiplied(255,255,255,240));
+        let center=self.pos(x,y);
+        let radius=r*self.s;
+        let segments=24usize;
+        let mut mesh=egui::Mesh::with_texture(texture.id());
+        mesh.vertices.push(egui::epaint::Vertex{pos:center,uv:egui::pos2(0.5,0.5),color:Color32::WHITE});
+        for i in 0..=segments {
+            let angle=TAU*i as f32/segments as f32;
+            let (sin,cos)=angle.sin_cos();
+            mesh.vertices.push(egui::epaint::Vertex{pos:center+Vec2::new(cos,sin)*radius,uv:egui::pos2(0.5+0.5*cos,0.5+0.5*sin),color:Color32::WHITE});
+            if i>0 { mesh.add_triangle(0,i as u32,i as u32+1); }
+        }
+        self.painter.add(egui::Shape::mesh(mesh));
+    }
     pub fn circle(&self, x: f32, y: f32, r: f32, color: Color32) {
         self.painter.circle_filled(self.pos(x, y), r * self.s, color);
     }

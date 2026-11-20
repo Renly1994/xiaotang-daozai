@@ -11,6 +11,26 @@ pub(super) fn sender(id:u32,created:i64)->Option<String>{
     let local=std::env::var_os("LOCALAPPDATA")?;
     sender_in(&Path::new(&local).join("Microsoft/Windows/Notifications/wpndatabase.db"),id,created)
 }
+/// 同一条通知的原始 payload：调用方从中取会话跳转地址与头像文件。
+pub(super) fn payload(id:u32,created:i64)->Option<String>{
+    let local=std::env::var_os("LOCALAPPDATA")?;
+    payload_in(&Path::new(&local).join("Microsoft/Windows/Notifications/wpndatabase.db"),id,created)
+}
+fn payload_in(path:&Path,id:u32,created:i64)->Option<String>{
+    let name=CString::new(path.to_string_lossy().as_bytes()).ok()?;
+    // payload 是 BLOB，必须显式 CAST 才能按文本取；同样要求编号与创建时间同时匹配。
+    let sql=CString::new(format!("SELECT CAST(n.Payload AS TEXT) FROM Notification n WHERE n.Id={id} AND n.ArrivalTime={created} AND n.Type='toast' LIMIT 1")).ok()?;
+    unsafe extern "C" fn found(data:*mut c_void,count:c_int,values:*mut *mut c_char,_:*mut *mut c_char)->c_int{
+        if count>0 && !values.is_null(){unsafe{if !(*values).is_null(){*data.cast::<Option<String>>()=Some(CStr::from_ptr(*values).to_string_lossy().into_owned());}}}0
+    }
+    let mut db=ptr::null_mut();let mut payload=None;
+    unsafe{
+        let opened=sqlite3_open_v2(name.as_ptr(),&mut db,1,ptr::null())==0;
+        let ok=opened && sqlite3_exec(db,sql.as_ptr(),Some(found),(&mut payload as *mut Option<String>).cast(),ptr::null_mut())==0;
+        if !db.is_null(){sqlite3_close(db);}
+        if ok{payload}else{None}
+    }
+}
 fn sender_in(path:&Path,id:u32,created:i64)->Option<String>{
     let name=CString::new(path.to_string_lossy().as_bytes()).ok()?;
     // 参数均为数值，创建时间必须同时匹配，避免通知编号复用时混淆应用。
@@ -45,6 +65,23 @@ mod tests {
         let after=std::fs::read(&path).unwrap();std::fs::remove_file(&path).unwrap();
         assert_eq!(found,[Some("QQ".into()),Some("OtherApp".into()),None,None]);assert_eq!(before,after);
         assert_eq!(sender_in(&path,10,100),None);assert!(!path.exists(),"只读查询不能新建数据库");
+    }
+    #[test]
+    fn payload_lookup_returns_the_toast_xml_and_never_modifies_the_database(){
+        let path=std::env::temp_dir().join(format!("daozai-toast-payload-{}.db",std::process::id()));
+        let name=CString::new(path.to_string_lossy().as_bytes()).unwrap();let mut db=ptr::null_mut();
+        let sql=CString::new("CREATE TABLE Notification (Id INTEGER, ArrivalTime INTEGER, HandlerId INTEGER, Type TEXT, Payload BLOB); INSERT INTO Notification VALUES (20,200,1,'toast',CAST('<toast launch=\"x\"/>' AS BLOB)),(21,201,1,'badge',CAST('<toast/>' AS BLOB));").unwrap();
+        unsafe{
+            assert_eq!(sqlite3_open_v2(name.as_ptr(),&mut db,6,ptr::null()),0);
+            assert_eq!(sqlite3_exec(db,sql.as_ptr(),None,ptr::null_mut(),ptr::null_mut()),0);
+            sqlite3_close(db);
+        }
+        let before=std::fs::read(&path).unwrap();
+        let found=[payload_in(&path,20,200),payload_in(&path,21,201),payload_in(&path,20,201)];
+        let after=std::fs::read(&path).unwrap();std::fs::remove_file(&path).unwrap();
+        assert_eq!(found[0].as_deref(),Some("<toast launch=\"x\"/>"));assert_eq!(found[1],None);assert_eq!(found[2],None);
+        assert_eq!(before,after,"查询不能改动通知数据库");
+        assert!(!path.exists());
     }
     #[test]
     #[ignore="需要本机通知中心留有指定测试通知"]

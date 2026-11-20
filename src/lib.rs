@@ -61,6 +61,7 @@ pub mod layered;
 #[cfg(windows)]
 pub mod system;
 pub mod paint;
+pub mod qq_toast;
 pub mod shape;
 mod fluid;
 pub mod smtc;
