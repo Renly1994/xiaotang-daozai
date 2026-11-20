@@ -556,7 +556,14 @@ impl App {
                         self.agent_cards.detail(id);
                         self.open_notice_details();
                     }
-                    Some(crate::agent_ui::Action::Jump)=>{}
+                    Some(crate::agent_ui::Action::Jump)=>{
+                        // 收起态提示卡上的跳转以前是空实现，点了完全没反应。
+                        // 跳转结论（已在最前台/已切到/没找到/切换失败）由 App::jump_feedback 常驻显示。
+                        if let Some(target)=self.agent_cards.jump_target(id){
+                            let outcome=crate::agent_jump::open(&target);
+                            self.jump_feedback(outcome.message());
+                        }
+                    }
                     _=>{}
                 }
             }
@@ -574,10 +581,13 @@ impl App {
             };
             match crate::agent_ui::draw_done(&nc,&m,&view,self.t) {
                 Some(crate::agent_ui::Action::ShowResult)=>{
-                    if self.settings.agent.content>0 && a.body!=crate::agent_notice::Status::Finished.label(){
+                    // 点击必须有可见结果：没有正文时打开本机说明层，不能静默 no-op 变成死按钮。
+                    if self.settings.agent.content>0 && a.body!=crate::agent_notice::Status::Finished.label() {
                         self.agent_cards.open_result(p,a.body.clone());
-                        self.open_agent_panel();
+                    } else {
+                        self.agent_cards.open_result_no_body(p);
                     }
+                    self.open_agent_panel();
                 }
                 Some(crate::agent_ui::Action::Dismiss)=>{self.notice=None;}
                 _=>{}

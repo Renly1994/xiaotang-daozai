@@ -152,9 +152,32 @@ impl Request {
     }
 }
 
+/// 完成内容为「仅状态」时，结果层里的标题与说明：本机生成，不含任何宿主正文。
+/// 桥接侧在 content=0 时压根不采集回复文本（见 integrations/agent-notices/bridge/index.mjs），
+/// 所以这里只能诚实说明原因并给出下一步，绝不能凭空造正文。
+pub(crate) const NO_BODY_RESULT_TITLE: &str = "本轮未接收回复正文";
+pub(crate) const NO_BODY_RESULT_TEXT: &str = "当前「完成内容」设置为「仅状态」：宿主不会把回复正文发给岛仔，所以这里没有内容可显示，不是加载失败。
+
+## 想看到正文
+- 打开 设置 → Agent → 完成内容
+- 改成「回复摘要」或「本轮回复」
+- 下一轮结束后再点「查看回复」
+
+说明：本层由岛仔本机生成，不包含、也不会去读取任何回复内容。";
+
+/// 结果层标题：有正文是「本轮回复」，说明层要一眼看出没有正文。
+fn result_kicker(hint: bool) -> &'static str {
+    if hint { NO_BODY_RESULT_TITLE } else { "本轮回复" }
+}
+
 /// 「查看回复」打开的结果层。
 #[derive(Clone)]
-pub(crate) struct ResultCard { pub provider: Provider, pub text: String }
+pub(crate) struct ResultCard {
+    pub provider: Provider,
+    pub text: String,
+    /// 本机生成的说明（无正文时的占位），不是宿主正文。
+    pub hint: bool,
+}
 
 /// 收起卡（banner）的只读展示信息。
 pub(crate) struct BannerInfo {
@@ -198,15 +221,28 @@ impl Cards {
         }
     }
     /// 用户做出的决定：发送成功才移除；失败保留卡片并进入「结果未知」。
+    /// 只在请求仍留在队列里时可用；draw_details 已经取走请求，走下面的 resolve()。
     fn decide(&mut self,id:&str,reply:Value){
-        if self.send(id,reply){
-            self.remove(id);
-        }else if let Some(r)=self.requests.front_mut().filter(|r|r.id==id){
-            r.state=State::Uncertain;
-            r.error=Some("提交失败，结果未知。请回客户端确认后再处理。".into());
-            r.details=true;
-            if r.detail_at.is_none(){r.detail_at=Some(0.0);}
+        if self.send(id,reply){self.remove(id);return;}
+        if self.requests.front().is_some_and(|r|r.id==id){
+            let r=self.requests.pop_front().expect("刚判空，队首必然存在");
+            self.mark_uncertain(r);
         }
+    }
+    /// 失败兜底：保留请求、标记「结果未知」，并放回队首继续显示（不能让卡片凭空消失）。
+    fn mark_uncertain(&mut self,mut r:Request){
+        r.state=State::Uncertain;
+        r.error=Some("提交失败，结果未知。请回客户端确认后再处理。".into());
+        r.details=true;
+        if r.detail_at.is_none(){r.detail_at=Some(0.0);}
+        self.requests.push_front(r);
+    }
+    /// 把已经从队列取出的请求发出去：成功即结束（卡片可以消失）；失败放回队首并返回 true
+    /// （还要继续显示卡片）。不能用 decide()：那时它在队列里已经不存在，队首查找必然落空。
+    fn resolve(&mut self,r:Request,reply:Value)->bool{
+        if self.send(&r.id,reply){return false;}
+        self.mark_uncertain(r);
+        true
     }
     pub(crate) fn hand_back(&mut self,id:&str){
         #[cfg(test)]
@@ -337,18 +373,16 @@ impl Cards {
             }
             Some(Action::Collapse)=>{r.details=false;r.shown=None;r.detail_at=None;}
             Some(Action::Return)=>{self.hand_back(&r.id);return false;}
-            Some(Action::Deny)=>{self.decide(&r.id,json!({"decision":"deny"}));return false;}
+            Some(Action::Deny)=>{return self.resolve(r,json!({"decision":"deny"}));}
             Some(Action::Allow)=>{
                 // 没有完整操作时不能在岛上允许：保持卡片，让用户回客户端。
                 if !r.data.native_scope&&!r.data.operation.trim().is_empty()&&!r.data.tool.trim().is_empty(){
-                    self.decide(&r.id,json!({"decision":"allow"}));
-                    return false;
+                    return self.resolve(r,json!({"decision":"allow"}));
                 }
             }
             Some(Action::Answer)=>{
                 let answers=r.answers.clone();
-                self.decide(&r.id,json!({"decision":"answer","answers":answers}));
-                return false;
+                return self.resolve(r,json!({"decision":"answer","answers":answers}));
             }
             _=>{}
         }
@@ -370,6 +404,9 @@ impl Cards {
     #[cfg(test)]
     pub(crate) fn reviewing(&self,id:&str)->bool{self.requests.iter().any(|r|r.id==id&&r.reviewing)}
     pub(crate) fn count(&self)->usize{self.requests.len()}
+    /// 测试观察用：结果层当前滚动偏移（每帧必须被 draw_result 写回）。
+    #[cfg(test)]
+    pub(crate) fn result_scroll(&self)->f32{self.result_scroll}
     pub(crate) fn countdown(&mut self,t:f64,seconds:u8,hidden:bool)->Option<u8>{
         let r=self.requests.front_mut()?;
         if seconds==0 || self.hovering || r.details || r.data.deferred || hidden || r.state.busy() {r.shown=None;return None;}
@@ -377,7 +414,14 @@ impl Cards {
     }
     /// 完成通知「查看回复」：打开结果层（不落盘，只用事件带来的正文）。
     pub(crate) fn open_result(&mut self,provider:Provider,text:String){
-        self.result=Some(ResultCard{provider,text});
+        self.result=Some(ResultCard{provider,text,hint:false});
+        self.result_scroll=0.0;
+        self.result_at=None;
+    }
+    /// 没有正文时的「查看回复」：打开本机说明层。
+    /// 点击必须有可见结果——静默 no-op 会让用户以为按钮坏了。
+    pub(crate) fn open_result_no_body(&mut self,provider:Provider){
+        self.result=Some(ResultCard{provider,text:NO_BODY_RESULT_TEXT.to_owned(),hint:true});
         self.result_scroll=0.0;
         self.result_at=None;
     }
@@ -386,7 +430,7 @@ impl Cards {
     pub(crate) fn result_size(&self)->(f32,f32){
         let Some(result)=&self.result else{return (agent_ui::CARD_W,140.0)};
         let Some(m)=self.measurer() else{return (agent_ui::CARD_W,140.0);};
-        let view=agent_ui::ResultView{provider:result.provider,kicker:"本轮回复",text:&result.text,scroll:self.result_scroll,age:1.0,copied:None};
+        let view=agent_ui::ResultView{provider:result.provider,kicker:result_kicker(result.hint),text:&result.text,scroll:self.result_scroll,age:1.0,copied:None,hint:result.hint};
         agent_ui::measure_result(&m,&view)
     }
     pub(crate) fn draw_result(&mut self,c:&Card)->Option<Action>{
@@ -397,8 +441,10 @@ impl Cards {
         let age=(t-at).max(0.0) as f32;
         let copied=self.copied_at.map(|at|(1.4-at.elapsed().as_secs_f32()).max(0.0));
         if self.copied_at.is_some_and(|at|at.elapsed()>Duration::from_secs_f32(1.4)){self.copied_at=None;}
-        let view=agent_ui::ResultView{provider:result.provider,kicker:"本轮回复",text:&result.text,scroll:self.result_scroll,age,copied};
-        let action=agent_ui::draw_result(c,&m,&view,t);
+        let view=agent_ui::ResultView{provider:result.provider,kicker:result_kicker(result.hint),text:&result.text,scroll:self.result_scroll,age,copied,hint:result.hint};
+        let (action,scroll)=agent_ui::draw_result(c,&m,&view,t);
+        // 与审批/提问详情一致：滚动偏移必须写回状态，否则每帧都从 0 重新开始。
+        self.result_scroll=scroll;
         match action {
             Some(Action::CopyResult)=>{
                 c.ui.ctx().copy_text(result.text.clone());
@@ -455,7 +501,8 @@ impl Cards {
         }
         let retired:Vec<_>=self.requests.iter().filter(|r|!r.provider.enabled(settings)||!settings.agent.interactive||r.data.deferred&&!settings.agent.deferred).map(|r|r.id.clone()).collect();
         for id in retired{self.hand_back(&id);}
-        if self.result.as_ref().is_some_and(|r|!r.provider.enabled(settings)||!settings.agent.completion||settings.agent.content==0){self.close_result();}
+        // content 改成「仅状态」时要立刻关掉已经打开的正文层（隐私）；本机说明层不含正文，关掉反而变成死点击，保留。
+        if self.result.as_ref().is_some_and(|r|!r.provider.enabled(settings)||!settings.agent.completion||(settings.agent.content==0&&!r.hint)){self.close_result();}
         done
     }
 }

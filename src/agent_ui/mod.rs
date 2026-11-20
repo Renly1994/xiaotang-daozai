@@ -130,6 +130,8 @@ pub(crate) struct ResultView<'a> {
     pub age: f32,
     /// 已复制到剪贴板的反馈（剩余秒数）。
     pub copied: Option<f32>,
+    /// 本机生成的说明层（没有回复正文）：不提供「复制内容」，避免暗示这里有正文。
+    pub hint: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -310,7 +312,7 @@ mod tests {
         let m = Measurer::new(&ctx);
         for repeat in [0usize, 3, 200] {
             let text = "## 标题\n- 条目\n\n段落文字。".repeat(repeat);
-            let view = ResultView { provider: crate::agent_notice::Provider::Dsh, kicker: "本轮回复", text: &text, scroll: 0.0, age: 1.0, copied: None };
+            let view = ResultView { provider: crate::agent_notice::Provider::Dsh, kicker: "本轮回复", text: &text, scroll: 0.0, age: 1.0, copied: None, hint: false };
             let (w, h) = measure_result(&m, &view);
             assert_eq!(w, CARD_W);
             assert!(h > 0.0 && h <= WIN_H);

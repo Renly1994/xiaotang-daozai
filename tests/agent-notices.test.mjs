@@ -83,6 +83,27 @@ test('DSH with no live island hands back once and emits only a fixed status', as
   assert.deepEqual(seen,[['dsh','approval'],['dsh','finished'],['dsh','question']]);
 });
 
+test('DSH subagent turns never push a completion card to the island', async t=>{
+  // 每个 subagent 都是一条 origin=subagent 的会话，turn/end 与根会话同一条全局事件总线。
+  // 不过滤的话每跑一个子 agent 岛上就多弹一张「本轮已结束」，用户既看不出区别又会被淹没。
+  const handlers={},finished=[];
+  apply({on:(k,h)=>{handlers[k]=h;}});
+  t.mock.method(channel,'enabled',()=>true);
+  t.mock.method(channel,'exchange',async(_p,kind,build)=>{if(kind==='finished')finished.push(build(2));return {done:true};});
+  t.mock.method(bridge,'notify',()=>{});
+  const sub={id:'sub',header:{origin:'subagent'}}, root={id:'root',header:{cwd:'C:/work'}};
+  handlers['session/event'](sub,{type:'turn/start',data:{}});
+  handlers['session/event'](sub,{type:'assistant/message',data:{message:{content:[{type:'text',text:'子 agent 的回复'}]}}});
+  handlers['session/event'](sub,{type:'turn/end',data:{}});
+  await delay(10);
+  assert.deepEqual(finished,[],'subagent 的 turn/end 不应推完成卡');
+  handlers['session/event'](root,{type:'turn/start',data:{}});
+  handlers['session/event'](root,{type:'turn/end',data:{}});
+  await delay(10);
+  assert.equal(finished.length,1,'根会话的 turn/end 仍必须推完成卡');
+  assert.equal(finished[0].sessionId,'root');
+});
+
 test('DSH one-time decisions use matching full operation; validates answers and never grants on fallback',async t=>{
   const handlers={},session={id:'fixture',header:{cwd:'example'}},request={callId:'c1',toolName:'Read',agent:{session}};
   apply({on:(k,h)=>{handlers[k]=h;}});

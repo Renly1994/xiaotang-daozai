@@ -11,13 +11,24 @@ use crate::theme::{self, W};
 use eframe::egui::{self, Color32};
 use std::sync::Arc;
 
+/// 没有正文时卡片上的一行说明：让用户在点「查看回复」之前就知道里面没有正文。
+const NO_BODY_HINT: &str = "仅状态 · 未接收回复正文";
+
+/// 是否存在可展示的回复正文（「仅状态」占位不算正文）。
+fn has_detail(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty() && text != crate::agent_notice::Status::Finished.label()
+}
+
 /// 完成通知的两种形态尺寸。
 pub(crate) fn measure_done(m: &M, v: &DoneView) -> (f32, f32) {
     if v.compact {
         return (334.0, 44.0);
     }
-    let body_h = if v.text.trim().is_empty() || v.text.trim() == crate::agent_notice::Status::Finished.label() { 0.0 } else { m.height(&m.text(&preview_text(v.text, 90), m::META, W::Regular, CONTENT_W)) };
-    let h = (m::HEAD_TOP + m::ICON + 8.0 + body_h + 10.0 + BTN_H + 14.0).max(96.0);
+    // 摘要行（无正文时是说明行）必须计入高度，否则按钮会压到文字上。
+    let line_text = if has_detail(v.text) { preview_text(v.text, 90) } else { NO_BODY_HINT.to_owned() };
+    let line = m.text(&line_text, m::META, W::Regular, CONTENT_W);
+    let h = (m::HEAD_TOP + m::ICON + 8.0 + m.height(&line) + 10.0 + BTN_H + 14.0).max(96.0);
     (super::CARD_W, h.min(160.0))
 }
 
@@ -62,20 +73,22 @@ pub(crate) fn draw_done(c: &Card, m: &M, v: &DoneView, t: f64) -> Option<Action>
     let (alpha, dy) = super::entrance(v.age);
     let c = c.faded(alpha).shifted(0.0, dy);
     let mut action = None;
-    let status = crate::agent_notice::Status::Finished.label();
-    let has_detail = !v.text.trim().is_empty() && v.text.trim() != status;
-    // 没有正文时不要重复同一句话；摘要行留空，卡片只说「本轮已结束」。
-    let summary_text = if has_detail { preview_text(v.text, 90) } else { String::new() };
+    let detail = has_detail(v.text);
+    let summary_text = if detail { preview_text(v.text, 90) } else { String::new() };
     if v.compact {
-        // 单行提示：图标 + 来源 + 摘要，右侧两枚小按钮。
+        // 单行提示：图标 + 来源 + 摘要/说明，右侧两枚小按钮。
         let title = m.fit(v.kicker, 11.5, W::Semibold, 120.0);
         crate::extras::agent_icon(&c, 20.0, h / 2.0, 22.0, v.provider);
         galley(&c, 40.0, 7.0, &title, theme::WHITE);
-        if !summary_text.is_empty() {
+        if detail {
             let body = m.fit(&preview_text(v.text, 60), 10.0, W::Regular, 150.0);
             galley(&c, 40.0, 24.0, &body, theme::AGENT_MUTED);
+        } else {
+            // 没有正文时在摘要位说明原因，不让用户以为「查看」按钮丢了。
+            let body = m.fit(NO_BODY_HINT, 10.0, W::Regular, 150.0);
+            galley(&c, 40.0, 24.0, &body, theme::AGENT_SUBTLE);
         }
-        if has_detail
+        if detail
             && widgets::chip(&c, w - 96.0, (h - 22.0) / 2.0, 40.0, 22.0, "agent-result-open", "查看", theme::AGENT_OK)
         {
             action = Some(Action::ShowResult);
@@ -100,10 +113,14 @@ pub(crate) fn draw_done(c: &Card, m: &M, v: &DoneView, t: f64) -> Option<Action>
         theme::AGENT_SUBTLE,
     );
     let body_top = m::HEAD_TOP + m::ICON + 8.0;
-    let body = m.text(&summary_text, m::META, W::Regular, CONTENT_W);
-    if !summary_text.is_empty() {
-        galley(&c, PAD, body_top, &body, theme::AGENT_MUTED);
-    }    let fy = (h - 14.0 - BTN_H).max(body_top + c.galley_h(&body) + 6.0);
+    // 有正文显示摘要；没有正文显示一行说明，点「查看回复」前就知道里面是什么。
+    let line = if detail {
+        m.text(&summary_text, m::META, W::Regular, CONTENT_W)
+    } else {
+        m.text(NO_BODY_HINT, m::META, W::Regular, CONTENT_W)
+    };
+    galley(&c, PAD, body_top, &line, if detail { theme::AGENT_MUTED } else { theme::AGENT_SUBTLE });
+    let fy = (h - 14.0 - BTN_H).max(body_top + c.galley_h(&line) + 6.0);
     let specs = [("agent-result-open", "查看回复", true), ("agent-done-close", "关闭", false)];
     if let Some(i) = widgets::draw_footer(&c, fy, w, &specs, true) {
         action = Some(if i == 0 { Action::ShowResult } else { Action::Dismiss });
@@ -226,16 +243,25 @@ pub(crate) fn measure_result(m: &M, v: &ResultView) -> (f32, f32) {
     (w, fixed + view)
 }
 
-pub(crate) fn draw_result(c: &Card, m: &M, v: &ResultView, t: f64) -> Option<Action> {
+/// 返回 (动作, 新的滚动偏移)。偏移必须由调用方写回状态：只在局部变量里用会导致每帧从 0 开始，
+/// 滚轮等于没用（长回复永远跳回顶部）。
+pub(crate) fn draw_result(c: &Card, m: &M, v: &ResultView, t: f64) -> (Option<Action>, f32) {
     let w = super::CARD_W;
     let (alpha, dy) = super::entrance(v.age);
     let c = c.faded(alpha).shifted(0.0, dy);
     let mut action = None;
     crate::extras::agent_icon(&c, PAD + m::ICON / 2.0, m::HEAD_TOP + m::ICON / 2.0, m::ICON, v.provider);
     galley(&c, PAD + 32.0, m::HEAD_TOP + 1.0, &m.fit(v.kicker, m::TITLE, W::Semibold, CONTENT_W - 90.0), theme::WHITE);
-    let hint = if v.copied.is_some() { "已复制到剪贴板" } else { "可滚动阅读 · 只读，不落盘" };
-    let hint_color = if v.copied.is_some() { theme::AGENT_OK } else { theme::AGENT_SUBTLE };
-    galley(&c, PAD + 32.0, m::HEAD_TOP + 1.0 + m::TITLE * 1.5, &m.line(hint, m::SUBTITLE, W::Regular), hint_color);
+    // 说明层没有正文：副标题直接说明这是本机生成的解释，不要暗示「只读正文」。
+    let sub = if v.hint {
+        "本机说明 · 不含回复内容"
+    } else if v.copied.is_some() {
+        "已复制到剪贴板"
+    } else {
+        "可滚动阅读 · 只读，不落盘"
+    };
+    let sub_color = if v.copied.is_some() { theme::AGENT_OK } else { theme::AGENT_SUBTLE };
+    galley(&c, PAD + 32.0, m::HEAD_TOP + 1.0 + m::TITLE * 1.5, &m.line(sub, m::SUBTITLE, W::Regular), sub_color);
     let body_top = m::HEAD_TOP + m::ICON + 10.0;
     let segs = parse(m, v.text, w - PAD * 2.0);
     let content: f32 = {
@@ -282,10 +308,13 @@ pub(crate) fn draw_result(c: &Card, m: &M, v: &ResultView, t: f64) -> Option<Act
     }
     viewport.bar(&c, w, 1.0);
     let fy = h - FOOT_PAD - BTN_H;
-    let specs = [("agent-result-copy", "复制内容", false), ("agent-result-close", "关闭", true)];
-    if let Some(i) = widgets::draw_footer(&c, fy, w, &specs, true) {
-        action = Some(if i == 0 { Action::CopyResult } else { Action::Dismiss });
+    // 说明层没有正文可复制，只留「关闭」：有「复制内容」会让人以为正文只是没显示出来。
+    let copy_close: &[(&str, &str, bool)] = &[("agent-result-copy", "复制内容", false), ("agent-result-close", "关闭", true)];
+    let close_only: &[(&str, &str, bool)] = &[("agent-result-close", "关闭", true)];
+    let specs = if v.hint { close_only } else { copy_close };
+    if let Some(i) = widgets::draw_footer(&c, fy, w, specs, true) {
+        action = Some(if v.hint || i == 1 { Action::Dismiss } else { Action::CopyResult });
     }
     let _ = t;
-    action
+    (action, scroll)
 }

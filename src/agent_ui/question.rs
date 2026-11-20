@@ -522,7 +522,10 @@ pub(crate) fn draw_question(c: &Card, m: &M, v: &mut QuestionView, scroll: f32, 
         widgets::progress(&c, PAD, y + BTN_H + 5.0, w - PAD * 2.0, 2.0, v.age);
     }
 
-    let clicked = widgets::draw_footer_with_enabled(&c, y, w, &layout.footer, !busy, |id| match id {
+    // 同审批卡：提交中/结果未知时只禁用会重复提交的按钮，「回客户端」始终可点。
+    let clicked = widgets::draw_footer_with_enabled(&c, y, w, &layout.footer, true, |id| match id {
+        "agent-return" => true,
+        _ if busy => false,
         // 下一题要求本题已作答；检查答案/确认提交要求所有题都已作答。
         "agent-next" => layout.ready_now,
         "agent-review" | "agent-review-submit" => layout.all_ready,

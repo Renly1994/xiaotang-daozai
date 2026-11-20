@@ -1191,6 +1191,10 @@ impl H {
     }
     fn frame(&mut self, events: Vec<egui::Event>) {
         self.t += 1.0 / 60.0;
+        // 与生产 main.rs 一致：每帧先让 agent_cards 收桥接事件并做状态收口，再跑一帧 UI。
+        // 否则「提交失败保留卡片」这类保护逻辑在测试里根本走不到，用例会假绿。
+        let finished=self.app.agent_cards.update(&self.app.settings,&self.ctx);
+        for (provider,text) in finished {self.app.agent_finished(provider,text);}
         let mut raw = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(crate::app::CANVAS_W, WIN_H))),
             time: Some(self.t),
@@ -6998,7 +7002,12 @@ fn agent_notice_question_is_answered_inside_the_island(){
         assert!(review.iter().any(|text|text==label),"审阅页缺少 {label}；当前文字：{review:?}");
     }
     h.click_text("确认提交");h.frame(vec![]);
-    assert_eq!(h.app.agent_cards.count(),0);
+    // 测试环境没有桥接子进程，提交必然失败：请求必须保留并显示「结果未知」。
+    // 修复前这里会静默消失（draw_details 先取走请求，decide 又去队首找不到它），
+    // 宿主还在等答案；因此这条断言从 count()==0 改成「卡片留下 + 明说结果未知」。
+    assert_eq!(h.app.agent_cards.count(),1,"没有桥接时提交失败，请求必须保留");
+    let texts:Vec<String>=h.shapes.iter().filter_map(|s|if let egui::Shape::Text(t)=&s.shape{Some(t.galley.text().to_owned())}else{None}).collect();
+    assert!(texts.iter().any(|text|text.contains("提交结果未知")),"提交失败必须显示结果未知；当前文字：{texts:?}");
 }
 
 #[test]
@@ -9471,6 +9480,14 @@ fn agent_cards_gallery(){
     let mut h=H::new();h.app.settings.dsh_notifications=true;h.app.settings.agent.expanded=true;h.app.settings.agent.content=2;
     h.app.agent_finished(crate::agent_notice::Provider::Dsh,"## 本轮完成\n- 更新网关超时与重试\n- 跑了 12 个回归用例\n\n```bash\ncargo test --lib\n```\n全部通过。".into());
     shoot_agent(&mut h,&dest,"done-expanded",60);
+    // 9b. 完成内容=仅状态（用户真实配置）：卡片带轻提示，点开是本机说明层而不是空白。
+    let mut h=H::new();h.app.settings.dsh_notifications=true;h.app.settings.agent.expanded=true;h.app.settings.agent.content=0;
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,String::new());
+    for _ in 0..60{h.frame(vec![]);}
+    shoot_agent(&mut h,&dest,"done-expanded-no-body",60);
+    h.click_text("查看回复");
+    for _ in 0..45{h.frame(vec![]);}
+    shoot_agent(&mut h,&dest,"done-result-no-body",60);
     // 10. 详情卡「收起」后的待处理提示卡
     let mut h=H::new();h.app.settings.dsh_notifications=true;
     approval(&mut h,"b1",serde_json::json!({"tool":"bash","operation":"{\"cmd\":\"npm run build\"}","cwd":"C:\\work\\web"}));
@@ -9485,7 +9502,7 @@ fn agent_cards_gallery(){
     h.click_text("仅允许这一次");
     shoot_agent(&mut h,&dest,"approval-uncertain",40);
     // 12. 结果查看
-    let mut h=H::new();h.app.settings.dsh_notifications=true;h.frame(vec![]);
+    let mut h=H::new();h.app.settings.dsh_notifications=true;h.app.settings.agent.content=2;h.frame(vec![]);
     h.app.agent_cards.open_result(crate::agent_notice::Provider::Dsh,"## 本轮完成\n- 更新网关超时与重试\n- 跑了 12 个回归用例\n\n```bash\ncargo test --lib\n```\n\n全部通过。".into());
     h.app.open_agent_panel();
     shoot_agent(&mut h,&dest,"result",70);
@@ -9521,6 +9538,144 @@ fn agent_completion_result_opens_scrollable_layer_and_closes_with_the_panel(){
 }
 
 #[test]
+fn done_without_body_still_opens_an_explanatory_result_layer(){
+    // 回归：用户配置「展开结果卡 + 完成内容=仅状态」时，展开卡上的「查看回复」曾经是死按钮
+    // （extras::draw_notice 要求 content>0 才 open_result，否则整段静默）。
+    // 现在：卡上先给轻提示；点开是本机说明层（解释原因 + 下一步），不是空白也不是假正文。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=0;
+    h.app.settings.agent.expanded=true;
+    h.app.settings.agent.dwell=15;
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,"这段正文在 content=0 时不会进入岛上".into());
+    for _ in 0..60{h.frame(vec![]);}
+    assert!(h.app.notice.is_some(),"完成通知应当出现在岛上");
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t=="查看回复"),"完成卡必须有可见的「查看回复」按钮：{texts:?}");
+    assert!(texts.iter().any(|t|t.contains("未接收回复正文")),"点击之前就要在摘要行给出轻提示：{texts:?}");
+    h.click_text("查看回复");
+    for _ in 0..45{h.frame(vec![]);}
+    assert!(h.app.result_active(),"content=0 点「查看回复」也必须打开结果层，不能是死按钮");
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t==crate::agent_cards::NO_BODY_RESULT_TITLE),"说明层标题要说明没有正文：{texts:?}");
+    assert!(texts.iter().any(|t|t.contains("完成内容")),"说明层要解释原因并给出下一步：{texts:?}");
+    assert!(texts.iter().any(|t|t=="关闭"),"说明层必须能关闭：{texts:?}");
+    assert!(!texts.iter().any(|t|t=="复制内容"),"说明层没有正文，不该出现「复制内容」：{texts:?}");
+    assert!(!texts.iter().any(|t|t.contains("这段正文")),"content=0 不得显示未接收的正文：{texts:?}");
+    // 关闭后必须真的收起，不能留一个空岛。
+    h.click_text("关闭");
+    for _ in 0..40{h.frame(vec![]);}
+    assert!(!h.app.result_active(),"关闭后结果层应消失");
+    assert!(!h.app.open,"关闭说明层后岛体应收起");
+}
+
+#[test]
+fn done_with_body_keeps_the_full_reply_in_the_result_layer(){
+    // content=2 的既有行为不能被「无正文说明层」带偏：标题、正文、复制按钮都要在。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=2;
+    h.app.settings.agent.expanded=true;
+    h.app.settings.agent.dwell=15;
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,"## 本轮完成\n- 更新连接池上限到 64\n\n最后一行正文。".into());
+    for _ in 0..60{h.frame(vec![]);}
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t.contains("更新连接池上限")),"完成卡应有摘要：{texts:?}");
+    assert!(!texts.iter().any(|t|t.contains("未接收回复正文")),"有正文时不该出现无正文提示：{texts:?}");
+    h.click_text("查看回复");
+    for _ in 0..45{h.frame(vec![]);}
+    assert!(h.app.result_active(),"有正文时应打开结果层");
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t=="本轮回复"),"有正文的结果层标题保持「本轮回复」：{texts:?}");
+    assert!(texts.iter().any(|t|t.contains("更新连接池上限")),"结果层必须显示正文条目：{texts:?}");
+    assert!(texts.iter().any(|t|t=="最后一行正文。"),"结果层最后一段正文要完整：{texts:?}");
+    assert!(texts.iter().any(|t|t=="复制内容"),"有正文时保留「复制内容」：{texts:?}");
+    h.click_text("关闭");
+    for _ in 0..40{h.frame(vec![]);}
+    assert!(!h.app.result_active(),"关闭后结果层应消失");
+    assert!(!h.app.open,"关闭结果层后岛体应收起");
+}
+
+#[test]
+fn turning_completion_content_off_closes_an_open_reply_layer(){
+    // 隐私边界：已经打开的正文层在「完成内容」被改成仅状态后必须立刻关闭；
+    // 反过来，本机说明层不含正文，改成 0 后仍然保留（否则点了就消失，又成死点击）。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=2;
+    h.app.settings.agent.expanded=true;
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,"敏感正文".into());
+    for _ in 0..60{h.frame(vec![]);}
+    h.click_text("查看回复");
+    for _ in 0..45{h.frame(vec![]);}
+    assert!(h.app.result_active(),"有正文时应打开结果层");
+    h.app.settings.agent.content=0;
+    for _ in 0..10{h.frame(vec![]);}
+    assert!(!h.app.result_active(),"content 改成仅状态后正文层必须关闭");
+    assert!(!h.app.agent_cards.result_open());
+    assert!(!h.app.open,"正文层关闭后岛体应收起");
+}
+
+#[test]
+fn allowing_without_a_bridge_keeps_the_card_and_reports_unknown(){
+    // 回归：draw_details 先把请求从队列取走，再走提交；旧实现失败分支去队首找它，
+    // 永远找不到 → 既不标记「结果未知」也不写 error，卡片直接消失，而宿主还在等回复。
+    // 这里走真实 UI 路径：没有桥接子进程时点「仅允许这一次」，卡片必须留下并说明结果未知。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.interactive=true;
+    let settings=h.app.settings.clone();
+    h.app.agent_cards.receive(serde_json::json!({"id":"no-bridge","provider":"dsh","kind":"approval",
+        "data":{"tool":"bash","operation":"{\"cmd\":\"git status\"}","cwd":"C:\\work"}}),&settings);
+    for _ in 0..40{h.frame(vec![]);}
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t=="仅允许这一次"),"审批卡应自动展开：{texts:?}");
+    h.click_text("仅允许这一次");
+    for _ in 0..40{h.frame(vec![]);}
+    assert_eq!(h.app.agent_cards.count(),1,"提交失败时请求不能消失，宿主还在等回复");
+    assert!(h.app.agent_detail_active(),"结果未知时详情卡要继续显示");
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t.contains("提交结果未知")),"必须明确告知结果未知：{texts:?}");
+    assert!(texts.iter().any(|t|t.contains("提交失败")),"错误行要写清失败原因与下一步：{texts:?}");
+}
+
+#[test]
+fn result_layer_keeps_its_scroll_between_frames(){
+    // 回归（D03）：draw_result 的滚动偏移以前只存局部变量，Cards::result_scroll 从不写回，
+    // 长回复每帧都跳回顶部，滚轮等于没用。现在偏移要跨帧保持。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=2;
+    h.app.settings.agent.expanded=true;
+    h.app.settings.agent.dwell=15;
+    let body=(1..=40).map(|i|format!("第 {i} 段正文，用来把结果层撑到需要滚动的位置。")).collect::<Vec<_>>().join("\n\n")
+        + "\n\n最后一段标记：滚动之后应当能看到。";
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,body);
+    for _ in 0..60{h.frame(vec![]);}
+    h.click_text("查看回复");
+    for _ in 0..45{h.frame(vec![]);}
+    assert!(h.app.result_active(),"结果层应打开");
+    let marker=|h:&H|h.shapes.iter().any(|s|match &s.shape{
+        egui::Shape::Text(t)=>t.galley.text().contains("最后一段标记")&&s.clip_rect.contains(t.visual_bounding_rect().center()),
+        _=>false});
+    assert!(!marker(&h),"长回复的最后一段一开始应在视口外");
+    // 滚轮只在指针位于正文区时生效：拿一个视口内可见的段落下手。
+    let anchor=h.shapes.iter().find_map(|s|match &s.shape{
+        egui::Shape::Text(t) if t.galley.text().starts_with("第 3 段")=>Some(t.visual_bounding_rect().center()),
+        _=>None}).expect("结果层应显示前几段正文");
+    for _ in 0..20{h.hover(anchor,0.02);h.wheel(-40.0);}
+    assert!(marker(&h),"向上滚动后最后一段应可见");
+    // 关键：不再滚动的下一帧不能回到顶部（修复前每帧从 0 重新开始）。
+    for _ in 0..3{h.frame(vec![]);}
+    assert!(marker(&h),"滚动位置必须跨帧保持，否则滚轮没有意义");
+}
+
+#[test]
 fn collapsing_a_card_falls_back_to_the_pending_banner_immediately(){
     // 回归：点「收起」后如果只把 details 置 false，面板会等 forced_open 到期才收，
     // 中间露出一个没有内容的空面板（真机上是媒体页）。这里要求立刻回到待处理提示卡。
@@ -9541,6 +9696,65 @@ fn collapsing_a_card_falls_back_to_the_pending_banner_immediately(){
     assert!(!h.app.open,"收起后岛体应回到收起态");
     let texts=h.strings();
     assert!(texts.iter().any(|t|t=="查看并审批"),"应回到待处理提示卡：{texts:?}");
+}
+
+
+#[test]
+fn banner_jump_chip_always_reports_a_result(){
+    // 回归：收起态提示卡上的「切换到客户端」以前在 extras.rs 里是空分支，点了完全没反应。
+    // 现在必须走真实跳转，并把结论（已在前台/已切到/没找到/失败原因）常驻显示。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    // 测试期拦截真实 Win32 跳转：cargo test 不能抢用户正在用的前台窗口。
+    crate::agent_jump::intercept(true);
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.interactive=true;
+    let settings=h.app.settings.clone();
+    h.app.agent_cards.receive(serde_json::json!({"id":"jump-me","provider":"dsh","kind":"approval",
+        "data":{"tool":"bash","reason":"确认后执行","cwd":"C:\\work","operation":"{\"cmd\":\"ls\"}"}}),&settings);
+    for _ in 0..40 {h.frame(vec![]);}
+    // 收起详情，回到带跳转 chip 的待处理提示卡。
+    let left=WIN_W/2.0-crate::agent_ui::CARD_W/2.0;
+    h.click(Pos2::new(left+crate::agent_ui::CARD_W-18.0-11.0,13.0+5.0+11.0));
+    for _ in 0..40 {h.frame(vec![]);}
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t=="查看并审批"),"收起后应回到提示卡：{texts:?}");
+    assert!(h.app.jump_note_text().is_none(),"还没点跳转就不该有结论");
+    h.click_text("切换到客户端");
+    for _ in 0..10 {h.frame(vec![]);}
+    let note=h.app.jump_note_text().unwrap_or_else(||panic!("收起态提示卡的跳转必须产生可见结论，不能是空实现"));
+    assert!(note.contains("DeepSeek Harness"),"跳转结论要说明目标客户端：{note}");
+    crate::agent_jump::intercept(false);
+}
+
+#[test]
+fn result_layer_scroll_persists_and_never_flips_the_island_page(){
+    // 回归：结果层滚动偏移以前只存在局部变量里，每帧从 0 重新开始（长回复滚不动）；
+    // 同时滚轮会被「滚轮翻页」逻辑吞掉，滚一下就翻到下一张岛页。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=2;
+    h.app.settings.agent.expanded=true;
+    h.app.settings.agent.dwell=15;
+    let body=(1..=120).map(|i|format!("第 {i} 行正文，用来撑出结果层滚动条。")).collect::<Vec<_>>().join("\n");
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,body);
+    for _ in 0..60 {h.frame(vec![]);}
+    h.click_text("查看回复");
+    for _ in 0..45 {h.frame(vec![]);}
+    assert!(h.app.result_active(),"点查看回复应打开结果层");
+    assert_eq!(h.app.agent_cards.result_scroll(),0.0,"刚打开时应停在顶部");
+    let page=h.app.page();
+    let p=Pos2::new(WIN_W/2.0,220.0);
+    h.cursor=Some(p);
+    h.frame(vec![egui::Event::PointerMoved(p)]);
+    for _ in 0..6 {h.wheel(-40.0);}
+    let scrolled=h.app.agent_cards.result_scroll();
+    assert!(scrolled>0.0,"滚轮必须真的滚动结果层：偏移 {scrolled}");
+    assert_eq!(h.app.page(),page,"结果层打开时滚轮不能翻岛页");
+    for _ in 0..5 {h.frame(vec![]);}
+    assert!((h.app.agent_cards.result_scroll()-scrolled).abs()<0.5,
+        "滚动偏移必须写回状态，不能每帧回到顶部：{} -> {}",scrolled,h.app.agent_cards.result_scroll());
 }
 
 /// 逐帧导出卡片出现过程：用来检查展开动画期间内容是否溢出岛体（一次性排查用，默认忽略）。

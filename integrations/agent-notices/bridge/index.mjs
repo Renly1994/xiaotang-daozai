@@ -29,6 +29,9 @@ export function apply(ctx) {
     if (event.type === 'tool/result') calls.get(session)?.delete(data.message?.toolCallId??data.toolCallId??callId);
     if (event.type === 'turn/end') {
       const text=last.get(session) ?? ''; last.delete(session); calls.delete(session);
+      // 子 agent 会话结束不是用户关心的「本轮结束」：根会话的 turn/end 会再推一次，
+      // 不滤掉的话每跑一个 subagent 岛上就多弹一张完成卡（用户只会看到一串「本轮已结束」）。
+      if (session?.header?.origin === 'subagent') return;
       void channel.exchange('dsh','finished',mode=>withSession({text:mode===2?text:mode===1?text.slice(0,1200):''},session))
         .then(result=>{if (!result?.done) bridge.notify('dsh','finished');});
     }

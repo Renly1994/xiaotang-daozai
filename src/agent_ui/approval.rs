@@ -205,8 +205,10 @@ pub(crate) fn draw_approval(c: &Card, m: &M, v: &ApprovalView, scroll: f32, t: f
         // 提交中/结果未知：底部给一条不确定进度条，让「点了」这件事有可见反馈。
         widgets::progress(&c, PAD, footer_y + BTN_H + 5.0, w - PAD * 2.0, 2.0, t as f32);
     }
-    if let Some(index) = widgets::draw_footer_with_enabled(&c, footer_y, w, &layout.footer, !busy, |id| {
-        id != "agent-allow" || allow_ready
+    // 提交中/结果未知时只禁用「会造成第二次决定」的按钮；「回客户端」必须始终可点——
+    // 结果未知的提示语就是「请回客户端确认」，按钮却点不动是死路。
+    if let Some(index) = widgets::draw_footer_with_enabled(&c, footer_y, w, &layout.footer, true, |id| {
+        id == "agent-return" || (!busy && (id != "agent-allow" || allow_ready))
     }) {
         action = Some(match layout.footer[index].0 {
             "agent-allow" => Action::Allow,

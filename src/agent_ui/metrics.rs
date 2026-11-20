@@ -182,11 +182,13 @@ pub(crate) fn button(
 /// 顶部小胶囊（跳转/收起一类的轻操作）。
 pub(crate) fn chip(c: &Card, x: f32, y: f32, w: f32, h: f32, id: &str, label: &str, accent: Color32) -> bool {
     let r = c.hit(x, y, w, h, id);
-    let (hover, _) = c.hover_t(&r);
-    let fill = Color32::from_white_alpha((12.0 + 14.0 * hover) as u8);
+    let (hover, press) = c.hover_t(&r);
+    // 按下立刻提亮压缩：跳转本身可能没有可见变化（客户端已在前台），至少让用户确认点到了。
+    let fill = Color32::from_white_alpha((12.0 + 14.0 * hover + 20.0 * press) as u8);
+    let c = c.scaled(x + w / 2.0, y + h / 2.0, 1.0 - 0.02 * press);
     c.fill(x, y, w, h, h / 2.0, fill);
-    c.stroke(x, y, w, h, h / 2.0, 1.0, Color32::from_white_alpha(26));
-    c.centered_text(x + w / 2.0, y + h / 2.0, label, 9.5, W::Semibold, crate::paint::mix(theme::AGENT_MUTED, accent, hover), crate::paint::H::Center);
+    c.stroke(x, y, w, h, h / 2.0, 1.0, Color32::from_white_alpha((26.0 + 30.0 * press) as u8));
+    c.centered_text(x + w / 2.0, y + h / 2.0, label, 9.5, W::Semibold, crate::paint::mix(theme::AGENT_MUTED, accent, hover.max(press)), crate::paint::H::Center);
     r.clicked()
 }
 

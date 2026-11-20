@@ -859,6 +859,8 @@ pub struct App {
     // 其它
     toast: Option<(String, f64)>,
     toast_below: bool,
+    /// 最近一次跳转结论：toast 只有 2.4 秒，详情卡/提示卡打开时需要常驻一行「为什么没跳成」。
+    jump_note: Option<(String, f64)>,
     last_input: f64,
     system_idle: Option<f64>,
     last_cursor: Option<Pos2>,
@@ -1010,7 +1012,7 @@ impl App {
             },
             notification_bell_until: 0.0, notification_bell_at: -10.0, notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, result_was_active:false, pending_messengers:Vec::new(), messenger_scroll:0.0, alerts: Default::default(), history: Default::default(), pending: vec![],
             todo_first: 0, todo_choosing: false, pet: Default::default(), last_drink: None,
-            toast: None, toast_below: false,
+            toast: None, toast_below: false, jump_note: None,
             last_input: 0.0, system_idle: None,
             last_cursor: None,
             pet_a: 0.0,
@@ -1045,6 +1047,19 @@ impl App {
     pub fn say(&mut self, msg: impl Into<String>) {
         self.toast = Some((msg.into(), self.t));
         self.toast_below = false;
+    }
+
+    /// 测试观察用：最近一次跳转结论（生产只在卡片里绘制）。
+    #[cfg(test)]
+    pub(crate) fn jump_note_text(&self) -> Option<&str> { self.jump_note.as_ref().map(|(text,_)|text.as_str()) }
+    /// 跳转结论：详细卡/提示卡打开时在岛体下方常驻一行。
+    /// 短暂 toast 在卡片占满岛体时看不到，而「已在前台/切换失败」恰恰是用户最需要看到的结论。
+    pub(crate) fn jump_feedback(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        if message.trim().is_empty() {
+            return;
+        }
+        self.jump_note = Some((message, self.t));
     }
 
     pub fn messenger_unavailable(&mut self, message: impl Into<String>) {
@@ -1901,6 +1916,10 @@ impl App {
             if let Some(a)=self.notice.as_mut().filter(|a|matches!(a.source,crate::extras::AlertSource::AgentDone(_))){a.at+=f64::from(elapsed);}
         }
         self.tick_alerts();
+        // 跳转失败的原因已经常驻在岛体下方，同文案的 toast 不必再叠一层（extras 的 jump_error 通道）。
+        let duplicate_jump_toast=self.jump_note.as_ref().zip(self.toast.as_ref())
+            .is_some_and(|((note,_),(text,_))|note==text);
+        if duplicate_jump_toast {self.toast=None;}
         self.agent_cards.hovering=false;
         let hud_active=self.notice.clone();
         let hud_changed=match (&hud_active,&self.hud_notice) {
@@ -2012,7 +2031,9 @@ impl App {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.is_editing() {
             self.cancel_edit();
         }
-        if (!self.is_editing() || self.todo_choosing) && page_hover && self.open && self.reveal > 0.95 {
+        // 审批详情/提问/结果层占用面板时，滚轮和左右方向键要留给卡片正文自己滚，
+        // 不能被“滚轮翻页”吞掉（否则结果层里滚一下就翻到下一张岛页，正文永远滚不动）。
+        if (!self.is_editing() || self.todo_choosing) && !self.agent_panel_active() && page_hover && self.open && self.reveal > 0.95 {
             let (scroll, left, right, esc) = ctx.input(|i| (i.raw_scroll_delta.y, i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight), i.key_pressed(egui::Key::Escape)));
             if esc { self.hover_lock = true; }
             if (left || right) && !self.todo_choosing {
@@ -2267,14 +2288,28 @@ impl App {
             if !self.toast_below {self.toast_layer(&c,106.0);}
         }
         // 岛下的确认提示使用独立裁剪区域，收起时跟随岛体下沿。
-        let floating_toast=if self.toast_below && self.toast.is_some() {
-            // 侧边停靠：提示出现在胶囊正下方，靠边时向内挪，保证完整显示。
-            let toast_origin=if side {
-                let center=if dock==model::Dock::Left {panel.center().x.max(win.left()+90.0)} else {panel.center().x.min(win.right()-90.0)};
-                Pos2::new(center-PW/2.0,panel.top())
-            } else {origin};
-            self.toast_layer(&Card::new(ui,toast_origin,win),h+8.0)
+        // 详情卡/提示卡占满岛体时，内容层的 toast 不会画（见上面的 toast_layer 调用条件），
+        // 跳转失败或「已在前台」的提示就会整条消失。改成画在岛体下方，保证一定有反馈。
+        // 侧边停靠：提示出现在胶囊正下方，靠边时向内挪，保证完整显示。
+        let toast_origin=if side {
+            let center=if dock==model::Dock::Left {panel.center().x.max(win.left()+90.0)} else {panel.center().x.min(win.right()-90.0)};
+            Pos2::new(center-PW/2.0,panel.top())
+        } else {origin};
+        // 岛体很高（详情卡接近窗口上限）时下方放不下提示：toast 压到面板底部，
+        // 跳转结常驻提示则放进面板内、底部按钮行的上方，绝不覆盖「仅允许这一次/拒绝/回客户端」。
+        let stacked_under=side || h+8.0+64.0<=WIN_H;
+        let toast_y=if stacked_under {h+8.0} else {(h-34.0).max(44.0)};
+        let note_y=stacked_under.then_some(h+38.0);
+        let floating_toast=if (self.toast_below || agent_details || banner) && self.toast.is_some() {
+            self.toast_layer(&Card::new(ui,toast_origin,win),toast_y)
         }else{None};
+        // 跳转结常常驻提示：toast 只有 2.4 秒，失败原因和「已在前台」必须一直看得到。
+        let jump_note=if (agent_details || banner) && self.jump_note.is_some() {
+            self.jump_note_layer(&Card::new(ui,toast_origin,win),note_y)
+        } else {
+            if !agent_details && !banner {self.jump_note=None;}
+            None
+        };
         if (self.adding||self.editing.is_some()) && reveal > 0.9 && self.page == 4 && self.page_e() > 0.25 {
             self.input_field(ui, origin, &mut cmds);
         }
@@ -2338,6 +2373,7 @@ impl App {
                 shapes.push(GlassShape::Round(rel(r),radius));
             }
             if let Some(r)=floating_toast {shapes.push(GlassShape::Round(rel(r),11.0));}
+            if let Some(r)=jump_note {shapes.push(GlassShape::Round(rel(r),11.0));}
             shapes.extend(tooltips.iter().map(|r|GlassShape::Round(rel(*r),6.0)));
             shapes
         });
@@ -2391,7 +2427,7 @@ impl App {
             });
         }
         FrameOut {
-            region: rel(floating_toast.into_iter().chain(self.shelf_menu_rect.map(|r|r.union(r + ctx.style().visuals.popup_shadow.margin()).expand(1.0 / ctx.pixels_per_point()))).fold(region,Rect::union).intersect(ui.max_rect())),
+            region: rel(floating_toast.into_iter().chain(jump_note).chain(self.shelf_menu_rect.map(|r|r.union(r + ctx.style().visuals.popup_shadow.margin()).expand(1.0 / ctx.pixels_per_point()))).fold(region,Rect::union).intersect(ui.max_rect())),
             glass: glass_region,
             hit: rel(next_hit),
             page_scroll_area:self.page_scroll_area.map(rel),
@@ -3335,10 +3371,36 @@ impl App {
         Some(tc.rect(PW/2.0-w/2.0,y,w,22.0))
     }
 
+    /// 跳转结常常驻提示行：按宽度换行（失败原因往往一句说不完），最长保留 60 秒，
+    /// 卡片关闭或下一次跳转时被替换。toast 只有 2.4 秒，而「为什么没切过去」需要一直看得到。
+    fn jump_note_layer(&mut self, c: &Card, below_y: Option<f32>) -> Option<Rect> {
+        let (message, at) = self.jump_note.clone()?;
+        if self.t - at > 60.0 {
+            self.jump_note = None;
+            return None;
+        }
+        let ink = Color32::from_rgb(255, 206, 180);
+        let galley = c.ui.painter().layout(message, crate::theme::font(size::BODY, W::Regular), ink, PW - 40.0);
+        let note_w = galley.size().x + 26.0;
+        let note_h = (galley.size().y + 8.0).max(22.0);
+        let x = PW / 2.0 - note_w / 2.0;
+        // 岛体下方放不下（卡片接近窗口上限）时放到面板内部：底部按钮行（BTN_H=30、FOOT_PAD=16）
+        // 的上方，宁可压住正文最后一行也不能挡住决定按钮。
+        let y = below_y.unwrap_or_else(|| (self.h.pos - 46.0 - note_h - 6.0).max(46.0));
+        c.fill(x, y, note_w, note_h, 11.0, Color32::from_rgb(58, 36, 32));
+        c.painter.galley(c.pos(x + 13.0, y + 4.0), galley, ink);
+        Some(c.rect(x, y, note_w, note_h))
+    }
+
     // ---------------------------------------------------------------
     // 每帧推进：番茄钟、饮水提醒、跨天
     // ---------------------------------------------------------------
     fn tick(&mut self, env: &Env, dt: f32, elapsed: f32) {
+        // 跳转结果必须每条都有反馈：成功也要说（尤其「客户端已在最前台」这种情况），
+        // 否则用户点「切换到客户端」后看不到任何变化，只能理解成按钮坏了。
+        if let Some(message)=crate::agent_jump::take_feedback(){self.jump_feedback(message);}
+        // 客户端协议（dsh://open）兜底有 1-2 秒延迟：宽限期到了再核对一次前台并给结论。
+        if let Some(verdict)=crate::agent_jump::poll_protocol(std::time::Instant::now()){self.jump_feedback(verdict);}
         if self.toast.as_ref().is_some_and(|(_,at)|self.t-at>2.4){self.toast=None;}
         // 跳转后先用本地目标位置显示；播放器回报追上了、换歌了或超时就交还真实位置。
         let seek_done=self.music_seek_ui.as_ref().is_some_and(|(target,title)|{
