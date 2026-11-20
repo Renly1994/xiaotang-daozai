@@ -59,6 +59,10 @@ pub mod composition;
 #[cfg(windows)]
 pub mod layered;
 #[cfg(windows)]
+pub mod gpu_glass;
+#[cfg(windows)]
+pub mod wgc;
+#[cfg(windows)]
 pub mod system;
 pub mod paint;
 pub mod shape;

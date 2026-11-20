@@ -31,6 +31,12 @@ impl EdgeMap {
     fn code(self) -> f32 { match self.dock { Dock::Top => 0.0, Dock::Left => 1.0, Dock::Right => 2.0 } }
 }
 
+/// 落影四角圆心相对本体圆心的外扩量。模拟顶部光源：四角只随 dy 平移，不横向漂移。
+/// `dy` 保持 0，保证四角过渡完全对称（岛贴着屏幕顶边，向下落影方向感收益极小）。
+pub(crate) fn shadow_expansion(grow: f32) -> (f32, f32) {
+    (grow * 0.6, 0.0)
+}
+
 /// 贴着 `dock` 边缘的轮廓（屏幕坐标）。
 pub fn outline_docked(rect: Rect, dock: Dock, flare: f32, flare_h: f32, radius: f32) -> Vec<Pos2> {
     let (map, frame) = EdgeMap::of(rect, dock);

@@ -57,6 +57,10 @@ pub enum WgpuError {
     #[cfg(feature = "winit")]
     #[error(transparent)]
     HandleError(#[from] ::winit::raw_window_handle::HandleError),
+
+    #[cfg(windows)]
+    #[error("DirectComposition 初始化失败: {0}")]
+    DirectComposition(String),
 }
 
 /// Access to the render state for egui.

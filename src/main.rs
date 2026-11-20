@@ -142,6 +142,8 @@ impl Shell {
         diagnostics::startup("加载本地配置");
         let mut app = App::new(&cc.egui_ctx, Options::default());
         app.render_compat_running=running_compat;
+        // 液态玻璃据此决定走不走 GPU 折射（只有兼容渲染后端才有 wgpu target format）。
+        app.wgpu_format=cc.wgpu_render_state.as_ref().map(|state|state.target_format);
         #[cfg(feature="record")] let quota_demo=std::env::var("DAOZAI_QUOTA_DEMO").is_ok();
         #[cfg(not(feature="record"))] let quota_demo=false;
         diagnostics::startup("初始化额度配置");
@@ -337,6 +339,7 @@ impl Shell {
             bt: self.bt.clone(),
             bt_ready: self.bt_ready,
             screen,
+            window_origin: [origin.x, origin.y],
             backdrop,
             glass_blur,
             opaque_surface: {
@@ -1087,6 +1090,47 @@ fn run() -> eframe::Result<()> {
         .with_taskbar(false)
         .with_always_on_top()
         .with_visible(false);
-    let opts = eframe::NativeOptions { viewport, vsync: !cfg!(windows), ..Default::default() };
+    let mut opts = eframe::NativeOptions { viewport, vsync: !cfg!(windows), ..Default::default() };
+    // 液态玻璃可选「优先独立显卡」：核显没有独立显存，玻璃纹理/帧缓冲会从系统内存分配
+    // （实测同一构建包核显 548MB / 独显 274MB）。显卡启动期只选一次，故在建窗前读一次设置。
+    // 用 is_surface_supported 过滤保证能呈现到本窗口；虚拟/远程/软件适配器垫底。
+    // 非液态皮肤或用户关掉这项时，完全不动 wgpu 默认策略。
+    let boot = daozai::model::Settings::load();
+    if boot.skin == daozai::model::Skin::Liquid && boot.liquid_prefer_dgpu {
+        opts.wgpu_options.wgpu_setup = eframe::egui_wgpu::WgpuSetup::CreateNew(
+            eframe::egui_wgpu::WgpuSetupCreateNew {
+                native_adapter_selector: Some(std::sync::Arc::new(
+                    |adapters: &[eframe::wgpu::Adapter],
+                     surface: Option<&eframe::wgpu::Surface<'_>>|
+                     -> Result<eframe::wgpu::Adapter, String> {
+                        let score = |a: &eframe::wgpu::Adapter| -> i32 {
+                            let info = a.get_info();
+                            let name = info.name.to_lowercase();
+                            if name.contains("virtual") || name.contains("display adapter")
+                                || name.contains("basic render") || name.contains("remote") {
+                                return -100;
+                            }
+                            match info.device_type {
+                                eframe::wgpu::DeviceType::DiscreteGpu => 100,
+                                eframe::wgpu::DeviceType::IntegratedGpu => 50,
+                                eframe::wgpu::DeviceType::VirtualGpu => 10,
+                                eframe::wgpu::DeviceType::Cpu => 0,
+                                _ => 20,
+                            }
+                        };
+                        let mut best: Option<&eframe::wgpu::Adapter> = None;
+                        for a in adapters {
+                            if let Some(s) = surface {
+                                if !a.is_surface_supported(s) { continue; }
+                            }
+                            if best.map_or(true, |b| score(a) > score(b)) { best = Some(a); }
+                        }
+                        best.cloned().ok_or_else(|| "没有可用的 GPU 适配器".to_string())
+                    },
+                )),
+                ..Default::default()
+            },
+        );
+    }
     graphics::run(opts,|opts|eframe::run_native("岛仔", opts, Box::new(|cc| Ok(Box::new(Shell::new(cc))))))
 }

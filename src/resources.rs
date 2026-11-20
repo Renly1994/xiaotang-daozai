@@ -1,6 +1,19 @@
 //! 媒体后台任务的进程级上限，以及有容量限制的本机资源记录。
 use std::{path::{Path,PathBuf},sync::{atomic::{AtomicUsize,Ordering},Mutex},time::{Duration,Instant}};
 
+/// 深休眠/工作集回收时把本进程工作集页换出（`SetProcessWorkingSetSize(-1,-1)`）：
+/// 任务管理器「内存」列立刻下降；页被触碰时软缺页自动载回。只影响工作集驻留，
+/// 不改私有提交——D3D12 驱动该占多少提交还是多少，只是不再驻留物理内存。
+pub(crate) fn trim_working_set() {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::System::Threading::{GetCurrentProcess,SetProcessWorkingSetSize};
+        let _=SetProcessWorkingSetSize(GetCurrentProcess(),usize::MAX,usize::MAX);
+    }
+    #[cfg(not(windows))]
+    {}
+}
+
 pub struct Lane { pub name:&'static str, limit:usize, active:AtomicUsize, started:AtomicUsize, denied:AtomicUsize }
 impl Lane {
     pub const fn new(name:&'static str,limit:usize)->Self{Self{name,limit,active:AtomicUsize::new(0),started:AtomicUsize::new(0),denied:AtomicUsize::new(0)}}

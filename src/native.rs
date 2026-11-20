@@ -574,8 +574,14 @@ impl Window {
     pub fn blur_active(&self)->bool {self.blur}
     pub fn opaque_surface(&self)->bool {self.opaque_surface}
 
-    /// 是否需要每帧读回画面交给分层窗口（兼容后端，且分层窗口仍可用）。
-    pub fn wants_frames(&self)->bool {self.opaque_surface && !matches!(self.layering,Layering::Unavailable)}
+    /// 是否需要每帧读回画面交给分层窗口。
+    ///
+    /// 本项目恢复合并前行为：兼容后端直接由 owner 窗口按轮廓裁剪显示，
+    /// 不使用上游的分层读回窗口。它在 D3D12 下会把 GPU 整块矩形画面搬到上层，
+    /// 导致棋盘诊断出现直角矩形 + 外层圆角轮廓；而且每帧 Screenshot 读回再
+    /// present_frame 喂分层窗口，展开瞬间窗口从胶囊长到面板、开销骤增会掉帧。
+    /// 所有皮肤/渲染路径统一走交换链直出，故恒为 false。
+    pub fn wants_frames(&self)->bool { let _ = &self.layering; false }
 
     /// 交一帧读回的画面（RGBA，已预乘）。返回画面是否变化。
     /// 首帧看读回的画面有没有真正的透明像素：有就原样交给分层窗口；没有（部分 AMD 显卡的 OpenGL）
@@ -707,7 +713,9 @@ impl Window {
             if let Some(shapes)=glass.filter(|g|!g.is_empty()) {self.outline.set_shapes(shapes,ppp);}
         }
         // 不可靠的透明合成路径按真实轮廓裁剪，避免圆角外侧和透明画布留下黑底。
-        let outline_clip=self.opaque_surface && !matches!(self.layering,Layering::Active(_));
+        // DComp 透明交换链下窗口没有 GDI 表面，SetWindowRgn 用不上 —— 那两种都不裁剪。
+        // 与「停用分层读回」配套：owner 窗口始终按轮廓直出，不再因切到分层窗口而退回矩形。
+        let outline_clip=self.opaque_surface && !eframe::egui_wgpu::winit::direct_composition_active();
         match glass.filter(|_|outline_clip) {
             Some(shapes) => {
                 let key=glass_key(shapes,ppp);
@@ -841,7 +849,7 @@ mod tests {
     /// 部分 AMD 显卡的 OpenGL：读回的画面没有透明通道。过去这里直接退回轮廓裁剪（圆角、肩部全是锯齿），
     /// 现在要切到分层窗口，并按岛体轮廓补出带过渡的边缘 alpha。
     #[test]
-    fn opaque_readback_uses_outline_alpha_instead_of_jagged_clip(){
+    fn opaque_surface_stays_on_outline_clip_without_layered_window(){
         use crate::app::GlassShape;
         use eframe::egui::{pos2,Rect};
         use windows::Win32::Graphics::Gdi::{CreateRectRgn,DeleteObject,GetWindowRgn,PtInRegion};
@@ -853,27 +861,19 @@ mod tests {
                 let mut native=Window{hwnd,layering:Layering::Pending,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),page_wheel_hook:None,browser_state:(None,PollClock::now()),drag_capture:DragCapture::default(),glass:None,backdrop:None,blur:false,blur_unavailable:false,opaque_surface:true,outline:ShapeAlpha::default()};
                 let island=crate::shape::outline(Rect::from_min_max(pos2(80.0,0.0),pos2(320.0,60.0)),12.0,10.0,20.0);
                 let shapes=[GlassShape::Outline(island)];
-                // 读回的画面：岛体黑色、画布也是黑色，alpha 全部 255——和 AMD OpenGL 读回的一样。
                 let opaque=[0u8,0,0,255].repeat(w*h);
-                assert!(!native.present_frame([w,h],&opaque),"还没收到轮廓时先保持轮廓裁剪");
-                assert!(matches!(native.layering,Layering::Pending));
                 native.update((0.0,0.0,w as f32,h as f32),(80.0,0.0,240.0,60.0),None,None,Some(&shapes),1.0,false,false);
-                assert!(native.wants_frames());
-                assert!(native.present_frame([w,h],&opaque),"读不到透明通道也要切到分层窗口");
-                assert!(matches!(native.layering,Layering::Active(_)) && native.outline.active);
-                let frame=&native.outline.frame;
-                let alpha=|x:usize,y:usize|frame[(y*w+x)*4+3];
-                assert_eq!(alpha(200,30),255,"岛体内部不透明");
-                assert_eq!(alpha(10,150),0,"画布空白处透明，不能留黑底");
-                let soft=(0..h).flat_map(|y|(0..w).map(move|x|(x,y))).filter(|&(x,y)|(1..255).contains(&alpha(x,y))).count();
-                assert!(soft>=80,"圆角和肩部要有抗锯齿过渡像素，实际 {soft}");
-                assert!(frame.chunks_exact(4).all(|p|p[0]<=p[3]&&p[1]<=p[3]&&p[2]<=p[3]),"必须是合法的预乘颜色");
-                // 切到分层窗口后不再用轮廓裁剪岛仔窗口本身。
-                native.update((0.0,0.0,w as f32,h as f32),(80.0,0.0,240.0,60.0),None,None,Some(&shapes),1.0,false,false);
+                // 所有路径统一停用分层读回：owner 窗口按轮廓裁剪直出（展开不因读回掉帧）。
+                assert!(!native.wants_frames(),"必须停用分层读回，避免展开时每帧截图读回掉帧");
+                assert!(!native.present_frame([w,h],&opaque),"分层读回已停用");
+                assert!(matches!(native.layering,Layering::Pending),"不应切到分层窗口");
                 let region=CreateRectRgn(0,0,0,0);
-                if GetWindowRgn(hwnd,region).0!=0 {assert!(PtInRegion(region,10,150).as_bool(),"分层显示后窗口区域应回到矩形");}
+                if GetWindowRgn(hwnd,region).0!=0 {
+                    assert!(!PtInRegion(region,10,150).as_bool(),"画布黑底必须被裁掉");
+                    assert!(PtInRegion(region,200,30).as_bool(),"岛体内部仍可命中");
+                }
                 let _=DeleteObject(region);
-                assert!(!native.present_frame([w,h],&opaque),"画面没变时不重复提交");
+                assert!(!native.blur && native.backdrop.is_none(),"兼容后端不启用独立模糊底板：它比岛体大一圈，会在胶囊外多出一层");
             }
             *hit().lock().unwrap_or_else(|e|e.into_inner())=saved;
             let _=DestroyWindow(hwnd);

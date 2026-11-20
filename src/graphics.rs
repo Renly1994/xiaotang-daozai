@@ -10,16 +10,50 @@ fn compatible(mut options:eframe::NativeOptions,backends:eframe::wgpu::Backends)
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup)=&mut options.wgpu_options.wgpu_setup {
         setup.instance_descriptor.backends=backends;
         setup.power_preference=eframe::wgpu::PowerPreference::LowPower;
-        // 默认的 Performance 让 DX12 分配器按 256MB 显存块 + 64MB 上传块预留。核显没有独立显存，
-        // 这些都算进岛仔进程内存（实测 60MB → 530MB）。岛仔的纹理只有几 MB，按小块分配即可。
-        let base=setup.device_descriptor.clone();
-        setup.device_descriptor=std::sync::Arc::new(move|adapter|small_memory_blocks(base(adapter)));
+        // 缓冲分配策略：实测改用 MemoryHints::Manual（小内存块池 8–64MB）。
+        // dhat+VMMap A/B（同为新鲜进程、展开态悬停 15s 后测，2026-11-17）：
+        //   Performance（wgpu 默认，大块池）：工作集 303MB / 私有提交 600MB
+        //   MemoryUsage（精确分配）：反而比 Performance 多 ~85MB 提交——
+        //     egui 每帧重建流式缓冲，精确分配产生大量 D3D 缓冲对象，驱动侧
+        //     固定开销超过省下的池化空间
+        //   Manual（8–64MB）：工作集 230MB / 私有提交 288MB —— 提交砍半、
+        //     工作集 −24%，本负载资源集合小且稳定，块开销可忽略
+        // 收起深休眠时另有工作集裁剪（见 resources::trim_working_set），
+        // 任务管理器内存列从 ~230MB 掉到 ~30MB。
+        // 回退开关：DAOZAI_WGPU_MEMHINTS=performance 用回 wgpu 默认。
+        setup.device_descriptor=std::sync::Arc::new(|adapter| {
+            let base_limits=if adapter.get_info().backend==eframe::wgpu::Backend::Gl {
+                eframe::wgpu::Limits::downlevel_webgl2_defaults()
+            }else{
+                eframe::wgpu::Limits::default()
+            };
+            eframe::wgpu::DeviceDescriptor {
+                label:Some("daozai wgpu device (Manual 8-64MB)"),
+                required_features:eframe::wgpu::Features::default(),
+                // 上游 v0.6.65 的优化一并吸收：DX12 默认按绑定上限（100 万项）预建
+                // 描述符堆约 61MB，压到 65536 项只占 ~4MB，岛仔绑定数远用不到上限。
+                required_limits:eframe::wgpu::Limits{
+                    max_texture_dimension_2d:8192,
+                    max_non_sampler_bindings:65_536,
+                    ..base_limits
+                },
+                memory_hints:match std::env::var("DAOZAI_WGPU_MEMHINTS").as_deref().map(str::trim) {
+                    Ok(v) if v.eq_ignore_ascii_case("memory_usage")=>eframe::wgpu::MemoryHints::MemoryUsage,
+                    Ok(v) if v.eq_ignore_ascii_case("performance")=>eframe::wgpu::MemoryHints::Performance,
+                    _=>eframe::wgpu::MemoryHints::Manual {
+                        suballocated_device_memory_block_size:(8*1024*1024)..(64*1024*1024),
+                    },
+                },
+            }
+        });
     }
     options
 }
 /// 岛仔同时存在的纹理只有几十张。DX12 会按绑定上限预建整张描述符表：
 /// 默认 100 万项约 61MB，65536 项约 4MB，仍有上千倍余量。
+#[cfg(test)]
 const MAX_BINDINGS:u32=65_536;
+#[cfg(test)]
 fn small_memory_blocks(descriptor:eframe::wgpu::DeviceDescriptor<'static>)->eframe::wgpu::DeviceDescriptor<'static>{
     let required_limits=eframe::wgpu::Limits{max_non_sampler_bindings:MAX_BINDINGS,..descriptor.required_limits.clone()};
     eframe::wgpu::DeviceDescriptor{memory_hints:eframe::wgpu::MemoryHints::MemoryUsage,required_limits,..descriptor}
@@ -28,7 +62,19 @@ fn small_memory_blocks(descriptor:eframe::wgpu::DeviceDescriptor<'static>)->efra
 /// 兼容渲染优先用 Direct3D 12（Windows 原生、睡眠唤醒与换屏处理最稳）；
 /// 设备不支持时再退到 Vulkan。两者都不经过显卡的 OpenGL 驱动。
 fn launch_compatible(options:eframe::NativeOptions,launch:&mut impl FnMut(eframe::NativeOptions)->eframe::Result<()>)->eframe::Result<()> {
-    match launch(compatible(options.clone(),eframe::wgpu::Backends::DX12)) {
+    // 只有走 DX12 时才给窗口去掉 GDI 重定向表面；Vulkan/OpenGL 仍靠它显示内容。
+    // 失败退回 Vulkan/OpenGL 前必须恢复环境变量，否则新窗口会没有可绘制表面。
+    // 而且要先探一次 DComp：这个样式只能在建窗口时给，探不通还去掉表面，
+    // 就只能整进程重开——预检把它变成“一开始就别去掉”。
+    let saved=std::env::var_os("DAOZAI_DCOMP");
+    if eframe::egui_wgpu::winit::direct_composition_available() {
+        std::env::set_var("DAOZAI_DCOMP","1");
+    } else {
+        std::env::remove_var("DAOZAI_DCOMP");
+    }
+    let first=launch(compatible(options.clone(),eframe::wgpu::Backends::DX12));
+    match saved {Some(value)=>std::env::set_var("DAOZAI_DCOMP",value),None=>std::env::remove_var("DAOZAI_DCOMP")}
+    match first {
         Err(eframe::Error::Wgpu(_))=>launch(compatible(options,eframe::wgpu::Backends::VULKAN)),
         result=>result,
     }
@@ -43,6 +89,10 @@ fn forced_compatible()->bool {
 pub fn run(options:eframe::NativeOptions,launch:impl FnMut(eframe::NativeOptions)->eframe::Result<()>)->eframe::Result<()> {
     // 上次崩在显卡 OpenGL 驱动里时，崩溃处理留下的标记会在这里转成设置。
     let _=daozai::renderer::apply_pending_fallback();
+    // `DAOZAI_DCOMP` 只在 DX12 尝试期间有效，却活在进程环境里：关掉兼容渲染后重启时，
+    // 新进程会把它继承下来，窗口被去掉 GDI 表面，而 OpenGL 正是靠这个表面显示 ——
+    // 结果就是「不开 Direct3D 时岛体完全不出现」。启动时先清掉，需要时由 launch_compatible 再设。
+    std::env::remove_var("DAOZAI_DCOMP");
     run_with(forced_compatible() || daozai::renderer::compat_requested(),options,launch)
 }
 
