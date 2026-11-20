@@ -11,6 +11,7 @@ pub mod rtl_text;
 mod mail_privacy;
 pub mod poll_clock;
 pub mod resources;
+pub mod brief_card;
 pub mod anim;
 pub mod oled_shift;
 pub mod app;
