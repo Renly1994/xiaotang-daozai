@@ -170,3 +170,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\agent-e2e.ps1 -Scena
 | `agent-e2e-repro.ps1 -Scenario jump-repro -DshFront` | **通过**（含 Q2 选项修复） |
 | `agent-e2e-repro.ps1 -Scenario jump-repro -DshBack` | **通过** |
 | 脚本 BOM | `scripts/agent-e2e.ps1`、`scripts/agent-e2e-repro.ps1` 均为 `EF BB BF`（改中文脚本后必须核对，本轮已踩过一次 BOM 丢失） |
+### 7.4 本机交付入口（原 AGENTS.md 的准确版本，2026-11-20 核对）
+
+- 本机（用户 59531）桌面「岛仔－当前测试版」快捷方式**直接指向** `target/x86_64-pc-windows-msvc/release/daozai.exe`；
+  旧 AGENTS.md 写的副本路径 `C:\Users\Administrator\Daozai\daozai.exe` 是另一台机器的，本机不存在。
+- 交付流程：`cargo build --release --bin daozai --target x86_64-pc-windows-msvc` → 停掉正在运行的岛仔 →
+  启动新 exe → 核对进程路径与 SHA256 与构建产物一致。
+- 构建环境用 `scripts/dev-msvc-env.ps1`（自动探测 VS BuildTools、钉死 CC/CXX/AR）。
+- 自测入口：双击仓库根目录 `测试Agent功能.cmd`（菜单选场景），证据在 `docs/superpowers/research/agent-e2e-shots/<时间戳>/`。
