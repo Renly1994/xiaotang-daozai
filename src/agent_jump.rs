@@ -363,28 +363,81 @@ fn find_window(process_name: &str) -> Option<(windows::Win32::Foundation::HWND, 
 }
 
 fn open_client(client: &str) -> JumpOutcome {
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, ShowWindow, SW_RESTORE};
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_RESTORE};
     let found = find_window(client);
     let (hwnd, iconic) = match found {
         Some((hwnd, candidate)) => (hwnd, candidate.iconic),
         None => (windows::Win32::Foundation::HWND::default(), false),
     };
-    let foreground = found.is_some() && unsafe { GetForegroundWindow() == hwnd };
-    match decide(found.is_some(), foreground, iconic) {
+    let foreground = found.is_some() && foreground_is_client(hwnd);
+    trace(|| format!("client={client} found={} hwnd={hwnd:?} iconic={iconic} foreground={foreground} {}", found.is_some(), foreground_probe()));
+    let outcome = match decide(found.is_some(), foreground, iconic) {
         Step::Missing => protocol_fallback(client, "没找到窗口，可能已退出或最小化到托盘"),
         Step::AlreadyFront => JumpOutcome::AlreadyFront { client: client.to_owned() },
         Step::Restore => {
             unsafe {
                 let _ = ShowWindow(hwnd, SW_RESTORE);
             }
-            if unsafe { GetForegroundWindow() == hwnd } {
+            if foreground_is_client(hwnd) {
                 JumpOutcome::Restored { client: client.to_owned() }
             } else {
                 raise_or_protocol(hwnd, client, true)
             }
         }
         Step::Raise => raise_or_protocol(hwnd, client, false),
+    };
+    trace(|| format!("step={:?} outcome={:?} {}", decide(found.is_some(), foreground, iconic), outcome, foreground_probe()));
+    outcome
+}
+
+/// `DAOZAI_AGENT_TRACE=1` 时把跳转决策写进 `%TEMP%\daozai-jump-trace.log`，便于真机排查
+/// 「明明已经在前台却提示已切到」这类环境相关问题（不设环境变量时零开销、不落盘）。
+fn trace(message: impl FnOnce() -> String) {
+    if std::env::var_os("DAOZAI_AGENT_TRACE").is_none() {
+        return;
     }
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(std::env::temp_dir().join("daozai-jump-trace.log")) {
+        let _ = writeln!(file, "[jump] {}", message());
+    }
+}
+
+fn foreground_probe() -> String {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    unsafe {
+        let front = GetForegroundWindow();
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(front, Some(&mut pid));
+        format!("fg_hwnd={front:?} fg_pid={pid}")
+    }
+}
+
+/// 前台是否已经是客户端。
+///
+/// 不能只比较 `GetForegroundWindow() == 选中的 hwnd`：候选窗口是按「有标题 + 面积大」挑出来的
+/// 主窗口，而 Electron 客户端常常有多个顶层窗口（主窗、开发者工具、辅助窗），用户眼前在前台的
+/// 完全可能是其中另一个。只要前台窗口属于客户端进程，就应判定「已在前台」，不再报「已切到」。
+fn foreground_is_client(hwnd: windows::Win32::Foundation::HWND) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible};
+    unsafe {
+        let front = GetForegroundWindow();
+        if front == hwnd {
+            return true;
+        }
+        if front.0.is_null() || !IsWindowVisible(front).as_bool() {
+            return false;
+        }
+        let mut target_pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut target_pid));
+        let mut front_pid = 0u32;
+        GetWindowThreadProcessId(front, Some(&mut front_pid));
+        front_counts_as_client(target_pid, front_pid)
+    }
+}
+
+/// 纯判定：前台窗口与候选窗口是否属于同一个客户端进程（Win32 部分见 `foreground_is_client`）。
+pub(crate) fn front_counts_as_client(target_pid: u32, front_pid: u32) -> bool {
+    target_pid != 0 && front_pid == target_pid
 }
 
 fn raise_or_protocol(hwnd: windows::Win32::Foundation::HWND, client: &str, restored: bool) -> JumpOutcome {
@@ -605,6 +658,15 @@ mod tests {
         assert!(!better(helper, Some(main)), "辅助窗口不能顶掉主窗口");
         let minimized = Candidate { titled: true, iconic: true, area: 1_296 * 828 };
         assert!(better(minimized, Some(helper)), "最小化的主窗口也比辅助窗口值得切");
+    }
+
+    #[test]
+    fn foreground_of_the_client_process_counts_as_already_front(){
+        // 选中的主窗口与真正在前台的窗口可能不是同一个 hwnd（Electron 主窗/开发者工具/辅助窗），
+        // 只要同进程就应判定「已在前台」，否则会退化成「已切到」，文案与事实不符。
+        assert!(front_counts_as_client(7848, 7848), "同一进程的前台窗口就是客户端在前台");
+        assert!(!front_counts_as_client(7848, 1832), "别的进程在前台不算");
+        assert!(!front_counts_as_client(0, 0), "拿不到进程号时不能假设已在前台");
     }
 
     #[test]

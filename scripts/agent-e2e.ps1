@@ -154,6 +154,14 @@ if ($other.Count) {
     '请先退出现有实例（Stop-Process -Id <pid>）再跑 E2E；脚本不会动别人的岛仔。')
 }
 
+# 锁屏时 GDI 截图/桌面复制拿不到真实画面（只会截到锁屏背景），OCR 必然一无所获，
+# 于是一堆「25 秒内没有在岛上看到卡片」的假失败。早失败并说清原因，别让下游判成代码回归。
+$logon = @(Get-Process -Name 'LogonUI' -ErrorAction SilentlyContinue)
+if ($logon.Count) {
+  Fail 2 ("当前工作站处于锁屏状态（LogonUI PID $($logon[0].Id)）：E2E 依赖真实桌面截图与鼠标点击，`n" +
+    '锁屏时只能截到锁屏背景、点击也落不到岛上。请先解锁桌面再跑。')
+}
+
 $ocrScript = Join-Path $PSScriptRoot 'agent-screen-ocr.ps1'
 $driveScript = Join-Path $script:RepoRoot 'tests\fixtures\agent-drive.cjs'
 foreach ($f in @($ocrScript, $driveScript)) { if (-not (Test-Path $f)) { Fail 2 "缺少文件：$f" } }
@@ -291,8 +299,10 @@ function Invoke-OcrScan {
 }
 
 # 在 OCR 结果里找候选词（去空格包含），返回中心坐标；PreferBottom 时取最靠下的一条。
+# MaxExtra >= 0 时只接受「行内字数 ≤ 目标词字数 + MaxExtra」的行：用于区分选项行与题干
+#   （题干里也会写「请选择「方案一」」，OCR 会把整句识别成一行；选项行只多一个序号徽标「1方案一」）。
 function Find-LineMatch {
-  param($Ocr, [string[]]$Texts, [switch]$PreferBottom)
+  param($Ocr, [string[]]$Texts, [switch]$PreferBottom, [int]$MaxExtra = -1)
   if (-not $Ocr -or -not $Ocr.ok) { return $null }
   $lines = @($Ocr.lines)
   foreach ($text in $Texts) {
@@ -301,6 +311,7 @@ function Find-LineMatch {
     $hits = @()
     foreach ($line in $lines) {
       $haystack = [string]$line.compact
+      if ($MaxExtra -ge 0 -and $haystack.Length -gt ($needle.Length + $MaxExtra)) { continue }
       $at = $haystack.IndexOf($needle, [StringComparison]::OrdinalIgnoreCase)
       while ($at -ge 0) {
         $ratio = $at / [Math]::Max(1, $haystack.Length)
@@ -346,10 +357,10 @@ function Wait-Text {
 }
 
 function Find-AnyText {
-  param($Region, [string[]]$Texts, [string]$SaveImage, [int[]]$Scales = @(2, 3, 4, 6), [switch]$PreferBottom)
+  param($Region, [string[]]$Texts, [string]$SaveImage, [int[]]$Scales = @(2, 3, 4, 6), [switch]$PreferBottom, [int]$MaxExtra = -1)
   foreach ($scale in $Scales) {
     $ocr = Invoke-OcrScan -Region $Region -Scale $scale
-    $match = Find-LineMatch -Ocr $ocr -Texts $Texts -PreferBottom:$PreferBottom
+    $match = Find-LineMatch -Ocr $ocr -Texts $Texts -PreferBottom:$PreferBottom -MaxExtra $MaxExtra
     if ($match) {
       if ($SaveImage) { $null = Invoke-OcrScan -Region $Region -Scale $scale -SaveImage $SaveImage }
       return [pscustomobject]@{ found = $true; center = $match.center; text = $match.text; line = $match.line; matches = $match.matches }
@@ -565,12 +576,22 @@ try {
       if (-not $hit) { $verdict.error = '25 秒内没有在岛上看到提问卡片' }
       else {
         $okOptions = $true
+        $optIndex = 0
         foreach ($opt in $spec.options) {
+          $optIndex++
           $region = Get-IslandRect
-          $hitOpt = Find-AnyText -Region $region -Texts @($opt) -SaveImage "$shotBase-02-option-$opt.png" -PreferBottom
-          $verdict.steps += [pscustomobject]@{ step = "点击选项「$opt」"; ok = [bool]$hitOpt; text = $(if ($hitOpt) { $hitOpt.text } else { $null }) }
+          # 选项行必须「只比选项词多一个序号徽标」：题干里也会写「请选择「方案一」」，
+          # 只按 PreferBottom 会点到题干（OCR 在小字号下读不出选项行，只剩题干那一行命中）。
+          # 实测选项行在 5~6 倍率才能稳定识别（2~4 倍偶尔整行读不出），所以倍率从 3 起、5/6 兜底。
+          $hitOpt = Find-AnyText -Region $region -Texts @($opt) -SaveImage "$shotBase-02-option-$opt.png" -PreferBottom -Scales @(3, 4, 5, 6, 2) -MaxExtra 2
+          $verdict.steps += [pscustomobject]@{ step = "点击选项「$opt」"; ok = [bool]$hitOpt; text = $(if ($hitOpt) { $hitOpt.text } else { $null }); line = $(if ($hitOpt) { $hitOpt.line } else { $null }) }
           if (-not $hitOpt) { $okOptions = $false; break }
           $null = Click-Point $hitOpt.center
+          # 点完确认选中态真的生效（「已答 N」计数前进）；只是留证，不单独判失败。
+          $counter = Wait-Text -Region (Get-IslandRect) -Texts @("已答 $optIndex") -TimeoutSeconds 4
+          if ($counter) {
+            $verdict.steps += [pscustomobject]@{ step = "选项「$opt」已选中（已答 $optIndex）"; ok = $true; text = $counter.line }
+          }
         }
 
         if ($okOptions -and $name -eq 'question-multi-turn') {
@@ -581,8 +602,8 @@ try {
             $null = Click-Point $next.center
             Start-Sleep -Milliseconds 700
             $region = Get-IslandRect
-            $hit2 = Find-AnyText -Region $region -Texts @('确认一') -SaveImage "$shotBase-04-option2.png" -PreferBottom
-            $verdict.steps += [pscustomobject]@{ step = '点击第 2 题选项'; ok = [bool]$hit2; text = $(if ($hit2) { $hit2.text } else { $null }) }
+            $hit2 = Find-AnyText -Region $region -Texts @('确认一') -SaveImage "$shotBase-04-option2.png" -PreferBottom -Scales @(3, 4, 5, 6, 2) -MaxExtra 2
+            $verdict.steps += [pscustomobject]@{ step = '点击第 2 题选项'; ok = [bool]$hit2; text = $(if ($hit2) { $hit2.text } else { $null }); line = $(if ($hit2) { $hit2.line } else { $null }) }
             if ($hit2) { $null = Click-Point $hit2.center } else { $okOptions = $false }
           } else { $okOptions = $false }
         }

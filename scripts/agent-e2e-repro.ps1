@@ -258,7 +258,9 @@ function Invoke-OcrDump {
 
 function Find-LineMatch {
   # PreferTop：同一候选词命中多处时取最靠上的（头部 chip 与底部「回客户端」按钮都含「客户端」）。
-  param($Ocr, [string[]]$Texts, [switch]$PreferBottom, [switch]$PreferTop)
+  # MaxExtra >= 0：只接受「行内字数 ≤ 目标词字数 + MaxExtra」的行，用来把选项行和题干区分开
+  #（题干也会写「请选择「方案一」」，选项行只多一个序号徽标「1方案一」）。
+  param($Ocr, [string[]]$Texts, [switch]$PreferBottom, [switch]$PreferTop, [int]$MaxExtra = -1)
   if (-not $Ocr -or -not $Ocr.ok) { return $null }
   $lines = @($Ocr.lines)
   foreach ($text in $Texts) {
@@ -267,6 +269,7 @@ function Find-LineMatch {
     $hits = @()
     foreach ($line in $lines) {
       $haystack = [string]$line.compact
+      if ($MaxExtra -ge 0 -and $haystack.Length -gt ($needle.Length + $MaxExtra)) { continue }
       $at = $haystack.IndexOf($needle, [StringComparison]::OrdinalIgnoreCase)
       while ($at -ge 0) {
         $ratio = $at / [Math]::Max(1, $haystack.Length)
@@ -290,18 +293,18 @@ function Find-LineMatch {
   }
   return $null
 }
-function Find-InDump { param($Dump, [string[]]$Texts, [switch]$PreferBottom, [switch]$PreferTop) Find-LineMatch -Ocr $Dump -Texts $Texts -PreferBottom:$PreferBottom -PreferTop:$PreferTop }
+function Find-InDump { param($Dump, [string[]]$Texts, [switch]$PreferBottom, [switch]$PreferTop, [int]$MaxExtra = -1) Find-LineMatch -Ocr $Dump -Texts $Texts -PreferBottom:$PreferBottom -PreferTop:$PreferTop -MaxExtra $MaxExtra }
 
 # 多倍率找词：每倍率一次 OCR 子进程（命中即返回）；只在第一次带 -Shot 存图。
 function Find-TextSmart {
-  param($Region, [string[]]$Texts, [int[]]$Scales = @(3, 2, 4, 6), [string]$Shot, [string]$JsonOut, [switch]$PreferBottom, [switch]$PreferTop)
+  param($Region, [string[]]$Texts, [int[]]$Scales = @(3, 2, 4, 6), [string]$Shot, [string]$JsonOut, [switch]$PreferBottom, [switch]$PreferTop, [int]$MaxExtra = -1)
   $first = $true
   foreach ($scale in $Scales) {
     $shot = if ($first) { $Shot } else { $null }
     $json = if ($first) { $JsonOut } else { $null }
     $dump = Invoke-OcrDump -Region $Region -Scale $scale -Shot $shot -JsonOut $json
     if ($dump -and $dump.ok) {
-      $m = Find-LineMatch -Ocr $dump -Texts $Texts -PreferBottom:$PreferBottom -PreferTop:$PreferTop
+      $m = Find-LineMatch -Ocr $dump -Texts $Texts -PreferBottom:$PreferBottom -PreferTop:$PreferTop -MaxExtra $MaxExtra
       if ($m) { return [pscustomobject]@{ found = $true; center = $m.center; text = $m.text; line = $m.line; scale = $scale; matches = $m.matches } }
     }
     $first = $false
@@ -851,10 +854,14 @@ try {
           if (-not $okFlow) { break }
           $target = $null
           $deadline = (Get-Date).AddSeconds(12)
+          # 选项行用「只比选项词多一个序号徽标」的过滤（取消题干里同名选项的干扰），
+          # 并把 5/6 倍率纳入候选——实测小字号下选项行常常只有高倍率才读得出来。
+          $planScales = if ($plan.footerRight) { @(3, 4, 2) } else { @(3, 4, 5, 6, 2) }
+          $planMaxExtra = if ($plan.footerRight) { -1 } else { 2 }
           while ((Get-Date) -lt $deadline -and -not $target) {
             # 3 倍率优先：同一份 OCR 能同时读到正文和选项，PreferBottom 才会选中真正的选项行
             #（2 倍率常常只读到正文里的「方案一」，结果点在标题上）。
-            $target = Find-TextSmart -Region (Get-IslandRegion) -Texts $plan.texts -Scales @(3, 4, 2) -PreferBottom
+            $target = Find-TextSmart -Region (Get-IslandRegion) -Texts $plan.texts -Scales $planScales -PreferBottom -MaxExtra $planMaxExtra
             if (-not $target) { Start-Sleep -Milliseconds 400 }
           }
           if (-not $target -and $plan.footerRight) {
