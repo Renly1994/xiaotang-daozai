@@ -35,6 +35,17 @@ pub fn report(title: &str, details: &str) {
 }
 
 /// 仅记录最近一次启动停留的阶段，不记录账号或用户内容。
+/// 启动阶段追踪：`DAOZAI_BOOT_TRACE=1` 时把关键阶段写进 `%TEMP%\daozai-boot-trace.log`。
+/// 用于排查「进程活着、窗口在，但日志/桥接/界面都没有产出」这类启动期卡死。
+pub fn boot_trace(stage:&str) {
+    if std::env::var_os("DAOZAI_BOOT_TRACE").is_none() { return; }
+    use std::io::Write;
+    if let Ok(mut file)=std::fs::OpenOptions::new().create(true).append(true)
+        .open(std::env::temp_dir().join("daozai-boot-trace.log")) {
+        let _=writeln!(file,"[{}] {stage}",std::process::id());
+    }
+}
+
 pub fn startup(stage:&str) {
     let directory=daozai::model::config_dir().join("diagnostics");
     if std::fs::create_dir_all(&directory).is_ok() {

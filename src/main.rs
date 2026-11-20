@@ -141,10 +141,13 @@ impl Shell {
     }
 
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        diagnostics::boot_trace("Shell::new: 进入");
         diagnostics::graphics(cc);
+        diagnostics::boot_trace("Shell::new: graphics 记录完成");
         let running_compat=cc.wgpu_render_state.is_some();
         diagnostics::startup("加载本地配置");
         let mut app = App::new(&cc.egui_ctx, Options::default());
+        diagnostics::boot_trace("Shell::new: App::new 完成");
         app.render_compat_running=running_compat;
         #[cfg(feature="record")] let quota_demo=std::env::var("DAOZAI_QUOTA_DEMO").is_ok();
         #[cfg(not(feature="record"))] let quota_demo=false;
@@ -362,6 +365,12 @@ impl eframe::App for Shell {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        { // 启动期追踪：只在前 3 帧写，避免刷日志。
+            static FRAMES_SEEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = FRAMES_SEEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 3 { diagnostics::boot_trace(&format!("update: 第 {} 帧开始", n + 1)); }
+            if n == 2 { diagnostics::boot_trace("update: 前 3 帧已完成"); }
+        }
         daozai::resources::FRAMES.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
         let frame_start=Instant::now();
         if self.resource_at.ready(Duration::from_secs(30)){
@@ -1081,19 +1090,25 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run() -> eframe::Result<()> {
+    diagnostics::boot_trace("run: 进入");
     // 自动重启或「立即重启」拉起的新进程：先等旧进程退出，再做单实例检查。
     diagnostics::wait_for_previous_instance();
+    diagnostics::boot_trace("run: 上一个实例检查完成");
     // 单实例（与原版同名互斥体）
     #[cfg(windows)]
     if !daozai::tray::single_instance() {
+        diagnostics::boot_trace("run: 单实例被占用，尝试激活已有窗口");
         if !daozai::tray::activate_existing(std::env::args().any(|arg|arg=="--calendar")) {
             diagnostics::report("岛仔已在运行，但暂时无法打开窗口。\n请稍后重试；若仍无法打开，请在任务管理器的“详细信息”中结束 daozai.exe 后重试。", "已有实例可能正在启动或已无响应。请稍后重试；若仍无法打开，请在任务管理器的“详细信息”中结束 daozai.exe，再重新启动。");
         }
+        diagnostics::boot_trace("run: 激活完成，退出");
         return Ok(());
     }
+    diagnostics::boot_trace("run: 拿到单实例");
     #[cfg(windows)]
     std::thread::spawn(daozai::record_install_size);
     diagnostics::startup("初始化图形窗口");
+    diagnostics::boot_trace(&format!("run: 已写 startup 日志，config_dir={:?}",daozai::model::config_dir()));
     let viewport = egui::ViewportBuilder::default()
         .with_title("岛仔").with_icon(daozai::theme::app_icon())
         .with_inner_size([app::CANVAS_W, app::WIN_H])

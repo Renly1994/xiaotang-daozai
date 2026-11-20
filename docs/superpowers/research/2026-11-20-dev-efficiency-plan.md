@@ -42,6 +42,13 @@
 7. **多 agent 并行改同一文件**：本轮 ui-fix 与 ui-map 同时改动 `agent_cards.rs`/`ui_tests.rs`，最终靠"写域协调 + 回滚"收场。
    建议：每个 agent 一个 `git worktree`（仓库支持），或改前先在任务写域里声明要碰的函数名。
 
+## 3.5 新加的两个排查开关（本轮踩坑后补的）
+
+| 开关 | 输出 | 用途 |
+|---|---|---|
+| `DAOZAI_BOOT_TRACE=1` | `%TEMP%\daozai-boot-trace.log`：`run` 进入 / 单实例 / `Shell::new` / 前 3 帧 | 「进程活着、窗口在、但界面与桥接都没产出」时先看这个，能区分卡在启动期还是卡在首帧 |
+| `DAOZAI_BRIDGE_TRACE=1` | `%TEMP%\daozai-bridge-trace.log`：每次 `Cards::update` 的开关状态、桥接子进程 pid、策略下发、子进程 stdout | 「DSH 来源开着但 `live.json` 不出现 / 卡片不弹」时看这个，能区分「没启动子进程」「策略没下发」「子进程没落盘」 |
+
 ## 4. 下一步建议（按性价比排序）
 
 | 优先级 | 事项 | 预计收益 | 成本 |

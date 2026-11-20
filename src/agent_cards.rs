@@ -95,18 +95,46 @@ impl Preferences {
 
 struct Service { child:Child, out:mpsc::Sender<Value>, incoming:mpsc::Receiver<Value>, policy:Value }
 impl Drop for Service {fn drop(&mut self){let _=self.child.kill();let _=self.child.wait();}}
+
+/// `DAOZAI_BRIDGE_TRACE=1` 时把桥接子进程的启动/握手/策略下发写进 `%TEMP%\daozai-bridge-trace.log`。
+/// 真机排查「DSH 来源开着但 live.json 不出现 / 卡片不弹」时，这是唯一能看到父进程侧状态的地方
+/// （子进程 stderr 是 null，出问题只有一行设置页提示）。
+fn bridge_trace(message:impl FnOnce()->String){
+    if std::env::var_os("DAOZAI_BRIDGE_TRACE").is_none(){return;}
+    use std::io::Write;
+    if let Ok(mut file)=std::fs::OpenOptions::new().create(true).append(true).open(std::env::temp_dir().join("daozai-bridge-trace.log")){
+        let _=writeln!(file,"{}",message());
+    }
+}
+
+/// 与 `bridge_trace` 相同，但最多每 500ms 写一条，避免每帧刷日志。
+fn bridge_trace_throttled(message:impl FnOnce()->String){
+    if std::env::var_os("DAOZAI_BRIDGE_TRACE").is_none(){return;}
+    use std::sync::atomic::{AtomicU64,Ordering};
+    static LAST:AtomicU64=AtomicU64::new(0);
+    let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis() as u64).unwrap_or(0);
+    let prev=LAST.load(Ordering::Relaxed);
+    if now.saturating_sub(prev)<500{return;}
+    if LAST.compare_exchange(prev,now,Ordering::Relaxed,Ordering::Relaxed).is_err(){return;}
+    bridge_trace(message);
+}
+
 impl Service {
     fn start(ctx:&egui::Context)->Option<Self>{
         let script=crate::model::config_dir().join("agent-notices/bridge/channel.cjs");
-        if !std::fs::read(&script).is_ok_and(|b|b==include_bytes!("../integrations/agent-notices/bridge/channel.cjs")){return None;}
+        let kit_ok=std::fs::read(&script).is_ok_and(|b|b==include_bytes!("../integrations/agent-notices/bridge/channel.cjs"));
+        bridge_trace(||format!("start: script={:?} kit_ok={kit_ok}",script));
+        if !kit_ok{bridge_trace(||"start: 放弃（kit 与内置副本不一致）".to_owned());return None;}
         let mut cmd=Command::new(crate::agent_notice::node_runtime()?);
         #[cfg(windows)] {use std::os::windows::process::CommandExt;cmd.creation_flags(0x08000000);}
         let mut child=cmd.arg(script).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+        bridge_trace(||format!("start: 子进程 pid={}",child.id()));
         let mut input=child.stdin.take()?;let output=child.stdout.take()?;
         let (out,rx)=mpsc::channel::<Value>();let (tx,incoming)=mpsc::sync_channel(96);
-        std::thread::spawn(move||for v in rx{if writeln!(input,"{v}").is_err(){break;}});
+        std::thread::spawn(move||for v in rx{bridge_trace(||format!("stdin<- {}",String::from_utf8_lossy(v.to_string().as_bytes())));if writeln!(input,"{v}").is_err(){bridge_trace(||"stdin 写入失败，停止".to_owned());break;}});
         let ctx=ctx.clone();
         std::thread::spawn(move||{for line in BufReader::new(output).lines().map_while(Result::ok){
+            bridge_trace(||format!("stdout-> {line}"));
             if let Ok(v)=serde_json::from_str(&line){if tx.send(v).is_err(){break;}ctx.request_repaint();}
         }ctx.request_repaint();});
         Some(Self{child,out,incoming,policy:Value::Null})
@@ -528,6 +556,9 @@ impl Cards {
     }
     pub fn update(&mut self,settings:&Settings,ctx:&egui::Context)->Vec<(Provider,String)>{
         let [dsh,codex]=Provider::ALL.map(|p|p.enabled(settings));
+        bridge_trace_throttled(||format!("update: dsh={dsh} codex={codex} notifications={} dsh_notif={} interactive={} service={} retry_pending={}",
+            settings.notifications,settings.dsh_notifications,settings.agent.interactive,self.service.is_some(),
+            self.retry.is_some_and(|t|t>Instant::now())));
         if !dsh{self.dsh_ready=false;}
         if !dsh&&!codex {self.service=None;self.requests.clear();self.result=None;self.retry=None;return vec![];}
         if self.service.as_mut().is_some_and(|s|s.child.try_wait().ok().flatten().is_some()){
