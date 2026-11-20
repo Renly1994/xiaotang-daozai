@@ -142,6 +142,12 @@ impl OpenError {
     }}
 }
 
+/// 相邻两次采样离得太远（100ns 单位，3 秒）就认为采样断了，账号稳定性重新计时。
+const STABLE_SAMPLE_GAP:i64 = 30_000_000;
+/// Windows 投递 toast 的时间晚于它自己的创建时间：绑定窗口尾部留 2 秒余量，
+/// 否则「通知刚到时最近一次采样还是几百毫秒之前」会被判成账号不明。
+const TOAST_LAG:i64 = 20_000_000;
+
 pub(crate) struct AccountHistory {
     client:Messenger,
     previous:Option<(i64,Option<Vec<Target>>)>,
@@ -170,7 +176,9 @@ impl AccountHistory {
         }}
         let target=(||{
             let (from,to,target)=self.stable_account()?;
-            if created<=from || created>to{return None;}
+            // toast 是系统记录之后才投给我们的，创建时间通常晚于最近一次采样，
+            // 所以尾部按投递滞后留余量，而不是要求它一定落在采样点之前。
+            if created<=from || created>to+TOAST_LAG{return None;}
             Some(target)
         })().filter(|target|ready(*target));
         self.targets.insert(id,(created,target));target
@@ -178,7 +186,7 @@ impl AccountHistory {
     fn stable_account(&self)->Option<(i64,i64,Target)>{
         let (from,Some(previous))=self.previous.as_ref()? else{return None;};
         let (to,Some(current))=self.current.as_ref()? else{return None;};
-        if to.checked_sub(*from)? > 30_000_000 || to<=from{return None;}
+        if to<=from||to.checked_sub(*from)?>STABLE_SAMPLE_GAP{return None;}
         match(previous.as_slice(),current.as_slice()){([a],[b]) if a==b=>Some((self.single_since?,*to,*a)),_=>None}
     }
     pub(crate) fn retain(&mut self,exists:impl Fn(u32,i64)->bool){self.targets.retain(|id,(created,_)|exists(*id,*created));}
@@ -284,6 +292,21 @@ mod tests {
             assert_eq!(history.target(3,85_000_000,|_|true),None,"长时间暂停期间也不能猜账号");
             assert_eq!(history.target(4,105_000_000,|_|true),Some(a));
         }
+    }
+    #[test]
+    fn notifications_arriving_after_the_last_account_sample_still_bind(){
+        let a=Target{unread:Unread{source:Messenger::Qq,pid:100,window:11},started:1};
+        // Windows 记下通知之后才把 toast 投给我们，创建时间一般比最近一次采样晚几百毫秒；
+        // 以前要求 created 必须落在采样点之前，于是几乎每条通知都被判成「账号不明」。
+        for lag in [1_000_000i64,10_000_000,19_000_000]{
+            let mut history=AccountHistory::new(Messenger::Qq);
+            for at in [10_000_000i64,20_000_000,30_000_000]{history.observe(at,Some(vec![a]));}
+            assert_eq!(history.target(1,30_000_000+lag,|_|true),Some(a),"晚到 {lag} 个 100ns 的通知也应该绑得上");
+        }
+        let mut history=AccountHistory::new(Messenger::Qq);
+        for at in [10_000_000i64,20_000_000,30_000_000]{history.observe(at,Some(vec![a]));}
+        assert_eq!(history.target(2,40_000_000,|_|true),Some(a),"采样点之前的通知照旧绑定");
+        assert_eq!(history.target(3,60_000_000,|_|true),None,"超出投递余量的通知不能猜账号");
     }
     #[test]
     fn errors_use_state_instead_of_translated_error_text(){

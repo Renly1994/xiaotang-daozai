@@ -9205,3 +9205,24 @@ fn every_module_settings_tab_maps_to_its_page(){
 pub(crate) fn open_quota_details(h:&H){
     for account in &h.app.quota.config.accounts {h.ctx.data_mut(|d|d.insert_temp(egui::Id::new(("quota-account-open",account.id.clone())),true));}
 }
+
+#[test]
+fn right_click_dismisses_an_unconfirmed_reminder(){
+    use crate::app::{Cmd,Messenger,Unread};
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();h.app.settings.wechat_notifications=true;h.app.settings.read_notifications=true;
+    h.app.receive_wechat_reminder_from(100,11);
+    h.app.receive_notification("QQ".into(),"QQ".into(),"小林 · 测试".into());
+    assert_eq!(h.app.pending_messengers,[Unread{source:Messenger::Wechat,pid:100,window:11},Unread::of(Messenger::Qq)]);
+    h.app.alerts.clear();h.app.notice=None;
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.5);
+    // 悬停展开后右侧胶囊里那条账号未知的 QQ 提醒，右键就该把它清掉（以前只能等气泡上那个会过期的「关闭」）。
+    let pos=h.ctx.read_response(egui::Id::new(("card",true,Messenger::Qq.name()))).expect("胶囊图标可点击").rect.center();
+    h.cmds.clear();
+    h.cursor=Some(pos);
+    h.frame(vec![egui::Event::PointerMoved(pos)]);
+    h.frame(vec![egui::Event::PointerButton{pos,button:egui::PointerButton::Secondary,pressed:true,modifiers:Default::default()}]);
+    h.frame(vec![egui::Event::PointerButton{pos,button:egui::PointerButton::Secondary,pressed:false,modifiers:Default::default()}]);
+    assert!(h.cmds.contains(&Cmd::DismissUnread(Unread::of(Messenger::Qq))),"右键没反应：{:?} @{pos:?}",h.cmds);
+}
+

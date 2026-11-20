@@ -177,6 +177,8 @@ pub enum Cmd {
     Media(Transport),
     Open(PathBuf),
     ViewMessenger(Unread),
+    /// 直接把这条提醒从岛上清掉（右键点未读图标），账号不明的提醒只有这一条出路。
+    DismissUnread(Unread),
     OpenUrl(String),
     /// 需要键盘输入：外壳应让窗口可激活并取得焦点。
     Focus,
@@ -2418,8 +2420,9 @@ impl App {
             }
             let name=if u.unidentified(){format!("{} · 账号未确认",u.source.name())}
                 else{match self.unread_tag(i){Some(n)=>format!("{} · 账号 {n}",u.source.name()),None=>u.source.name().to_string()}};
-            let button=inner.hit(0.0,cy-slot/2.0,UNREAD_W,slot,self.unread_id(i)).on_hover_text(format!("查看{name}"));
+            let button=inner.hit(0.0,cy-slot/2.0,UNREAD_W,slot,self.unread_id(i)).on_hover_text(format!("查看{name}（右键关闭提醒）"));
             if button.clicked(){cmds.push(Cmd::ViewMessenger(u));}
+            if button.secondary_clicked(){cmds.push(Cmd::DismissUnread(u));}
         }
         for (i,kind) in self.health_badges().into_iter().enumerate() {
             let cy=2.0+slot*((self.pending_messengers.len()+i) as f32+0.5)-self.messenger_scroll;
@@ -2458,11 +2461,12 @@ impl App {
         let (w,h)=if horizontal {(messenger_length,BAR_H)}else{(32.0,messenger_length)};
         if count==1 {
             let u=self.pending_messengers[0];
-            let button=c.hit(0.0,0.0,w,h,u.source.name()).on_hover_text(format!("查看{}",u.source.name()));
+            let button=c.hit(0.0,0.0,w,h,u.source.name()).on_hover_text(format!("查看{}（右键关闭提醒）",u.source.name()));
             if button.clicked(){cmds.push(Cmd::ViewMessenger(u));}
+            if button.secondary_clicked(){cmds.push(Cmd::DismissUnread(u));}
         }else if count>1 {
-            let button=c.hit(0.0,0.0,w,h,"messenger-stack").on_hover_text(format!("{count} 条未读 · 展开挑选"));
-            if button.clicked(){self.reveal_unread();}
+            let button=c.hit(0.0,0.0,w,h,"messenger-stack").on_hover_text(format!("{count} 条未读 · 展开挑选（展开后右键单个图标可以关掉）"));
+            if button.clicked()||button.secondary_clicked(){self.reveal_unread();}
         }
         for (i,kind) in health.into_iter().enumerate() {
             let k=sources.len()+i;

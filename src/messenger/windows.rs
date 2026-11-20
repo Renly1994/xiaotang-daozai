@@ -565,7 +565,9 @@ mod tests {
         accounts.observe(10_000_000,Some(vec![a]));accounts.observe(20_000_000,Some(vec![a]));
         assert_eq!(accounts.target(1,15_000_000,|_|true),Some(a));
         assert_eq!(accounts.target(2,9_000_000,|_|true),None,"启动前历史通知不能绑定当前账号");
-        assert_eq!(accounts.target(3,21_000_000,|_|true),None,"超出观察时间的通知不能猜账号");
+        // 系统先记下通知、再把 toast 投给我们，创建时间比最近一次采样晚几百毫秒是常态，所以尾部留了两秒余量。
+        assert_eq!(accounts.target(3,21_000_000,|_|true),Some(a),"创建时间稍晚于采样的通知仍属于同一次观察");
+        assert_eq!(accounts.target(5,41_000_000,|_|true),None,"超出投递余量的通知不能猜账号");
         accounts.observe(60_000_000,Some(vec![a]));
         assert_eq!(accounts.target(4,30_000_000,|_|true),None,"长时间暂停后不能绑定遗漏期间的通知");
     }
