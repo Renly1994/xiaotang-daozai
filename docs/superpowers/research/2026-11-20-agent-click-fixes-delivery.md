@@ -44,6 +44,8 @@
 | D06 | `draw_details` 先取走请求，`decide()` 失败分支再去队首找它 → 永远找不到 | 提交失败时卡片静默消失、`State::Uncertain` 是死代码 | 取出的请求走 `resolve()`，失败 `mark_uncertain` 并放回队首、继续显示 |
 | D07 | UI 测试的 H::frame 不跑 `Cards::update` | 依赖 update 的保护逻辑测不到，用例假绿 | 与 `main.rs:104` 顺序对齐 |
 | D19 | 跳转提示行在超高卡片上会压住底部按钮 | 允许/拒绝被挡住 | 岛下方放不下时改画在面板内、按钮行上方（单测断言不相交） |
+| D13 | 收起态提示卡摘要恒为第 1 题 | 多题答到第 3 题再收起，卡上仍是第 1 题，像进度被重置 | 摘要改为跟随 `question_index`，收起卡每次重画都取当前请求的摘要 |
+| D14 | Esc 对卡片完全无效 | 只把岛体收起来，卡片还挂展开态 | Esc 在审批/提问详情或结果层打开时收起卡片（不交回请求），与「收起」走同一条收口路径 |
 | — | 结果未知时整排按钮被禁用（含「回客户端」） | 提示「请回客户端确认」但按钮点不动 | 放行 `agent-return` |
 
 ---
@@ -98,10 +100,12 @@
 
 ## 5. 交付
 
-- 构建：`cargo build --locked --release --bin daozai --target x86_64-pc-windows-msvc`（`scripts/dev-msvc-env.ps1`，LTO，本机约 4 分钟）
+- 构建：`cargo build --locked --release --bin daozai --target x86_64-pc-windows-msvc`（`scripts/dev-msvc-env.ps1`，LTO，本机约 3.5 分钟）
 - 交付 exe：`target/x86_64-pc-windows-msvc/release/daozai.exe` 与桌面快捷方式实际指向的 `C:/Users/Administrator/Daozai/daozai.exe` **同一份文件**
-  - size **22,707,200** bytes｜SHA256 `AC5941E21CBC8752D03CF6D3F2FAC047E860B096FF64001DAABD7D38A1983027`（2026-11-20 12:34）
-- 交付前已停掉旧实例（旧哈希 `E629D8CB…`），覆盖后重新启动并核对进程路径与哈希。
+  - 最终交付（含 §3 的 D13/D14 两处细节）：size **22,706,176** bytes｜SHA256 `785A7D64FBA33D787F4E4F802A7F0576EBE6031DA28BB897008A1F09CA7E9AF9`（2026-11-20 14:10）
+  - 上一版（只含两个主修复）：22,707,200 bytes｜SHA256 `AC5941E2…`（12:34）
+- 交付前已停掉旧实例，覆盖后重新启动并核对进程路径与哈希（本次 live PID 13996，路径 `C:/Users/Administrator/Daozai/daozai.exe`，哈希与 target 一致）。
+- `scripts/agent-e2e.ps1` 的取景已改为**固定竖带**（屏幕中心 ±（卡片半宽+120）、y 0..780），不再依赖展开/收起瞬间会重建的窗口矩形——这是之前「审批卡 25s 没看到卡」的真正原因；同时恢复该文件的 UTF-8 BOM（Windows PowerShell 5.1 解析中文必需）。
 
 ### 需要用户注意
 

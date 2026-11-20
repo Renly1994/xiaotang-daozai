@@ -214,12 +214,15 @@ function Get-IslandRect {
   if (($rect.Right - $rect.Left) -le 0 -or ($rect.Bottom - $rect.Top) -le 0) { return $null }
   $screen = Get-ScreenBounds
   $cx = [int](($screen.left + $screen.right) / 2)
-  $half = [int][Math]::Ceiling($script:CardWidthPx / 2) + 70
-  $bottom = [Math]::Min([Math]::Max($rect.Bottom, 260), 640)
+  # 取景不跟窗口矩形走：窗口在展开/收起瞬间会重建或短暂不可见，跟着它取景会截到桌面
+  # 其它窗口（审批卡「25s 没看到卡」就是踩在这里）。卡片永远水平居中在屏幕中心，
+  # 所以固定取「中心 ±（卡片半宽 + 120）」、高度 0..780 的竖带，覆盖到详情卡底部按钮行。
+  $half = [int][Math]::Ceiling($script:CardWidthPx / 2) + 120
+  $bottom = [Math]::Min($screen.top + 780, $screen.bottom)
   [pscustomobject]@{
     left = [Math]::Max($screen.left, $cx - $half)
     right = [Math]::Min($screen.right, $cx + $half)
-    top = [Math]::Max($screen.top, $rect.Top - 8)
+    top = $screen.top
     bottom = $bottom
   }
 }
@@ -242,13 +245,18 @@ function Get-LiveRegion($fallback) {
   if ($script:islandPid) {
     $fresh = Get-IslandRect
     if ($fresh) { $script:LastRegion = $fresh; return $fresh }
+    # 进程还在但这一瞬间窗口不可见：仍然用固定竖带，不要退回上一次的旧矩形。
+    $screen = Get-ScreenBounds
+    $cx = [int](($screen.left + $screen.right) / 2)
+    $half = [int][Math]::Ceiling($script:CardWidthPx / 2) + 120
+    return [pscustomobject]@{ left = [Math]::Max($screen.left, $cx - $half); right = [Math]::Min($screen.right, $cx + $half); top = $screen.top; bottom = [Math]::Min($screen.top + 780, $screen.bottom) }
   }
   if ($script:LastRegion) { return $script:LastRegion }
   if ($fallback) { return $fallback }
   $screen = Get-ScreenBounds
   $cx = [int](($screen.left + $screen.right) / 2)
-  $half = [int][Math]::Ceiling($script:CardWidthPx / 2) + 70
-  [pscustomobject]@{ left = $cx - $half; right = $cx + $half; top = $screen.top; bottom = [Math]::Min(640, $screen.bottom) }
+  $half = [int][Math]::Ceiling($script:CardWidthPx / 2) + 120
+  [pscustomobject]@{ left = $cx - $half; right = $cx + $half; top = $screen.top; bottom = [Math]::Min($screen.top + 780, $screen.bottom) }
 }
 
 function Invoke-Ocr {
