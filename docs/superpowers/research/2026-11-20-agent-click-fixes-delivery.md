@@ -73,9 +73,26 @@
 
 证据目录：`docs/superpowers/research/agent-e2e-shots/`（`20261120-1208*-done-repro`、`20261120-123919-jump-repro`、`20261120-124013-jump-repro`、`20261120-124820-banner-jump-repro`、`20261120-124137-scroll-repro` 等）。
 
-### 4.3 真实 DSH GUI 端到端
+### 4.3 真实 DSH GUI 端到端（用户真实环境）
 
-见 `docs/superpowers/research/2026-11-20-agent-click-e2e-report.md` 阶段3（新建会话 → ask_user_question 多轮 → 岛上作答 → 会话拿到答案 → 完成卡/查看回复 → 审批卡）。
+在 DSH 桌面端**新建一个真实会话**，让它调用 `ask_user_question` 问两题，岛上出现多轮提问卡后用真实鼠标作答：
+
+| 步骤 | 结果 |
+|---|---|
+| 岛上第 1/2 题选「冒烟测试」→「下一题」→ 第 2/2 题选「要」→「检查答案」→「确认提交」 | 全部点通，卡片显示「已答 1 / 已答 2」与审阅页 |
+| DSH 会话侧收到答案 | 「提问 · 2/2 已回答」，并回「你选择的是先跑冒烟测试，并且要一起更新文档。」 |
+| 会话该轮结束 | 会话正常结束（`已完成，用时…`）；岛上完成卡因 live 配置 `dwell=5s` + DSH 未重启仍加载 11/19 旧插件，未稳定截到（隔离实例上同构建的完成卡/查看回复已验证，见 §4.2） |
+
+证据：`docs/superpowers/research/agent-e2e-shots/phase3-real-dsh/`（提问卡 → 下一题 → 第 2 题 → 审阅 → 会话回执）。
+
+### 4.4 审批链路
+
+| 项 | 结果 |
+|---|---|
+| 审批卡渲染（新构建，隔离实例 + `DAOZAI_AGENT_TRACE=1`） | **正常**：`notice=AgentCard(Dsh,…) open=true nd=true details=true count=1`，画面完整（标题「等待你审批」、权限请求、`functions.bash`、操作内容 JSON、申请理由、[回客户端][拒绝][仅允许这一次]、右上「切换到客户端」）。证据 `agent-e2e-shots/20261120-133746-approval-dbg/screen-8s.png` |
+| 桥接交互（同一轮） | 驱动侧 `bridge[0]` = `kind=approval`、payload 含 tool/operation/reason/sessionId，说明请求已真实发到岛仔 |
+| 「岛上点允许 → 宿主 allowed-once」 | **本轮未能在新构建上完成**：两次 `scripts/agent-e2e.ps1 -Scenario approval` 都在 25s 内没截到卡。后续定位到两个环境原因：① 有另一个 agent/进程在运行期间重启了用户 live 实例，单实例互斥体把 E2E 实例踢掉、窗口消失（trace 在卡出现后仍在跑，但截图区域已无岛仔）；② 13:40 后工作站被锁屏（`LogonUI`），截图/点击全部失效。**非代码回归**：同构建同链路的提问/完成卡、以及审批卡的渲染都正常；点击决定路径由 `resolve()/mark_uncertain` 单测与上一版交付的 approval E2E（allowed-once）覆盖 |
+| 真实 DSH `/permission read-only` 触发审批 | 未执行（锁屏 + 不重启 DSH 约束）；操作步骤见审计文档 §5.5 / §8-E2E-11 |
 
 ---
 
@@ -95,4 +112,6 @@
 
 ## 6. 仍未处理（P2/P3，已审计留档）
 
-`D08` 桥接退出/来源关闭时队列静默清空、`D09` 宿主撤销时卡片静默消失、`D10` hand_back 不校验发送结果、`D11` 队列满 32 静默交回、`D12` kit 不一致时静默不启动、`D13` 收起卡摘要恒为第 1 题、`D14` Esc 对卡片无效、`D15-D18` 文案/文档/死代码清理。完整清单与修法见 `docs/superpowers/research/2026-11-20-agent-ui-interaction-audit.md`。
+- **审批「岛上点击 → 宿主 allowed-once」在新构建上的真机复跑**（环境原因中断，见 §4.4；桌面解锁后跑一次 `scripts/agent-e2e.ps1 -Scenario approval` 即可收口）。
+- **真实 DSH 里完成卡/子 agent 噪声**需要在**重启 DSH 桌面端**后复测（旧插件在进程内），并临时把 `agent_cards.dwell` 调到 10~15 秒方便点击。
+- `D08` 桥接退出/来源关闭时队列静默清空、`D09` 宿主撤销时卡片静默消失、`D10` hand_back 不校验发送结果、`D11` 队列满 32 静默交回、`D12` kit 不一致时静默不启动、`D13` 收起卡摘要恒为第 1 题、`D14` Esc 对卡片无效、`D15-D18` 文案/文档/死代码清理。完整清单与修法见 `docs/superpowers/research/2026-11-20-agent-ui-interaction-audit.md`。
