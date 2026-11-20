@@ -12,6 +12,17 @@ const events = [['Stop', 'finished'], ['PermissionRequest', 'approval'], ['PreTo
 function object(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
 function failure(message, exitCode) { return Object.assign(Error(message), {exitCode}); }
 function samePath(left, right) { return path.relative(left, right) === ''; }
+// 之前某次运行留下的「自己的旧接入目录」：别的岛仔数据目录导出的同一套 kit（package.json 里 name 就是本包，
+// 且路径以 agent-notices/bridge 结尾）。这种要能自愈替换，否则一个旧链接会把之后所有安装都挡在 exit 4。
+function ownKit(dir) {
+  const resolved = path.resolve(dir);
+  if (!/[\\/]agent-notices[\\/]bridge$/.test(resolved)) return false;
+  try { return JSON.parse(fs.readFileSync(path.join(resolved, 'package.json'), 'utf8'))?.name === pkg; }
+  catch { return false; }
+}
+function ownLinkSpec(spec) {
+  return typeof spec === 'string' && spec.startsWith('link:') && ownKit(spec.slice(5));
+}
 function read(file) {
   try { return fs.readFileSync(file, 'utf8'); }
   catch (e) { if (e.code !== 'ENOENT') throw e; return null; }
@@ -74,18 +85,23 @@ function connect(provider, install, dir) {
   if (!Array.isArray(bundles) || !bundles.every(x => typeof x === 'string')) throw Error('Unsupported DSH bundles.');
   const link = path.join(dir,'node_modules',...pkg.split('/'));
   const stat = fs.lstatSync(link,{throwIfNoEntry:false});
-  if (stat && (!stat.isSymbolicLink() || !samePath(path.resolve(path.dirname(link),fs.readlinkSync(link)),bridge)))
+  const linked = stat?.isSymbolicLink() ? path.resolve(path.dirname(link),fs.readlinkSync(link)) : null;
+  // 指向「别的岛仔数据目录导出的同一套 kit」的旧链接视为可自愈的残留：
+  // 用户换过数据目录/换过机器时，旧链接会让每次安装都 exit 4，表现就是「DSH 来源开着但岛上没有交互卡片」。
+  const stale = !!linked && !samePath(linked,bridge) && ownKit(linked);
+  if (stat && (linked === null || (!samePath(linked,bridge) && !stale)))
     throw failure('Another DeepSeek Harness package occupies the target. Nothing was replaced.',4);
   const spec = 'link:' + bridge.replaceAll('\\','/');
   const dep = config.dependencies?.[pkg];
-  if (dep !== undefined && dep !== spec) throw failure('Another DeepSeek Harness dependency uses this name.',4);
+  if (dep !== undefined && dep !== spec && !ownLinkSpec(dep)) throw failure('Another DeepSeek Harness dependency uses this name.',4);
   if (!install && dep === undefined && !stat) return;
   let created = false;
   try {
     if (install) {
       (config.dependencies ??= {})[pkg] = spec;
       ((config.dsh ??= {}).profile ??= {}).bundles = bundles.includes(pkg) ? bundles : [...bundles,pkg];
-      if (!stat) {
+      if (stale) fs.unlinkSync(link);
+      if (!stat || stale) {
         fs.mkdirSync(path.dirname(link), {recursive:true});
         fs.symlinkSync(bridge,link,'junction'); created = true;
       }

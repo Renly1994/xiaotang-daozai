@@ -70,6 +70,22 @@ test('invalid configuration and a foreign package are preserved',t=>{
   fs.mkdirSync(path.join(dir,'node_modules','@daozai','agent-notices'),{recursive:true});
   assert.notEqual(run('dsh','install').status,0);assert.equal(fs.readFileSync(pkg,'utf8'),'{}');
 });
+test('a stale link to an older own kit is repaired instead of blocking the install',t=>{
+  // 实测坑：用户换过数据目录后，profile 里的 junction 仍指向旧 kit（那里没有 live.json），
+  // 于是 DSH 插件连不上岛仔、提问/审批全退化成「去客户端查看」；而 connect.mjs 原本 exit 4 拒绝修复。
+  const {dir,kit,run}=fixture(t), name='@daozai/agent-notices';
+  const oldKit=path.join(path.dirname(kit),'old data dir','agent-notices','bridge');
+  fs.cpSync(path.join(kit,'bridge'),oldKit,{recursive:true});
+  fs.writeFileSync(path.join(kit,'bridge','target.json'),JSON.stringify(process.execPath));
+  const spec='link:'+oldKit.replaceAll('\\','/');
+  fs.writeFileSync(path.join(dir,'package.json'),JSON.stringify({dependencies:{[name]:spec},dsh:{profile:{bundles:[name]}}}));
+  const link=path.join(dir,'node_modules',name);
+  fs.mkdirSync(path.dirname(link),{recursive:true});fs.symlinkSync(oldKit,link,'junction');
+  const result=run('dsh','install');
+  assert.equal(result.status,0,[result.error,result.stdout,result.stderr].filter(Boolean).join('\n'));
+  assert.equal(fs.realpathSync(link),fs.realpathSync(path.join(kit,'bridge')));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'package.json'))).dependencies[name],'link:'+path.join(kit,'bridge').replaceAll('\\','/'));
+});
 test('DSH with no live island hands back once and emits only a fixed status', async t=>{
   const seen=[], handlers={};
   t.mock.method(bridge,'notify',(...args)=>seen.push(args));

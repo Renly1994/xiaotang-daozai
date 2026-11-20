@@ -178,3 +178,43 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\agent-e2e.ps1 -Scena
   启动新 exe → 核对进程路径与 SHA256 与构建产物一致。
 - 构建环境用 `scripts/dev-msvc-env.ps1`（自动探测 VS BuildTools、钉死 CC/CXX/AR）。
 - 自测入口：双击仓库根目录 `测试Agent功能.cmd`（菜单选场景），证据在 `docs/superpowers/research/agent-e2e-shots/<时间戳>/`。
+---
+
+## 8. 现场故障：提问只在岛上提示「请回到客户端」（2026-11-20 17:00 排查）
+
+**现象**：用户在真实 DSH 里让模型调用 `ask_user_question`，岛上没有交互卡片，只弹出一条
+「有问题需要你回答，请回到客户端」的普通提醒。
+
+**根因**：DSH profile 的插件链接是**过期残留**。
+
+- `~/.dsh/profiles/desktop/package.json` 里 `@daozai/agent-notices` 依赖与
+  `node_modules/@daozai/agent-notices` junction **都指向** `C:\Users\59531\Documents\DeepSeek\refs\daozai-test-data\agent-notices\bridge`
+  （2026-11-20 02:18 一次测试留下的），该目录**没有 `live.json`**；
+- `channel.cjs` 的发现逻辑是 `path.join(__dirname,'live.json')` → 旧目录里读不到 → `enabled()` 恒为 false
+  → 插件的提问/审批全部走 `notify.cjs` 兜底（`岛仔 --agent-notice dsh question`），
+  岛仔按固定文案弹「…请回到客户端」，永远不会出现可作答的卡片；
+- 岛仔每次启动都会 `connect.mjs dsh install` 尝试修复，但旧版 `connect.mjs` 见到
+  「junction / 依赖指向别处」就直接 `exit 4`（"Another DeepSeek Harness package occupies the target."），
+  于是这个残留**永久卡死**，且只在岛仔设置页显示「接入配置被其他插件占用，已保留原配置」，很容易忽略。
+
+**修复**（`integrations/agent-notices/connect.mjs`）：
+
+- 新增 `ownKit()` / `ownLinkSpec()`：识别「指向另一个 `<...>/agent-notices/bridge`、且 package.json name 就是
+  `@daozai/agent-notices`」的旧链接——那是**自己以前的导出**，视为可自愈残留，摘掉 junction 并重建到当前 kit；
+- 真正的**外来包**（真实目录、或别的包名）仍然 `exit 4` 原样保留（原有用例继续通过）；
+- 回归用例：`a stale link to an older own kit is repaired instead of blocking the install`。
+
+**现场修复结果**（新构建 `1405D948…`，2026-11-20 17:08）：
+
+```
+~/.dsh/profiles/desktop/package.json  →  link:C:/Users/59531/AppData/Roaming/Daozai/agent-notices/bridge
+node_modules/@daozai/agent-notices    →  C:\Users\59531\AppData\Roaming\Daozai\agent-notices\bridge
+```
+
+该目录里有当前岛仔的 `live.json`（17:08:26）和含子 agent 过滤的新 `index.mjs`。
+
+**待用户操作**：`@daozai/agent-notices` 是在 DSH 启动时加载的（旧进程仍持有旧目录里的模块），
+**必须重启一次 DSH 桌面端**才会加载修复后的插件；重启后再发一次 `ask_user_question` 应出现岛上作答卡。
+
+**顺带建议**（未做）：`exit 4` 这种「接入被占用」的失败在岛仔设置页只有一行小字，
+以后可以升级成显式提示 + 「一键修复」入口。
