@@ -7031,6 +7031,64 @@ fn agent_notice_questions_page_one_at_a_time_supports_back_and_custom_input(){
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="第一轮：能正常显示吗？")));
 }
 
+
+#[test]
+fn banner_summary_follows_the_current_question(){
+    // 回归：多题提问答到第 3 题再收起，提示卡摘要仍是第 1 题题干，用户会以为进度被重置。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.dsh_notifications=true;h.app.settings.agent.interactive=true;
+    let settings=h.app.settings.clone();
+    h.app.agent_cards.receive(serde_json::json!({"id":"multi-summary","provider":"dsh","kind":"question","data":{
+        "questions":[
+            {"id":"s1","question":"第一题：先跑冒烟还是完整回归？","options":[{"label":"冒烟测试"},{"label":"完整回归"}]},
+            {"id":"s2","question":"第二题：要不要一起更新文档？","options":[{"label":"要"},{"label":"不要"}]}
+        ]}}),&settings);
+    for _ in 0..90 {h.frame(vec![]);}
+    assert!(h.app.agent_cards.details_open("multi-summary"));
+    h.click_text("冒烟测试");h.frame(vec![]);
+    h.click_text("下一题");h.frame(vec![]);
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t.contains("第二题")),"应进入第 2 题：{texts:?}");
+    // 收起详情 → 待处理提示卡的摘要必须是当前这一题（第 2 题），而不是第 1 题。
+    let left=WIN_W/2.0-crate::agent_ui::CARD_W/2.0;
+    h.click(Pos2::new(left+crate::agent_ui::CARD_W-18.0-11.0,13.0+5.0+11.0));
+    for _ in 0..40 {h.frame(vec![]);}
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t.contains("第二题")),"收起后提示卡要跟着显示当前题：{texts:?}");
+    assert!(!texts.iter().any(|t|t.contains("第一题")),"收起后不该退回第 1 题：{texts:?}");
+}
+
+#[test]
+fn escape_collapses_an_open_agent_card_without_handing_it_back(){
+    // 回归：Esc 对 Agent 卡片完全无效（只把岛体收起来，卡片还挂在展开态）。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.dsh_notifications=true;h.app.settings.agent.interactive=true;
+    let settings=h.app.settings.clone();
+    h.app.agent_cards.receive(serde_json::json!({"id":"esc-approval","provider":"dsh","kind":"approval",
+        "data":{"tool":"bash","reason":"确认后执行","cwd":"C:\\work","operation":"{\"cmd\":\"ls\"}"}}),&settings);
+    for _ in 0..40 {h.frame(vec![]);}
+    assert!(h.app.agent_detail_active(),"审批卡到达应自动展开");
+    let before=h.app.agent_cards.count();
+    h.frame(vec![egui::Event::Key{key:egui::Key::Escape,physical_key:None,pressed:true,repeat:false,modifiers:Default::default()}]);
+    for _ in 0..40 {h.frame(vec![]);}
+    assert!(!h.app.agent_detail_active(),"Esc 应收起审批详情");
+    assert_eq!(h.app.agent_cards.count(),before,"Esc 只收起详情，不能把请求交回/丢掉");
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t=="查看并审批"),"应收起到待处理提示卡：{texts:?}");
+    // 结果层同理：Esc 关层且回到完成卡，不留空岛。
+    h.app.settings.agent.content=2;h.app.settings.agent.expanded=true;
+    h.app.agent_cards.close_detail("esc-approval");
+    h.app.agent_cards.hand_back("esc-approval");
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,"## 完成\n- 第一条正文".into());
+    for _ in 0..60 {h.frame(vec![]);}
+    h.click_text("查看回复");for _ in 0..45 {h.frame(vec![]);}
+    assert!(h.app.result_active(),"点查看回复应打开结果层");
+    h.frame(vec![egui::Event::Key{key:egui::Key::Escape,physical_key:None,pressed:true,repeat:false,modifiers:Default::default()}]);
+    for _ in 0..40 {h.frame(vec![]);}
+    assert!(!h.app.result_active(),"Esc 应关闭结果层");
+    assert!(!h.app.open,"Esc 关闭结果层后岛体应收起，不能留空岛");
+}
+
 #[test]
 fn external_notice_respects_permissions_masks_preview_and_never_reemits(){
  let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.frame(vec![]);

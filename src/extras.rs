@@ -542,9 +542,12 @@ impl App {
             });
             if let Some(head)=head {
                 let m=crate::agent_ui::Measurer::new(c.ui.ctx());
+                // 摘要取「当前状态」而不是入队时快照：多题提问答到下一题后收起，卡上要跟着变。
+                let latest=self.agent_cards.request_summary(id);
+                let summary=latest.as_deref().unwrap_or(a.body.as_str());
                 let view=crate::agent_ui::BannerView{
                     head,
-                    summary:a.body.as_str(),
+                    summary,
                     handoff:left,
                     queue:self.agent_cards.count(),
                     approval:a.title=="等待你审批",

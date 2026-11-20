@@ -129,9 +129,13 @@ impl Request {
             "等待你审批"
         }
     }
+    /// 收起态提示卡显示的那一行摘要：多题提问要显示**当前这一题**，否则答到第 3 题
+    /// 再收起，卡上仍是第 1 题，用户会以为进度被重置。
     fn summary(&self) -> &str {
         if self.question {
-            self.data.questions.first().map(|q| q.question.as_str()).unwrap_or("")
+            self.data.questions.get(self.question_index)
+                .or_else(|| self.data.questions.first())
+                .map(|q| q.question.as_str()).unwrap_or("")
         } else {
             &self.data.tool
         }

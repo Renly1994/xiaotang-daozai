@@ -2028,6 +2028,19 @@ impl App {
         if self.music_volume_open && ctx.input_mut(|i|i.consume_key(egui::Modifiers::NONE,egui::Key::Escape)) {
             self.music_volume_open=false;
         }
+        // Esc 先处理卡片：审批/提问详情与结果层打开时，Esc = 收起详情（不交回请求），
+        // 与参考项目一致；否则用户按 Esc 只会把岛体收起来，卡片还挂在展开态。
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.agent_panel_active() {
+            if self.result_active() {
+                self.agent_cards.close_result();
+            } else if let Some(id)=self.agent_cards.active().map(|(id,_,_,_)|id.to_owned()) {
+                if self.agent_cards.details_open(&id) {
+                    // 丢掉 details 后由面板收口逻辑（open/notice_details 复位）接管，
+                    // 与点「收起」走同一条路径：先回到收起态提示卡，再随鼠标离开收起。
+                    self.agent_cards.close_detail(&id);
+                }
+            }
+        }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.is_editing() {
             self.cancel_edit();
         }
