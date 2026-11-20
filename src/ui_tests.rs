@@ -9699,6 +9699,46 @@ fn collapsing_a_card_falls_back_to_the_pending_banner_immediately(){
 }
 
 
+
+#[test]
+fn jump_note_is_actually_drawn_under_the_banner_and_inside_the_panel(){
+    // 跳转反馈只有「写在状态里」不够：卡片态下 toast 原本不绘制，必须确认提示行真的进了画面，
+    // 且在很高的详情卡上不压住底部按钮行。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.interactive=true;
+    let settings=h.app.settings.clone();
+    h.app.agent_cards.receive(serde_json::json!({"id":"note-me","provider":"dsh","kind":"approval",
+        "data":{"tool":"bash","reason":"确认后执行","cwd":"C:\\work","operation":"{\"cmd\":\"ls\"}"}}),&settings);
+    for _ in 0..40 {h.frame(vec![]);}
+    let left=WIN_W/2.0-crate::agent_ui::CARD_W/2.0;
+    // 收起详情 → 提示卡（banner）态
+    h.click(Pos2::new(left+crate::agent_ui::CARD_W-18.0-11.0,13.0+5.0+11.0));
+    for _ in 0..40 {h.frame(vec![]);}
+    h.app.jump_feedback("已切到 DeepSeek Harness");
+    for _ in 0..6 {h.frame(vec![]);}
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t=="已切到 DeepSeek Harness"),"提示卡态必须把跳转结论画出来：{texts:?}");
+    // 详情卡态（高度可能逼近窗口上限）也要画，并且不能落在底部按钮行上。
+    h.click_text("查看并审批");
+    for _ in 0..40 {h.frame(vec![]);}
+    h.app.jump_feedback("已切到 DeepSeek Harness");
+    for _ in 0..6 {h.frame(vec![]);}
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t=="已切到 DeepSeek Harness"),"详情卡态也必须显示跳转结论：{texts:?}");
+    let note=h.shapes.iter().find_map(|s|match &s.shape{
+        egui::Shape::Text(t) if t.galley.text()=="已切到 DeepSeek Harness"=>Some(t.visual_bounding_rect()),
+        _=>None}).expect("提示行应有可见文字矩形");
+    let footer=h.shapes.iter().find_map(|s|match &s.shape{
+        egui::Shape::Text(t) if t.galley.text()=="仅允许这一次"=>Some(t.visual_bounding_rect()),
+        _=>None}).expect("审批卡应有允许按钮文字");
+    // 提示行要么排在卡片下方（常见），要么在卡片内底部按钮之上；绝不能与操作按钮重叠。
+    assert!(!note.intersects(footer),"提示行不能压住底部按钮行：note={note:?} footer={footer:?}");
+    let panel_bottom=h.app.agent_cards.detail_size("note-me").1;
+    assert!(note.min.y>=footer.max.y || note.max.y<=panel_bottom+2.0,"提示行必须落在卡片外下方或卡片内：note={note:?}");
+}
+
 #[test]
 fn banner_jump_chip_always_reports_a_result(){
     // 回归：收起态提示卡上的「切换到客户端」以前在 extras.rs 里是空分支，点了完全没反应。

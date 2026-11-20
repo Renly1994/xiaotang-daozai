@@ -77,19 +77,24 @@ src/theme.rs           Agent 语义色 + 等宽字体家族
 
 ## 4. 交付
 
-- exe：`target\x86_64-pc-windows-msvc\release\daozai.exe`
-- 大小 **22,750,720** 字节｜SHA256 `226FBF55887FD47EC7A119EAF792884394AC05192A07D3F66B7C3247543627A9`
-- 桌面快捷方式「岛仔－当前测试版」已指向该文件（已核对目标/大小/哈希一致）
+- exe：`target\x86_64-pc-windows-msvc\release\daozai.exe`，桌面「岛仔－当前测试版」快捷方式实际指向 `C:\Users\Administrator\Daozai\daozai.exe`（**两处同一份文件**，2026-11-20 核对；快捷方式不是指向 target 下的 exe）
+- 大小 **22,692,352** 字节｜SHA256 `E629D8CB89F3CC1313EBBB46A131D2F94AE8AD0414F76F490BA6D28D48D05194`（2026-11-20 11:01 用 rustc 1.100.0 从 `7d028df` 重建；此前记录的 22,750,720 / `226FBF55…` 是上一套工具链的产物，已过期）
+- ⚠ 该构建已被 **2026-11-20 12:34** 的后续构建取代（size 22,707,200｜SHA256 `AC5941E2…`）：完成卡「查看回复」说明层、跳转反馈与若干交互缺陷，见 `docs/superpowers/research/2026-11-20-agent-click-fixes-delivery.md`。
 - 验收证据：`docs/superpowers/research/agent-e2e-shots/20261120-061922/`（21 个文件，截图已裁到卡片本体）
 
 ## 5. 本机开发环境（重要）
 
-本机 VS 18 Community 缺少桌面 CRT（`lib\x64`、`include`），直接用 vcvars 会报 `LNK1104 msvcrt.lib` / `C1083 vcruntime.h`。统一用：
+2026-11-20 实测环境：
+
+- **Visual Studio 18 Community 缺桌面 CRT**（`VC\Tools\MSVC\<ver>` 下没有 `include`、`lib\x64`），直接用它的 vcvars 会报 `LNK1104 msvcrt.lib` / `C1083 vcruntime.h`。旧记录里的 `C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools` 在这台机器上**已不存在**。
+- 现已装好 **VS 2022 BuildTools**（`C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools`，VCTools + Windows SDK 10.0.26100）和 **Rust stable 1.100.0**（`%USERPROFILE%\.cargo\bin`，尚未加入系统 PATH）。
+- `scripts/dev-msvc-env.ps1` 已改为**自动探测** vcvars（候选路径 + vswhere 按 `VC.Tools.x86.x64` 过滤），不再写死实例路径；文件必须是 UTF-8 with BOM，否则 Windows PowerShell 5.1 解析中文会直接失败。
+
+统一构建命令（仓库根目录）：
 
 ```powershell
-powershell -NoProfile -Command ". .\scripts\dev-msvc-env.ps1; cargo build --locked --release --bin daozai --target x86_64-pc-windows-msvc"
+powershell -NoProfile -ExecutionPolicy Bypass -Command ". .\scripts\dev-msvc-env.ps1; cargo build --locked --release --bin daozai --target x86_64-pc-windows-msvc"
 ```
 
-脚本会调用 **BuildTools** 的 `vcvars64.bat`，并把 `CC/CXX/AR` 钉死到该实例（否则 cc-rs 会挑到 Community，`zstd-sys`/`ring` 编译失败）。
+脚本会把 `CC/CXX/AR` 钉死到 BuildTools 实例（否则 cc-rs 挑到 Community，`zstd-sys`/`ring` 编译失败），并把 `TEMP/TMP` 指到 `target/link-tmp`。release（LTO + codegen-units=1）在本机约 **6 分钟**；快速迭代用 debug：`cargo build --bin daozai --target x86_64-pc-windows-msvc`。
 
-快速迭代用 debug 构建（约 10–20s）：`cargo build --bin daozai --target x86_64-pc-windows-msvc`；release（LTO+codegen-units=1）约 5 分钟。
