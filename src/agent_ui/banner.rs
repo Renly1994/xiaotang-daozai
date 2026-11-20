@@ -61,7 +61,13 @@ pub(crate) fn draw_banner(c: &Card, m: &M, v: &BannerView, t: f64) -> Option<Act
     let layout = measure(m, v, super::CARD_W);
     let w = layout.w;
     let (alpha, dy) = super::entrance(v.age);
+    // UI Map（调试，`DAOZAI_UI_MAP`）：收起态提示卡这一屏（岛体未展开，所以 panel=false）。
+    crate::ui_map::publish_frame(c.ui.ctx(), false, false, true);
+    crate::ui_map::publish_queue(v.queue);
+    crate::ui_map::publish_card(c.ui.ctx(), Some(if v.approval { "approval" } else { "question" }), false, 0, 0, false, None);
+    m::map_island_bar(c);
     let c = c.faded(alpha).shifted(0.0, dy);
+    crate::ui_map::node("card", c.rect(0.0, 0.0, w, layout.h), v.head.kicker, true);
     let mut action = None;
     if widgets::draw_head(&c, &layout.head, &v.head, w) == widgets::HeadHit::Jump {
         action = Some(Action::Jump);
@@ -96,6 +102,11 @@ pub(crate) fn draw_banner(c: &Card, m: &M, v: &BannerView, t: f64) -> Option<Act
     if let Some(i) = widgets::draw_footer(&c, fy, w, &specs, true) {
         action = Some(if i == 0 { Action::Return } else { Action::Review });
     }
+    // UI Map（调试）：收起提示卡的第二个按钮是「查看并审批 / 查看并回答」，
+    // 它复用了 footer 的 agent-review id（footer 登记成 btn.submit），这里改登记为 btn.view。
+    let rects = m::footer_rects(&c, fy, w, specs.len());
+    crate::ui_map::drop_node("btn.submit");
+    crate::ui_map::node("btn.view", rects[1], specs[1].1, true);
     let _ = t;
     action
 }

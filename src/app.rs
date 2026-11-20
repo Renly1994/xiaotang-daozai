@@ -2179,7 +2179,11 @@ impl App {
                 // 「查看回复」：和详情共用展开面板，卡片宽度跟随面板。
                 let detail_width=agent_ui::CARD_W.min(panel.width());
                 let detail_origin=panel.min+Vec2::new((panel.width()-detail_width).max(0.0)/2.0,0.0);
-                self.agent_cards.draw_result(&Card::new(ui,detail_origin,panel.intersect(ui.max_rect())));
+                let action=self.agent_cards.draw_result(&Card::new(ui,detail_origin,panel.intersect(ui.max_rect())));
+                // 结果层的「关闭」是明确的一次性收起：背后的完成卡要一起收掉，
+                // 否则用户会先退回「本轮已结束」卡、还得再点一次，白白多一步。
+                // Esc 与点卡片外仍只关这一层（既有不变量：回到完成卡，不交回请求）。
+                if action==Some(agent_ui::Action::Dismiss) { self.dismiss_completion_card(); }
             }else if let Some(id)=self.agent_cards.active().map(|(id,_,_,_)|id.to_owned()) {
                 let detail_width=agent_ui::CARD_W.min(panel.width());
                 let detail_origin=panel.min+Vec2::new((panel.width()-detail_width).max(0.0)/2.0,0.0);
@@ -2675,6 +2679,23 @@ impl App {
         self.h.tune(OPEN_H.0,OPEN_H.1);
         self.w.target=PW;
         self.h.target=self.expanded_height();
+    }
+    /// 结果层点「关闭」：连同背后的完成卡一起收起，一次到位。
+    ///
+    /// 只处理完成通知（`AgentDone`）——结果层只可能从它打开；其它通知原样保留。
+    /// 同时复位面板状态并上 `hover_lock`：否则鼠标还停在原按钮位置时，收起动画期间的命中区
+    /// 仍然是整块面板，`want` 会因为 `notice.is_none()` 重新把面板顶开（露出媒体页）。
+    /// `hover_lock` 与 Esc/收起详情走同一个机制：鼠标离开后自动解除。
+    fn dismiss_completion_card(&mut self){
+        let completion=|a:&Alert|matches!(a.source,crate::extras::AlertSource::AgentDone(_));
+        if self.notice.as_ref().is_some_and(completion){self.notice=None;}
+        if self.hud_notice.as_ref().is_some_and(completion){self.hud_notice=None;}
+        self.open=false;
+        self.notice_details=false;
+        self.forced_open_until=0.0;
+        self.result_was_active=false;
+        self.hover_lock=true;
+        self.hover_since=None;
     }
     pub(crate) fn notice_details_active(&self)->bool{self.notice_details}
 

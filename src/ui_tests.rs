@@ -9656,6 +9656,138 @@ fn done_with_body_keeps_the_full_reply_in_the_result_layer(){
     assert!(!h.app.open,"关闭结果层后岛体应收起");
 }
 
+// ---------------- 结果层「一次收起」与受限 markdown 覆盖 ----------------
+
+/// 点结果层底部「关闭」：结果层、完成卡、展开面板必须同时消失（不能还要再点一次）。
+fn dismiss_result_layer_in_one_click(content: u8, body: &str) {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = H::new();
+    h.app.settings.dsh_notifications = true;
+    h.app.settings.agent.content = content;
+    h.app.settings.agent.expanded = true;
+    h.app.settings.agent.dwell = 15;
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh, body.to_owned());
+    for _ in 0..60 { h.frame(vec![]); }
+    assert!(h.app.notice.is_some(), "完成通知应当出现在岛上");
+    h.click_text("查看回复");
+    for _ in 0..45 { h.frame(vec![]); }
+    assert!(h.app.result_active(), "点「查看回复」应打开结果层");
+    assert!(h.app.agent_panel_active(), "结果层占用展开面板");
+    h.click_text("关闭");
+    for _ in 0..40 { h.frame(vec![]); }
+    assert!(!h.app.result_active(), "关闭后结果层应消失");
+    assert!(!h.app.agent_cards.result_open(), "结果层状态必须真的清掉");
+    assert!(!h.app.agent_panel_active(), "结果层关掉后不应继续占用面板");
+    assert!(!h.app.open, "关闭后岛体应收起，不能留空面板");
+    // 用户实测的毛病：关闭结果层后回到「本轮已结束」完成卡，还得再点一次「关闭」。
+    assert!(h.app.notice.is_none(), "背后的完成卡必须一起收起，否则用户还要再点一次");
+    assert!(h.app.hud_notice.is_none(), "收起态的完成卡浮层也要一起收掉");
+    let texts = h.strings();
+    assert!(!texts.iter().any(|t| t == "查看回复"), "不能退回「本轮已结束」完成卡：{texts:?}");
+    assert!(!texts.iter().any(|t| t == "本轮已结束"), "完成卡标题不该再出现：{texts:?}");
+}
+
+#[test]
+fn closing_the_no_body_result_layer_collapses_everything_in_one_click() {
+    // content=0（用户真实配置）时点开的是本机说明层，它同样要一次收起。
+    dismiss_result_layer_in_one_click(0, "这段正文在 content=0 时不会进入岛上");
+}
+
+#[test]
+fn closing_the_body_result_layer_collapses_everything_in_one_click() {
+    dismiss_result_layer_in_one_click(2, "## 本轮完成\n- 更新连接池上限\n\n最后一行正文。");
+}
+
+#[test]
+fn escape_still_only_closes_the_result_layer_and_keeps_the_completion_card() {
+    // 与「关闭」不同：Esc / 点卡片外只是离开阅读层，还要能回到完成卡上继续操作。
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = H::new();
+    h.app.settings.dsh_notifications = true;
+    h.app.settings.agent.content = 2;
+    h.app.settings.agent.expanded = true;
+    h.app.settings.agent.dwell = 15;
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh, "## 完成\n- 第一条".into());
+    for _ in 0..60 { h.frame(vec![]); }
+    h.click_text("查看回复");
+    for _ in 0..45 { h.frame(vec![]); }
+    assert!(h.app.result_active(), "点「查看回复」应打开结果层");
+    h.frame(vec![egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]);
+    for _ in 0..40 { h.frame(vec![]); }
+    assert!(!h.app.result_active(), "Esc 应关闭结果层");
+    assert!(!h.app.open, "Esc 关闭结果层后岛体应收起");
+    assert!(h.app.notice.is_some(), "Esc 只关阅读层，完成卡要留着（与「关闭」区分）");
+    let texts = h.strings();
+    assert!(texts.iter().any(|t| t == "查看回复"), "Esc 后应回到完成卡：{texts:?}");
+}
+
+#[test]
+fn result_layer_renders_inline_code_bold_ordered_lists_tables_and_links() {
+    // 审计结论回归：这些 markdown 以前全部原样露出（反引号、星号、竖线、`1.` 混进正文）。
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = H::new();
+    h.app.settings.dsh_notifications = true;
+    h.app.settings.agent.content = 2;
+    h.app.settings.agent.expanded = true;
+    h.app.settings.agent.dwell = 15;
+    let body = "## 本轮完成\n\n用了 `cargo test` 验证，**全部通过**。详见 [接入文档](https://example.com/docs)。\n\n1. 先改配置\n2. 再跑回归\n\n| 项目 | 结果 |\n| --- | --- |\n| 单元测试 | 通过 |\n";
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh, body.to_owned());
+    for _ in 0..60 { h.frame(vec![]); }
+    h.click_text("查看回复");
+    for _ in 0..45 { h.frame(vec![]); }
+    assert!(h.app.result_active(), "点「查看回复」应打开结果层");
+    let texts = h.strings();
+    // 1) 行内 code / 粗体：标记被吃掉，只剩可见文字。
+    assert!(texts.iter().any(|t| t == "用了 cargo test 验证，全部通过。详见 接入文档 (https://example.com/docs)。"),
+        "行内标记应渲染而不是原样显示：{texts:?}");
+    assert!(!texts.iter().any(|t| t.contains("**") || t.contains('`') || t.contains("](")),
+        "结果层不应出现原始行内标记：{texts:?}");
+    // 2) 真的换了字体：行内代码等宽、粗体半粗。
+    let sections: Vec<(String, egui::FontFamily)> = h.shapes.iter().filter_map(|s| match &s.shape {
+        egui::Shape::Text(t) => Some(t.galley.job.sections.iter().map(|sec| (
+            t.galley.job.text.get(sec.byte_range.clone()).unwrap_or("").to_owned(),
+            sec.format.font_id.family.clone(),
+        )).collect::<Vec<_>>()),
+        _ => None,
+    }).flatten().collect();
+    let mono = egui::FontFamily::Name("mono-regular".into());
+    let semibold = egui::FontFamily::Name("semibold".into());
+    assert!(sections.iter().any(|(text, family)| text == "cargo test" && *family == mono),
+        "行内代码必须用等宽字体：{sections:?}");
+    assert!(sections.iter().any(|(text, family)| text == "全部通过" && *family == semibold),
+        "**粗体** 必须换成粗体字重：{sections:?}");
+    // 3) 有序列表：序号单独成列，正文不带 "1. " 前缀。
+    assert!(texts.iter().any(|t| t == "1."), "有序列表要画出序号：{texts:?}");
+    assert!(texts.iter().any(|t| t == "2."), "第二条也要有序号：{texts:?}");
+    assert!(texts.iter().any(|t| t == "先改配置"), "有序列表正文不应带序号前缀：{texts:?}");
+    // 4) 表格：单元格拆开渲染，竖线和分隔行都不再原样出现。
+    assert!(texts.iter().any(|t| t == "项目"), "表格表头应分列渲染：{texts:?}");
+    assert!(texts.iter().any(|t| t == "单元测试"), "表格数据行应分列渲染：{texts:?}");
+    assert!(!texts.iter().any(|t| t.contains('|')), "表格竖线不应原样露出：{texts:?}");
+    assert!(!texts.iter().any(|t| t.contains("---")), "表格分隔行不应原样露出：{texts:?}");
+}
+
+#[test]
+fn result_layer_markdown_edge_cases_never_panic_or_leak_markers() {
+    // 落单标记、超长正文（桥接上限 32000 字符）都不能 panic，也不能把标记原样漏出来。
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = H::new();
+    h.app.settings.dsh_notifications = true;
+    h.app.settings.agent.content = 2;
+    h.app.settings.agent.expanded = true;
+    h.app.settings.agent.dwell = 15;
+    let mut body = String::from("落单的 ** 与 ` 和 [半截](链接不能成对\n\n");
+    body.push_str(&"普通正文行，用来把结果层撑到需要滚动。\n".repeat(1200));
+    body.push_str("\n结尾：不崩就是对的。");
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh, body);
+    for _ in 0..60 { h.frame(vec![]); }
+    h.click_text("查看回复");
+    for _ in 0..45 { h.frame(vec![]); }
+    assert!(h.app.result_active(), "超长正文也要能打开结果层");
+    let texts = h.strings();
+    assert!(texts.iter().any(|t| t.contains("落单的")), "落单标记应原样保留而不是吞掉文字：{texts:?}");
+}
+
 #[test]
 fn turning_completion_content_off_closes_an_open_reply_layer(){
     // 隐私边界：已经打开的正文层在「完成内容」被改成仅状态后必须立刻关闭；
@@ -9903,4 +10035,71 @@ fn completion_panel_height_tracks_the_measured_card(){
     assert!(card_h>112.0,"长正文的完成卡应该比旧常量高：{card_h}");
     let (_,panel_h)=h.app.base_size();
     assert!(panel_h+0.6>=card_h,"面板高度必须容纳完成卡：{panel_h} vs {card_h}");
+}
+
+/// 导出结果层 markdown 的实际画面（含「关闭」后的收起态）：人工复核用，默认忽略。
+/// 运行：`DAOZAI_AGENT_PREVIEW=<目录> cargo test --lib result_layer_markdown_preview -- --ignored`。
+#[test]
+#[ignore]
+fn result_layer_markdown_preview(){
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_AGENT_PREVIEW").expect("DAOZAI_AGENT_PREVIEW"));
+    std::fs::create_dir_all(&dest).unwrap();
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=2;
+    h.app.settings.agent.expanded=true;
+    h.app.settings.agent.dwell=15;
+    let body="## 本轮完成\n\n用了 `cargo test` 验证，**全部通过**。详见 [接入文档](https://example.com/docs)。\n\n1. 先改 `gateway.yaml` 的超时\n2. 再跑 12 个回归用例\n3. 最后确认发布窗口\n\n- 无序条目一\n  - 二级缩进条目\n- 无序条目二\n\n> 引用：发布前请确认变更单。\n\n| 项目 | 结果 | 备注 |\n| --- | --- | --- |\n| 单元测试 | 通过 | 12 个用例 |\n| 冒烟测试 | 通过 | 登录、支付 |\n\n---\n\n```bash\ncargo test --lib ui_tests -- --test-threads=1\n```\n\n以上全部通过。";
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,body.to_owned());
+    for _ in 0..60 {h.frame(vec![]);}
+    h.click_text("查看回复");
+    for _ in 0..45 {h.frame(vec![]);}
+    assert!(h.app.result_active(),"结果层应打开");
+    let ppp=2.0;let (w,hgt)=(crate::app::CANVAS_W,WIN_H);
+    let mut raster=crate::preview_raster::Raster::new((w*ppp) as usize,(hgt*ppp) as usize);
+    let mut shoot=|h:&mut H,name:&str|{
+        let env=Env{t:h.t,clock:"09:41:00".into(),today:"2026-11-20".into(),date:"11月20日 周五".into(),bt_ready:true,..Default::default()};
+        let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(w,hgt))),time:Some(h.t),focused:true,
+            viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(ppp),..Default::default()})).collect(),..Default::default()};
+        let app=&mut h.app;
+        let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{let win=Rect::from_min_size(ui.max_rect().min,Vec2::new(WIN_W,hgt));app.frame(ui,win,&env);});});
+        raster.update_textures(&output.textures_delta);
+        let primitives=h.ctx.tessellate(output.shapes,output.pixels_per_point);
+        raster.buf.fill([0.14,0.16,0.22,1.0]);
+        raster.draw(&primitives,output.pixels_per_point);
+        let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+        let image=image::RgbaImage::from_raw((w*ppp) as u32,(hgt*ppp) as u32,rgba).unwrap();
+        let crop_h=(h.app.expanded_height()*ppp+40.0).max(260.0).min(hgt*ppp) as u32;
+        let crop_w=1160u32.min((w*ppp) as u32-160);
+        let crop=image::imageops::crop_imm(&image,160,0,crop_w,crop_h).to_image();
+        crop.save(dest.join(format!("{name}.png"))).unwrap();
+    };
+    shoot(&mut h,"result-markdown-top");
+    // 滚到底：确认代码块与结尾段落没有压住底部按钮。
+    let p=Pos2::new(WIN_W/2.0,220.0);
+    h.cursor=Some(p);
+    h.frame(vec![egui::Event::PointerMoved(p)]);
+    for _ in 0..40 {h.wheel(-40.0);}
+    shoot(&mut h,"result-markdown-bottom");
+    // 点「关闭」：必须一次收起，画面上不再有完成卡。
+    h.cursor=None;
+    h.frame(vec![]);
+    let close=h.shapes.iter().find_map(|s|match &s.shape{
+        egui::Shape::Text(t) if t.galley.text()=="关闭"=>Some(t.visual_bounding_rect().center()),_=>None}).expect("结果层应有「关闭」");
+    h.click(close);
+    for _ in 0..40 {h.frame(vec![]);}
+    assert!(!h.app.open && h.app.notice.is_none(),"「关闭」必须一次收起（画面上不能再留完成卡）");
+    shoot(&mut h,"result-markdown-closed");
+    // 用户真实配置（展开结果卡 + 完成内容=仅状态）时会打开本机说明层，它同样要能读、能一次收起。
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=0;
+    h.app.settings.agent.expanded=true;
+    h.app.settings.agent.dwell=15;
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,String::new());
+    for _ in 0..60 {h.frame(vec![]);}
+    h.click_text("查看回复");
+    for _ in 0..45 {h.frame(vec![]);}
+    assert!(h.app.result_active(),"content=0 点「查看回复」应打开说明层");
+    shoot(&mut h,"result-no-body");
 }

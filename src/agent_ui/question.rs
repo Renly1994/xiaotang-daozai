@@ -404,6 +404,12 @@ fn draw_answer_body(body: &Card, c: &Card, a: &AnswerBody, v: &mut QuestionView,
         let ry = body_top + row.top;
         let selected = answer.as_ref().is_some_and(|ans| ans.selected.iter().any(|s| s == &row.key));
         let r = body.hit(x, ry, a.cw, row.h, format!("agent-option-{}-{}", a.qid, i));
+        // UI Map（调试）：只登记滚动视口里真正可见的选项行，否则测试会点到视口外的坐标。
+        let visible = body.painter.clip_rect();
+        let row_rect = body.rect(x, ry, a.cw, row.h);
+        if visible.intersects(row_rect) {
+            crate::ui_map::node(&format!("option.{i}"), row_rect, &row.key, !busy);
+        }
         let (hover, _) = if busy { (0.0, 0.0) } else { body.hover_t(&r) };
         let fill = if selected {
             paint::mix(OPT_SELECTED, OPT_SELECTED_HOVER, hover)
@@ -448,6 +454,11 @@ fn draw_answer_body(body: &Card, c: &Card, a: &AnswerBody, v: &mut QuestionView,
     galley(body, x, body_top + a.answer_label_top, &a.answer_label, theme::AGENT_SUBTLE);
     let iy = body_top + a.input_top;
     inset(body, x, iy, a.cw, a.input_h, theme::AGENT_INSET, theme::AGENT_INSET_EDGE);
+    // UI Map（调试）：自定义回答输入框（可见时）。
+    let input_rect = c.rect(x, iy - scroll, a.cw, a.input_h);
+    if body.painter.clip_rect().intersects(input_rect) {
+        crate::ui_map::node("input.custom", input_rect, "自定义回答", !busy);
+    }
     if let Some(ans) = answer.as_mut() {
         let rect = c.rect(x, iy - scroll, a.cw, a.input_h);
         let clip = body.painter.clip_rect();
@@ -485,7 +496,14 @@ pub(crate) fn draw_question(c: &Card, m: &M, v: &mut QuestionView, scroll: f32, 
     let layout = measure(m, v, super::CARD_W);
     let w = layout.w;
     let (alpha, dy) = super::entrance(v.age);
+    // UI Map（调试，`DAOZAI_UI_MAP`）：登记当前可见屏的状态与外框。
+    crate::ui_map::publish_frame(c.ui.ctx(), true, true, true);
+    crate::ui_map::publish_queue(v.queue);
+    crate::ui_map::publish_card(c.ui.ctx(), Some("question"), true, layout.index, v.questions.len(), v.state.busy(), v.error);
+    m::map_island_bar(c);
     let c = c.faded(alpha).shifted(0.0, dy);
+    crate::ui_map::node("card", c.rect(0.0, 0.0, w, layout.h), v.head.kicker, true);
+    m::map_collapse_chip(&c, w, layout.head.collapse);
     match widgets::draw_head(&c, &layout.head, &v.head, w) {
         widgets::HeadHit::Jump => out.action = Some(Action::Jump),
         widgets::HeadHit::Collapse => out.action = Some(Action::Collapse),
@@ -523,14 +541,16 @@ pub(crate) fn draw_question(c: &Card, m: &M, v: &mut QuestionView, scroll: f32, 
     }
 
     // 同审批卡：提交中/结果未知时只禁用会重复提交的按钮，「回客户端」始终可点。
-    let clicked = widgets::draw_footer_with_enabled(&c, y, w, &layout.footer, true, |id| match id {
+    // （footer 按钮的 UI Map 节点由 `metrics::button` 统一登记。）
+    let enabled_for = |id: &str| match id {
         "agent-return" => true,
         _ if busy => false,
         // 下一题要求本题已作答；检查答案/确认提交要求所有题都已作答。
         "agent-next" => layout.ready_now,
         "agent-review" | "agent-review-submit" => layout.all_ready,
         _ => true,
-    });
+    };
+    let clicked = widgets::draw_footer_with_enabled(&c, y, w, &layout.footer, true, enabled_for);
     if let Some(i) = clicked {
         match layout.footer[i].0 {
             "agent-return" => out.action = Some(Action::Return),

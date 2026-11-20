@@ -16,11 +16,47 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
+#[derive(Debug,Clone,PartialEq,Eq,Serialize)]
 #[serde(default)]
 pub struct Preferences {
     pub interactive:bool, pub handoff:u8, pub completion:bool, pub dwell:u8,
     pub expanded:bool, pub content:u8, pub deferred:bool, pub system_toast:bool,
+}
+
+/// 设置文件容错：`dwell=300` 这类超范围值不能让整个 agent 配置回落到默认值。
+/// 之前 `dwell`/`handoff` 是 u8，手写/旧版/第三方写进来的超范围数字会让 `serde` 整条
+/// `agent_cards=...` 反序列化失败 → 用户看到的却是「设置没生效、完成卡永远仅状态」。
+/// 这里用宽类型读入再夹到合法区间，行为与设置面板的约束一致。
+#[derive(Deserialize)]
+#[serde(default)]
+struct RawPreferences {
+    interactive:bool, handoff:i64, completion:bool, dwell:i64,
+    expanded:bool, content:i64, deferred:bool, system_toast:bool,
+}
+/// 缺字段时沿用面板默认值（interactive/completion 默认开、dwell 5s），再按区间夹取。
+impl Default for RawPreferences {
+    fn default() -> Self {
+        let d = Preferences::default();
+        Self{
+            interactive:d.interactive, handoff:i64::from(d.handoff), completion:d.completion,
+            dwell:i64::from(d.dwell), expanded:d.expanded, content:i64::from(d.content),
+            deferred:d.deferred, system_toast:d.system_toast,
+        }
+    }
+}impl<'de> Deserialize<'de> for Preferences {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self,D::Error> {
+        let raw = RawPreferences::deserialize(deserializer)?;
+        Ok(Self{
+            interactive: raw.interactive,
+            completion: raw.completion,
+            expanded: raw.expanded,
+            deferred: raw.deferred,
+            system_toast: raw.system_toast,
+            handoff: raw.handoff.clamp(0,120) as u8,
+            dwell: raw.dwell.clamp(2,15) as u8,
+            content: raw.content.clamp(0,2) as u8,
+        })
+    }
 }
 impl Default for Preferences {
     fn default()->Self {Self{interactive:true,handoff:0,completion:true,dwell:5,expanded:false,content:0,deferred:false,system_toast:false}}
@@ -332,6 +368,8 @@ impl Cards {
         let at=*r.detail_at.get_or_insert(t);
         let age=(t-at).max(0.0) as f32;
         let queue=self.requests.len()+1;
+        // UI 地图：让 state.card.id 有值（E2E 断言卡片身份用；未开 DAOZAI_UI_MAP 时是空操作）。
+        crate::ui_map::publish_card_id(&r.id);
         let action=if r.question {
             let mut answers=std::mem::take(&mut r.answers);
             let mut view=agent_ui::QuestionView{
@@ -440,6 +478,9 @@ impl Cards {
     pub(crate) fn draw_result(&mut self,c:&Card)->Option<Action>{
         let t=c.ui.ctx().input(|i|i.time);
         let Some(result)=self.result.clone() else{return None;};
+        // UI 地图：结果层打开时补齐整屏状态（说明层/正文层都要有，E2E 靠它判断是否已收起）。
+        crate::ui_map::publish_frame(c.ui.ctx(), true, false, true);
+        crate::ui_map::publish_result(c.ui.ctx(), result.hint, result_kicker(result.hint));
         let m=agent_ui::Measurer::new(c.ui.ctx());
         let at=*self.result_at.get_or_insert(t);
         let age=(t-at).max(0.0) as f32;
@@ -515,6 +556,22 @@ impl Cards {
 mod tests {
     use super::*;
     use crate::model::Settings;
+
+    #[test]
+    fn out_of_range_preferences_are_clamped_instead_of_resetting_everything(){
+        // 实测坑：settings.txt 里写 dwell=300（>u8）曾让整条 agent_cards 反序列化失败，
+        // 结果 content/expanded 全部回落到默认值，用户看到的是「完成卡永远仅状态」。
+        let prefs:Preferences=serde_json::from_str(
+            r#"{"interactive":true,"handoff":999,"completion":true,"dwell":300,"expanded":true,"content":9,"deferred":true,"system_toast":false}"#)
+            .expect("超范围数字也要能读进来（夹到合法区间）");
+        assert_eq!(prefs.dwell,15,"dwell 夹到设置面板上限");
+        assert_eq!(prefs.content,2,"content 夹到『本轮回复』");
+        assert_eq!(prefs.handoff,120,"handoff 夹到允许的最大交回秒数");
+        assert!(prefs.expanded && prefs.deferred && prefs.interactive && prefs.completion,"其它字段不能被这次夹取连累");
+        // 缺字段仍然走默认值（老配置向后兼容）。
+        let empty:Preferences=serde_json::from_str("{}").expect("空对象可用默认值");
+        assert_eq!(empty,Preferences::default());
+    }
 
     /// 开启 DSH 来源；notifications 总开关默认已开。
     fn dsh_on()->Settings{

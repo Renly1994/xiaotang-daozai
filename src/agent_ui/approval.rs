@@ -147,8 +147,16 @@ pub(crate) fn draw_approval(c: &Card, m: &M, v: &ApprovalView, scroll: f32, t: f
     let layout = measure(m, v, super::CARD_W);
     let w = layout.w;
     let (alpha, dy) = super::entrance(v.age);
+    // UI Map（调试，`DAOZAI_UI_MAP`）：登记当前可见屏的状态与外框，矩形与绘制/命中一致。
+    crate::ui_map::publish_frame(c.ui.ctx(), true, true, true);
+    crate::ui_map::publish_queue(v.queue);
+    crate::ui_map::publish_card(c.ui.ctx(), Some("approval"), true, 0, 0, v.state.busy(), v.error);
+    m::map_island_bar(c);
     let c = c.faded(alpha).shifted(0.0, dy);
     let mut action = None;
+    crate::ui_map::node("card", c.rect(0.0, 0.0, w, layout.h), v.head.kicker, true);
+    crate::ui_map::node("body.operation", c.rect(PAD, layout.body_top, w - PAD * 2.0, layout.body_view), "操作内容", !layout.blocks.is_empty());
+    m::map_collapse_chip(&c, w, layout.head.collapse);
     match widgets::draw_head(&c, &layout.head, &v.head, w) {
         widgets::HeadHit::Jump => action = Some(Action::Jump),
         widgets::HeadHit::Collapse => action = Some(Action::Collapse),
@@ -207,9 +215,9 @@ pub(crate) fn draw_approval(c: &Card, m: &M, v: &ApprovalView, scroll: f32, t: f
     }
     // 提交中/结果未知时只禁用「会造成第二次决定」的按钮；「回客户端」必须始终可点——
     // 结果未知的提示语就是「请回客户端确认」，按钮却点不动是死路。
-    if let Some(index) = widgets::draw_footer_with_enabled(&c, footer_y, w, &layout.footer, true, |id| {
-        id == "agent-return" || (!busy && (id != "agent-allow" || allow_ready))
-    }) {
+    // （footer 按钮的 UI Map 节点由 `metrics::button` 统一登记，矩形与命中完全一致。）
+    let enabled_for = |id: &str| id == "agent-return" || (!busy && (id != "agent-allow" || allow_ready));
+    if let Some(index) = widgets::draw_footer_with_enabled(&c, footer_y, w, &layout.footer, true, enabled_for) {
         action = Some(match layout.footer[index].0 {
             "agent-allow" => Action::Allow,
             "agent-deny" => Action::Deny,
