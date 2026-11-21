@@ -1,10 +1,10 @@
-package com.daozai.flutter.widget
+package __APP_PACKAGE__.widget
 
 import android.appwidget.AppWidgetManager
 import android.appwidget.AppWidgetProvider
 import android.content.Context
 import android.widget.RemoteViews
-import com.daozai.flutter.R
+import __APP_PACKAGE__.R
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -13,8 +13,9 @@ import java.util.Locale
  * 岛仔主屏小组件。
  *
  * 骨架阶段：显示当前时间/日期，点击拉起完整 App。
+ * 包名占位符 __APP_PACKAGE__ 由 ci/setup_platform.sh 替换为 Flutter 实际 applicationId。
  * 天气与待办数据后续经 home_widget 插件或 MethodChannel 从 Flutter 侧写入
- * SharedPreferences，再由本 Provider 读取刷新（见 README「安卓小组件」）。
+ * SharedPreferences，再由本 Provider 读取刷新。
  */
 class DaozaiWidgetProvider : AppWidgetProvider() {
 

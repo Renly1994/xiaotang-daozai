@@ -37,23 +37,38 @@ case "$PLATFORM" in
   android)
     echo "[android] 注入主屏小组件..."
     RES="android/app/src/main/res"
-    KOTLIN="android/app/src/main/kotlin/com/daozai/flutter/widget"
+
+    # 动态读取 Flutter 实际生成的 applicationId（org + project_name），
+    # 避免小组件 Provider 包名 / R 引用与工程不一致导致 Kotlin 编译失败。
+    GRADLE="android/app/build.gradle"
+    GRADLE_KTS="android/app/build.gradle.kts"
+    APP_PKG=""
+    if [ -f "$GRADLE_KTS" ]; then
+      APP_PKG=$(grep -oE 'applicationId\s*=\s*"[^"]+"' "$GRADLE_KTS" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+    fi
+    if [ -z "$APP_PKG" ] && [ -f "$GRADLE" ]; then
+      APP_PKG=$(grep -oE 'applicationId\s+"[^"]+"' "$GRADLE" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+    fi
+    # 兜底：从 MainActivity.kt 的 package 声明读取。
+    if [ -z "$APP_PKG" ]; then
+      MAIN=$(find android/app/src/main/kotlin -name 'MainActivity.kt' 2>/dev/null | head -1)
+      [ -n "$MAIN" ] && APP_PKG=$(grep -oE '^package [a-zA-Z0-9_.]+' "$MAIN" | head -1 | awk '{print $2}')
+    fi
+    [ -z "$APP_PKG" ] && APP_PKG="com.daozai.daozai_flutter"
+    echo "[android] applicationId = $APP_PKG"
+
+    PKG_PATH=$(echo "$APP_PKG" | tr '.' '/')
+    KOTLIN="android/app/src/main/kotlin/$PKG_PATH/widget"
     mkdir -p "$RES/layout" "$RES/drawable" "$RES/xml" "$RES/values" "$KOTLIN"
 
     cp platform/android_widget/res/layout/daozai_widget.xml "$RES/layout/"
     cp platform/android_widget/res/drawable/widget_bg.xml "$RES/drawable/"
     cp platform/android_widget/res/xml/daozai_widget_info.xml "$RES/xml/"
-    cp platform/android_widget/kotlin/DaozaiWidgetProvider.kt "$KOTLIN/"
+    # 替换包名占位符后放入正确包路径。
+    sed "s#__APP_PACKAGE__#$APP_PKG#g" platform/android_widget/kotlin/DaozaiWidgetProvider.kt > "$KOTLIN/DaozaiWidgetProvider.kt"
 
-    # 合并小组件描述字符串。
-    STRINGS="$RES/values/strings.xml"
-    if [ -f "$STRINGS" ]; then
-      if ! grep -q "widget_description" "$STRINGS"; then
-        sedi 's#</resources>#    <string name="widget_description">岛仔：时间、天气与待办，抬眼即见。</string>\n</resources>#' "$STRINGS"
-      fi
-    else
-      cp platform/android_widget/res/values/strings.xml "$STRINGS"
-    fi
+    # 合并小组件描述字符串（独立文件，避免改动 Flutter 生成的 strings.xml）。
+    cp platform/android_widget/res/values/strings.xml "$RES/values/daozai_widget_strings.xml"
 
     # 合并 <receiver> 到 AndroidManifest.xml 的 </application> 前。
     MANIFEST="android/app/src/main/AndroidManifest.xml"
