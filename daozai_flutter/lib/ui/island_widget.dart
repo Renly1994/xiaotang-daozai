@@ -3,11 +3,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:provider/provider.dart';
+import 'package:window_manager/window_manager.dart';
 import '../core/theme.dart';
 import '../core/spring.dart';
 import '../core/weather_code.dart';
 import '../state/app_state.dart';
 import '../core/quit.dart';
+import '../core/window_pos.dart';
 import 'island_shape.dart';
 import 'pages.dart';
 
@@ -187,8 +189,7 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Icon(Icons.battery_full, size: 14, color: DaozaiColors.gray),
-              const SizedBox(width: 8),
+              // 不显示假电池图标（真实电量需平台原生通道，骨架阶段不用装饰图标误导用户）。
               Text(s.clock, style: const TextStyle(fontSize: DaozaiSize.pillClock, fontWeight: FontWeight.w600, color: DaozaiColors.white)),
               if (s.weather != null) ...[
                 const SizedBox(width: 8),
@@ -210,6 +211,19 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
             setState(() => _open = true);
             context.read<AppState>().setExpanded(true);
           }
+        },
+        // 收起态按住药丸拖动 = 移动整个窗口（原生跟手拖动，位置由系统管理）。
+        // 展开态不触发拖动，避免与面板内操作冲突。
+        onPanStart: (_) {
+          if (widget.floating && !_open) {
+            windowManager.startDragging();
+            // 原生拖动结束后保存位置（拖动期间位置持续变化，延迟到松手后保存）。
+            Future.delayed(const Duration(milliseconds: 600), saveWindowPosition);
+          }
+        },
+        // 拖动结束（松手）再保存一次，确保最终位置落盘。
+        onPanEnd: (_) {
+          if (widget.floating) saveWindowPosition();
         },
         child: SizedBox(
           width: _openW,
