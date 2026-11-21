@@ -3380,11 +3380,16 @@ impl App {
                     Ok((l,waiting_native)) => {
                         self.ly.error=None;
                         self.ly.retry_at=None;
-                        if (waiting_native || lyrics::is_soda(&self.media.source) && !l.synced) && self.ly.attempts<NATIVE_RETRIES {self.ly.retry_at=Some(self.t+5.0);}
+                        let polling_bodian = lyrics::is_bodian(&self.media.source) && self.ly.native_rx.is_some();
+                        if (waiting_native && !polling_bodian || lyrics::is_soda(&self.media.source) && !l.synced) && self.ly.attempts<NATIVE_RETRIES {self.ly.retry_at=Some(self.t+5.0);}
                         self.ly.lyrics = Some(l);
                     },
                     Err(error) => {
-                        let native=lyrics::is_soda(&self.media.source) || self.media.source.to_ascii_lowercase().contains("kugou") && error==lyrics::FetchError::NotFound;
+                        let bodian_needs_poll = lyrics::is_bodian(&self.media.source)
+                            && self.media.song_id.is_some() && self.ly.native_rx.is_none();
+                        let native=lyrics::is_soda(&self.media.source)
+                            || error==lyrics::FetchError::NotFound
+                                && (bodian_needs_poll || self.media.source.to_ascii_lowercase().contains("kugou"));
                         if native {if self.ly.attempts<NATIVE_RETRIES{self.ly.retry_at=Some(self.t+5.0);}}
                         else if matches!(error,lyrics::FetchError::Unavailable(_)|lyrics::FetchError::InvalidResponse(_)) && self.ly.attempts<NETWORK_RETRIES {self.ly.retry_at=Some(self.t+30.0);}
                         self.ly.error = Some(error);
@@ -3400,8 +3405,9 @@ impl App {
     fn start_lyrics(&mut self,key:String,keep:Option<lyrics::Lyrics>,retry:bool) {
         let np=&self.media;
         let kugou=np.source.to_ascii_lowercase().contains("kugou");
-        let native_only=retry && kugou && self.ly.error==Some(lyrics::FetchError::NotFound);
-        let cached=if retry && kugou {self.ly.lyrics.take()}else{None};
+        let bodian=lyrics::is_bodian(&np.source) && np.song_id.is_some();
+        let native_only=retry && (kugou || bodian) && self.ly.error==Some(lyrics::FetchError::NotFound);
+        let cached=if retry && (kugou || bodian) {self.ly.lyrics.take()}else{None};
         let attempts=if retry {self.ly.attempts.saturating_add(1)}else{0};
         let manual=self.ly.manual_retry;
         let shown=cached.clone().or(keep);
@@ -3410,7 +3416,7 @@ impl App {
             song:Some(LyricSong::of(np)), ..Default::default() };
         let (source, title, artist, dur) = (np.source.clone(), np.title.clone(), np.artist.clone(), np.duration);
         let song_id=np.song_id;
-        if kugou || lyrics::is_soda(&source) {
+        if kugou || bodian || lyrics::is_soda(&source) {
             let (tx,rx)=std::sync::mpsc::sync_channel(1);self.ly.native_rx=Some(rx);
             let (source,title,artist)=(source.clone(),title.clone(),artist.clone());
             let native=crate::resources::NATIVE_LYRICS.spawn(move ||{
@@ -3425,7 +3431,7 @@ impl App {
                     let unchanged=print.is_some_and(|print|last.is_some_and(|(seen,at)|seen==print && at.elapsed()<std::time::Duration::from_secs(15)));
                     let found=if unchanged {None}else{
                         if let Some(print)=print {last=Some((print,std::time::Instant::now()));}
-                        lyrics::read_native_detail(&source,&title,&artist,dur).map_err(|reason|miss=reason).ok()
+                        lyrics::read_native_detail(&source,&title,&artist,dur,song_id).map_err(|reason|miss=reason).ok()
                     };
                     // 找到歌词时等界面取走再结束（换歌或关闭歌词后通道断开会立即返回），不因通道暂满丢掉结果。
                     if found.is_some() {
@@ -3455,7 +3461,8 @@ impl App {
         self.ly_worker=lease.spawn(move || {
             let LyricsJob{source,title,artist,duration,song_id,cached,native_only,manual}=job;
             let result=if native_only {
-                lyrics::kugou_cache::read(&title,&artist,duration).map(|lyrics|(lyrics,false)).ok_or(lyrics::FetchError::NotFound)
+                lyrics::read_native_detail(&source,&title,&artist,duration,song_id)
+                    .map(|lyrics|(lyrics,false)).map_err(|_|lyrics::FetchError::NotFound)
             }else{lyrics::fetch_for_display_with(&source, &title, &artist, duration, song_id, cached, manual)};
             let _ = tx.send(result);
         });

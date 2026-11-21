@@ -171,6 +171,7 @@ mod soda_cache;
 pub(crate) mod kugou_cache;
 
 pub fn is_soda(source:&str)->bool {source=="汽水音乐" || source.to_ascii_lowercase().contains("sodamusic")}
+pub(crate) fn is_bodian(source: &str) -> bool { source.eq_ignore_ascii_case("bodian_pc.exe") }
 
 /// 本地歌词缓存的「版本」：文件修改时间与大小都没变时不必再完整读取。目前只有汽水音乐的单文件缓存可靠适用。
 pub(crate) fn native_fingerprint(source:&str)->Option<(std::time::SystemTime,u64)> {
@@ -179,11 +180,15 @@ pub(crate) fn native_fingerprint(source:&str)->Option<(std::time::SystemTime,u64
 }
 
 pub(crate) fn read_native(source:&str,track:&str,artist:&str,duration:f64)->Option<Lyrics> {
-    read_native_detail(source,track,artist,duration).ok()
+    read_native_detail(source,track,artist,duration,None).ok()
 }
 
 /// 本地缓存读取；未命中时给出原因，供诊断日志使用。
-pub(crate) fn read_native_detail(source:&str,track:&str,artist:&str,duration:f64)->Result<Lyrics,&'static str> {
+pub(crate) fn read_native_detail(source:&str,track:&str,artist:&str,duration:f64,song_id:Option<u64>)->Result<Lyrics,&'static str> {
+    #[cfg(windows)]
+    if is_bodian(source) {
+        return song_id.ok_or("缺少歌曲 ID").and_then(|id| crate::smtc::bodian::read_lyrics(id).ok_or("未命中"));
+    }
     if source.to_ascii_lowercase().contains("kugou") {return kugou_cache::read(track,artist,duration).ok_or("未命中");}
     if is_soda(source) {
         let lyrics=parse_krc(&soda_cache::read_detail(track,artist,duration).map_err(|miss|miss.label())?);
@@ -200,7 +205,7 @@ pub(crate) fn log_native(source:&str,track:&str,artist:&str,outcome:&str,elapsed
     crate::resources::append_log(&crate::model::config_dir().join("diagnostics"),"lyrics.log",&line);
 }
 
-/// 返回歌词及是否仍需等待酷狗缓存；等待期间复用已有歌词，不重复访问在线服务。
+/// 返回歌词及是否仍需等待播放器写入本地缓存。
 pub fn fetch_for_display(source:&str,track:&str,artist:&str,duration:f64,song_id:Option<u64>,cached:Option<Lyrics>)->Result<(Lyrics,bool),FetchError>{
     fetch_for_display_with(source,track,artist,duration,song_id,cached,false)
 }
@@ -217,9 +222,10 @@ pub fn fetch_for_display_with(source:&str,track:&str,artist:&str,duration:f64,so
             return cached.map(Ok).unwrap_or_else(||fetch(track,artist,duration)).map(|lyrics|(lyrics,true));
         }
         #[cfg(windows)]
-        if source.eq_ignore_ascii_case("bodian_pc.exe") {
-            if let Some(lyrics)=song_id.and_then(crate::smtc::bodian::read_lyrics){trace(||"波点本地:命中".into());return Ok((lyrics,false));}
-            return cached.map(Ok).unwrap_or_else(||fetch(track,artist,duration)).map(|lyrics|(lyrics,true));
+        if is_bodian(source) {
+            if let Ok(lyrics)=read_native_detail(source,track,artist,duration,song_id){trace(||"波点本地:命中".into());return Ok((lyrics,false));}
+            trace(||"波点本地:无".into());
+            return cached.map(Ok).unwrap_or_else(||fetch(track,artist,duration)).map(|lyrics|(lyrics,song_id.is_some()));
         }
         #[cfg(windows)]
         if source.eq_ignore_ascii_case("kwmusic.exe") {
@@ -245,8 +251,8 @@ pub fn fetch_for_source(source:&str,track:&str,artist:&str,duration:f64,song_id:
         if let Some(lyrics)=crate::smtc::kuwo::read_lyrics(track,artist){trace(||"酷我本地:命中".into());return Ok(lyrics);}
     }
     #[cfg(windows)]
-    if source.eq_ignore_ascii_case("bodian_pc.exe") {
-        if let Some(lyrics)=song_id.and_then(crate::smtc::bodian::read_lyrics){trace(||"波点本地:命中".into());return Ok(lyrics);}
+    if is_bodian(source) {
+        if let Ok(lyrics)=read_native_detail(source,track,artist,duration,song_id){trace(||"波点本地:命中".into());return Ok(lyrics);}
     }
     if source.to_ascii_lowercase().contains("qqmusic") {
         let common=cache_path(track,artist,duration);

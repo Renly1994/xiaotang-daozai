@@ -1,6 +1,6 @@
 //! 系统跳转不可用时，定位播放器自己的进度控件并向该窗口发送消息。
 use windows::{core::{Interface,VARIANT},Win32::{Foundation::*,System::{Com::*,Threading::*},UI::{Accessibility::*,WindowsAndMessaging::*},Graphics::Gdi::ScreenToClient}};
-use windows::Win32::UI::HiDpi::{SetThreadDpiAwarenessContext,DPI_AWARENESS_CONTEXT,DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+use windows::Win32::UI::HiDpi::{GetDpiForWindow,SetThreadDpiAwarenessContext,DPI_AWARENESS_CONTEXT,DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
 
 struct DpiContext(DPI_AWARENESS_CONTEXT);
@@ -65,6 +65,72 @@ unsafe fn automation()->Option<IUIAutomation>{
     if let Ok(timed)=ui.cast::<IUIAutomation2>(){let _=timed.SetConnectionTimeout(800);let _=timed.SetTransactionTimeout(800);}
     Some(ui)
 }
+
+/// 波点的 Flutter 进度滑块通过 MSAA 提供位置和百分比，不能直接设置值。
+pub(super) fn bodian_progress(window: HWND, current: f64, target: f64, duration: f64) -> Option<()> {
+    unsafe {
+        let _dpi = DpiContext(SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2));
+        let view = FindWindowExW(window, HWND::default(), windows::core::w!("FLUTTERVIEW"), windows::core::PCWSTR::null()).ok()?;
+        let mut raw = std::ptr::null_mut();
+        AccessibleObjectFromWindow(view, OBJID_CLIENT.0 as u32, &IAccessible::IID, &mut raw).ok()?;
+        if raw.is_null() { return None; }
+        let root = IAccessible::from_raw(raw);
+
+        let mut client = RECT::default();
+        GetClientRect(view, &mut client).ok()?;
+        let mut queue = std::collections::VecDeque::from([root]);
+        let this = VARIANT::from(CHILDID_SELF as i32);
+        let mut budget = 256;
+        while let Some(node) = queue.pop_front() {
+            if node.get_accRole(&this).ok().and_then(|role| u32::try_from(&role).ok()) == Some(ROLE_SYSTEM_SLIDER) {
+                let value = node.get_accValue(&this).ok()?.to_string();
+                let percent = value.strip_suffix('%').and_then(|value| value.parse::<u32>().ok());
+                let (mut x, mut y, mut width, mut height) = (0, 0, 0, 0);
+                node.accLocation(&mut x, &mut y, &mut width, &mut height, &this).ok()?;
+                let mut origin = POINT { x, y };
+                if !ScreenToClient(view, &mut origin).as_bool() { return None; }
+                let bounds = RECT {
+                    left: origin.x, top: origin.y,
+                    right: origin.x.checked_add(width)?, bottom: origin.y.checked_add(height)?,
+                };
+                if bodian_playback_bar(bounds, client, percent, current, duration) {
+                    // 1.1.7 的实际轨道在无障碍滑块两端各缩进 5 个逻辑像素。
+                    let inset = 5.0 * f64::from(GetDpiForWindow(view)) / 96.0;
+                    let p = point(bounds, target, duration, inset)?;
+                    let lp = LPARAM(((p.y as u32) << 16 | p.x as u32) as isize);
+                    let send = |message, buttons| SendMessageTimeoutW(view, message, WPARAM(buttons), lp,
+                        SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT, 300, None).0 != 0;
+                    if !send(WM_MOUSEMOVE, 0) { return None; }
+                    let pressed = send(WM_LBUTTONDOWN, 1);
+                    // Flutter 必须先处理按下事件，再处理释放。
+                    if pressed { std::thread::sleep(std::time::Duration::from_millis(150)); }
+                    let released = send(WM_LBUTTONUP, 0);
+                    return (pressed && released).then_some(());
+                }
+            }
+            let children = node.accChildCount().unwrap_or_default().clamp(0, budget);
+            budget -= children;
+            for child in 1..=children {
+                if let Ok(child) = node.get_accChild(&VARIANT::from(child)).and_then(|child| child.cast()) {
+                    queue.push_back(child);
+                }
+            }
+        }
+        None
+    }
+}
+
+fn bodian_playback_bar(bar: RECT, client: RECT, percent: Option<u32>, current: f64, duration: f64) -> bool {
+    let width = client.right - client.left;
+    let height = bar.bottom - bar.top;
+    // 歌曲进度条横跨窗口底边，音量滑块和页面内的其他滑块不符合这个边界。
+    bar.left >= client.left && bar.right <= client.right && bar.right - bar.left >= width * 3 / 4
+        && bar.top >= client.top
+        && (1..=48).contains(&height) && (0..=64).contains(&(client.bottom - bar.bottom))
+        && client.right <= i16::MAX as i32 && client.bottom <= i16::MAX as i32
+        && percent.is_some_and(|value| value <= 100
+            && (duration * f64::from(value) / 100.0 - current).abs() <= 2.0 + duration / 100.0)
+}
 unsafe fn apple_bar(ui:&IUIAutomation,root:&IUIAutomationElement)->Option<IUIAutomationRangeValuePattern>{
     let condition=ui.CreatePropertyCondition(UIA_AutomationIdPropertyId,&VARIANT::from("LCDScrubber")).ok()?;
     root.FindFirst(TreeScope_Descendants,&condition).ok()?.GetCurrentPattern(UIA_RangeValuePatternId).ok()?.cast().ok()
@@ -123,5 +189,14 @@ mod tests{
         }
         assert_eq!(seconds(" 04:41"),Some(281.0));assert_eq!(seconds("01:02:03"),Some(3723.0));
         for text in ["播放","04:99","", "1:2:3:4"]{assert!(seconds(text).is_none());}
+    }
+    #[test]
+    fn bodian_requires_a_bottom_slider_matching_playback() {
+        let client = RECT { left: 0, top: 0, right: 1569, bottom: 1077 };
+        let bar = RECT { left: 6, top: 1057, right: 1563, bottom: 1071 };
+        assert!(bodian_playback_bar(bar, client, Some(25), 50.0, 200.0));
+        assert!(!bodian_playback_bar(bar, client, Some(75), 50.0, 200.0));
+        assert!(!bodian_playback_bar(RECT { right: 100, ..bar }, client, Some(25), 50.0, 200.0));
+        assert!(!bodian_playback_bar(RECT { top: 50, bottom: 64, ..bar }, client, Some(25), 50.0, 200.0));
     }
 }

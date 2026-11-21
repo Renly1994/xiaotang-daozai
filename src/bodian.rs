@@ -231,8 +231,75 @@ impl Reader {
     }
 }
 
+fn player_window(pid: u32) -> Option<windows::Win32::Foundation::HWND> {
+    use windows::{core::w, Win32::UI::WindowsAndMessaging::{FindWindowW, GetWindowThreadProcessId}};
+    unsafe {
+        let window = FindWindowW(w!("BODIAN_FLUTTER_WIN32_WINDOW"), None).ok()?;
+        let mut owner = 0;
+        GetWindowThreadProcessId(window, Some(&mut owner));
+        (owner == pid).then_some(window)
+    }
+}
+
+pub(super) fn seek(seconds: f64) -> bool {
+    use windows::Win32::{Foundation::HWND, UI::WindowsAndMessaging::*};
+
+    struct RestoreMinimized(HWND, WINDOWPLACEMENT);
+    impl Drop for RestoreMinimized {
+        fn drop(&mut self) {
+            unsafe { let _ = SetWindowPlacement(self.0, &self.1); }
+        }
+    }
+
+    (|| -> Option<()> {
+        let _apartment = super::init_winrt();
+        let target = Target::discover()?;
+        let process = Process::open(target.pid)?;
+        if !process.module(target.main, 0x69fea107, 0x57000) { return None; }
+        let window = player_window(target.pid)?;
+        if !unsafe { IsWindowVisible(window) }.as_bool() { return None; }
+        let mut cursor = 0;
+        let discovery = Instant::now();
+        let (title, entry, _, duration, _) = loop {
+            if let Some(sample) = playback(&process, target, &mut cursor) { break sample; }
+            if discovery.elapsed() >= Duration::from_millis(500) { return None; }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        // 留在当前歌曲的最后半秒，让播放器有机会回报位置后再自然切歌。
+        let goal = seconds.min((duration - 0.5).max(0.0));
+        let _restore = if unsafe { IsIconic(window) }.as_bool() {
+            let mut placement = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+            unsafe { GetWindowPlacement(window, &mut placement).ok()?; }
+            placement.showCmd = SW_SHOWMINNOACTIVE.0 as u32;
+            unsafe { ShowWindowAsync(window, SW_SHOWNOACTIVATE).as_bool().then_some(())?; }
+            Some(RestoreMinimized(window, placement))
+        } else { None };
+        let start = Instant::now();
+        loop {
+            if !unsafe { IsIconic(window) }.as_bool() {
+                if let Some((name, id, position, _, _)) = playback(&process, target, &mut cursor) {
+                    if name != title || id != entry { return None; }
+                    if super::player_seek::bodian_progress(window, position, goal, duration).is_some() { break; }
+                }
+            }
+            if start.elapsed() >= Duration::from_millis(650) { return None; }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let sent = Instant::now();
+        while sent.elapsed() < Duration::from_millis(1500) {
+            if let Some((name, id, position, _, playing)) = playback(&process, target, &mut cursor) {
+                if name != title || id != entry { return None; }
+                let advance = if playing { sent.elapsed().as_secs_f64() } else { 0.0 };
+                if position >= goal - 1.0 && position <= goal + advance + 1.0 { return Some(()); }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        None
+    })().is_some()
+}
+
 pub(super) fn control(command:super::Transport)->bool{
-    use windows::{core::w,Win32::{Foundation::{LPARAM,WPARAM},UI::WindowsAndMessaging::{FindWindowW,GetWindowThreadProcessId,SendMessageTimeoutW,SMTO_ABORTIFHUNG,SMTO_ERRORONEXIT,WM_HOTKEY}}};
+    use windows::Win32::{Foundation::{LPARAM,WPARAM},UI::WindowsAndMessaging::{SendMessageTimeoutW,SMTO_ABORTIFHUNG,SMTO_ERRORONEXIT,WM_HOTKEY}};
     let id=match command{super::Transport::Toggle=>1,super::Transport::Next=>3,super::Transport::Prev=>4,_=>return false};
     (||->Option<()> {
         let target=Target::discover()?;let process=Process::open(target.pid)?;
@@ -249,9 +316,8 @@ pub(super) fn control(command:super::Transport)->bool{
             if !(1..=4).contains(&registered){return None;}ids|=1<<registered;node=process.pointer(node)?;
         }
         if ids!=0x1e || node!=head{return None;}
+        let window = player_window(target.pid)?;
         unsafe {
-            let window=FindWindowW(w!("BODIAN_FLUTTER_WIN32_WINDOW"),None).ok()?;
-            let mut pid=0;GetWindowThreadProcessId(window,Some(&mut pid));if pid!=target.pid{return None;}
             (SendMessageTimeoutW(window,WM_HOTKEY,WPARAM(id),LPARAM(0),SMTO_ABORTIFHUNG|SMTO_ERRORONEXIT,500,None).0!=0).then_some(())
         }
     })().is_some()
@@ -353,6 +419,50 @@ mod tests {
         std::thread::sleep(Duration::from_millis(400));assert!(reader.poll().unwrap().playing);
         assert_eq!(unsafe{GetForegroundWindow()},foreground);
     }
+
+    #[test]
+    #[ignore = "需要本机波点正在播放，会短暂调整进度、暂停并恢复"]
+    fn live_bodian_seek_while_playing_and_paused() {
+        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsIconic};
+        let target = Target::discover().expect("未找到已适配的波点进程");
+        let process = Process::open(target.pid).unwrap();
+        let mut cursor = 0;
+        let mut sample = || playback(&process, target, &mut cursor);
+        let (title, id, position, duration, playing) = sample().expect("没有波点播放时间轴");
+        assert!(playing && duration > 30.0);
+        println!("波点：{title}，曲长 {duration:.2}s，起始进度 {position:.2}s");
+        let window = player_window(target.pid).unwrap();
+        let minimized = unsafe { IsIconic(window) };
+        let foreground = unsafe { GetForegroundWindow() };
+        let jump = |seconds| super::super::seek(seconds, "bodian_pc.exe");
+        let forward = duration * 0.75;
+        let backward = 3.0;
+        let observed = |sample: &mut dyn FnMut() -> Option<(String, u64, f64, f64, bool)>, goal: f64, playing: bool| {
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_secs(1) {
+                if let Some((name, entry, at, _, active)) = sample() {
+                    if name == title && entry == id && active == playing && (at - goal).abs() < 2.0 {
+                        println!("请求 {goal:.2}s，确认 {at:.2}s，播放中={active}");
+                        return true;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            false
+        };
+        let playing_seek = jump(forward) && observed(&mut sample, forward, true);
+        let paused = control(super::super::Transport::Toggle);
+        std::thread::sleep(Duration::from_millis(400));
+        let paused_seek = paused && jump(backward) && observed(&mut sample, backward, false);
+        let restored = jump(position.min(duration - 3.0));
+        // 若客户端自行恢复了播放，避免再次切成暂停。
+        if sample().is_some_and(|(_, _, _, _, playing)| !playing) {
+            let _ = control(super::super::Transport::Toggle);
+        }
+        assert!(playing_seek && paused_seek && restored, "播放跳转={playing_seek}，暂停跳转={paused_seek}，恢复原进度={restored}");
+        assert_eq!(unsafe { IsIconic(window) }, minimized);
+        assert_eq!(unsafe { GetForegroundWindow() }, foreground);
+    }
 }
 
 /// 进程快照一次要十几毫秒：有波点窗口线索时 3 秒查一次，没有线索时（多数用户没装波点）30 秒才兜底查一次。
@@ -363,12 +473,12 @@ fn discovery_due(last:Option<Instant>,hint:impl FnOnce()->bool)->bool{
     since.is_none_or(|since|since>=DISCOVER_FALLBACK) || since.is_some_and(|since|since>=DISCOVER_HINTED) && hint()
 }
 
-/// 便宜的线索：波点（Flutter 程序）的主窗口属于 bodian_pc.exe。窗口类名若被改，仍有 30 秒一次的兜底查找。
+/// 窗口类名若被改，仍有 30 秒一次的兜底查找。
 fn window_hint()->bool{
     use windows::{core::{w,PCWSTR},Win32::{Foundation::HWND,UI::WindowsAndMessaging::{FindWindowExW,GetWindowThreadProcessId}}};
     let mut after=HWND::default();
     for _ in 0..16 {
-        let Ok(window)=(unsafe{FindWindowExW(HWND::default(),after,w!("FLUTTER_RUNNER_WIN32_WINDOW"),PCWSTR::null())})else{return false;};
+        let Ok(window)=(unsafe{FindWindowExW(HWND::default(),after,w!("BODIAN_FLUTTER_WIN32_WINDOW"),PCWSTR::null())})else{return false;};
         let mut pid=0;unsafe{GetWindowThreadProcessId(window,Some(&mut pid));}
         if super::player_process::image_is(pid,"bodian_pc.exe"){return true;}
         after=window;
