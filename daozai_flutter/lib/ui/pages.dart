@@ -50,7 +50,7 @@ class WeatherPage extends StatelessWidget {
         ),
         const SizedBox(height: 6),
         if (w == null)
-          Expanded(child: Center(child: Text(s.weatherError ?? '填写城市后查看天气', style: const TextStyle(fontSize: DaozaiSize.body, color: DaozaiColors.dim))))
+          Expanded(child: _WeatherEmpty(error: s.weatherError))
         else ...[
           Row(
             crossAxisAlignment: CrossAxisAlignment.center,
@@ -100,6 +100,77 @@ class WeatherPage extends StatelessWidget {
   }
 }
 
+// ================= 天气空状态（含城市设置入口）=================
+/// 天气无数据时显示：错误提示 + 城市输入框。桌面/移动通用，
+/// 解决桌面端原本无处设置城市、天气页永远空白的致命问题。
+class _WeatherEmpty extends StatefulWidget {
+  final String? error;
+  const _WeatherEmpty({this.error});
+  @override
+  State<_WeatherEmpty> createState() => _WeatherEmptyState();
+}
+
+class _WeatherEmptyState extends State<_WeatherEmpty> {
+  final _ctrl = TextEditingController();
+  final _focus = FocusNode();
+
+  @override
+  void initState() {
+    super.initState();
+    _focus.addListener(() {
+      context.read<AppState>().setInteractionLock(_focus.hasFocus);
+    });
+  }
+
+  @override
+  void dispose() {
+    context.read<AppState>().setInteractionLock(false);
+    _focus.dispose();
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final s = context.read<AppState>();
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            widget.error ?? '设置城市后查看天气',
+            style: const TextStyle(fontSize: DaozaiSize.body, color: DaozaiColors.dim),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 8),
+          SizedBox(
+            width: 240,
+            height: 28,
+            child: TextField(
+              controller: _ctrl,
+              focusNode: _focus,
+              style: const TextStyle(fontSize: DaozaiSize.body, color: DaozaiColors.white),
+              decoration: InputDecoration(
+                hintText: '输入城市名，回车查询',
+                hintStyle: const TextStyle(fontSize: DaozaiSize.body, color: DaozaiColors.dim),
+                filled: true, fillColor: DaozaiColors.track,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
+                suffixIcon: GestureDetector(
+                  onTap: () => s.refreshWeather(newCity: _ctrl.text),
+                  child: const Icon(Icons.search, size: 16, color: DaozaiColors.cyan),
+                ),
+                suffixIconConstraints: const BoxConstraints(minWidth: 32, minHeight: 28),
+              ),
+              onSubmitted: (v) => s.refreshWeather(newCity: v),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 // ================= 待办 =================
 class TodoPage extends StatefulWidget {
   const TodoPage({super.key});
@@ -109,9 +180,22 @@ class TodoPage extends StatefulWidget {
 
 class _TodoPageState extends State<TodoPage> {
   final _ctrl = TextEditingController();
+  final _focus = FocusNode();
+  // 待确认删除的索引：点一次 × 进入确认态（变红），再点才真正删除，防误触。
+  int? _confirmDelete;
+
+  @override
+  void initState() {
+    super.initState();
+    _focus.addListener(() {
+      context.read<AppState>().setInteractionLock(_focus.hasFocus);
+    });
+  }
 
   @override
   void dispose() {
+    context.read<AppState>().setInteractionLock(false);
+    _focus.dispose();
     _ctrl.dispose();
     super.dispose();
   }
@@ -131,6 +215,7 @@ class _TodoPageState extends State<TodoPage> {
                 height: 26,
                 child: TextField(
                   controller: _ctrl,
+                  focusNode: _focus,
                   style: const TextStyle(fontSize: DaozaiSize.body, color: DaozaiColors.white),
                   decoration: InputDecoration(
                     hintText: '要做点什么？回车保存',
@@ -173,7 +258,21 @@ class _TodoPageState extends State<TodoPage> {
                                     color: t.done ? DaozaiColors.dim : DaozaiColors.white,
                                     decoration: t.done ? TextDecoration.lineThrough : null)),
                           ),
-                          GestureDetector(onTap: () => s.removeTodo(i), child: const Icon(Icons.close, size: 13, color: DaozaiColors.dim)),
+                          GestureDetector(
+                            onTap: () {
+                              if (_confirmDelete == i) {
+                                s.removeTodo(i);
+                                setState(() => _confirmDelete = null);
+                              } else {
+                                setState(() => _confirmDelete = i);
+                              }
+                            },
+                            child: Icon(
+                              _confirmDelete == i ? Icons.delete_forever : Icons.close,
+                              size: 13,
+                              color: _confirmDelete == i ? DaozaiColors.red : DaozaiColors.dim,
+                            ),
+                          ),
                         ],
                       ),
                     );
@@ -226,6 +325,10 @@ class FocusPage extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(s.focusIsRest ? '休息一下' : '专注时间', style: const TextStyle(fontSize: DaozaiSize.body, color: DaozaiColors.gray)),
+                    if (s.focusMessage != null) ...[
+                      const SizedBox(height: 3),
+                      Text(s.focusMessage!, style: const TextStyle(fontSize: DaozaiSize.small, color: DaozaiColors.yellow)),
+                    ],
                     const SizedBox(height: 8),
                     Row(
                       children: [
@@ -309,6 +412,15 @@ class WaterPage extends StatelessWidget {
                         _pillBtn('撤销', DaozaiColors.btn, s.undoDrink),
                       ],
                     ),
+                    const SizedBox(height: 8),
+                    // 目标与单次量可调（点 ± 调整），满足用户个性化需求。
+                    Row(
+                      children: [
+                        _stepper('目标', w.goalMl, () => s.setWaterGoal(w.goalMl - 100), () => s.setWaterGoal(w.goalMl + 100)),
+                        const SizedBox(width: 12),
+                        _stepper('单次', w.servingMl, () => s.setWaterServing(w.servingMl - 50), () => s.setWaterServing(w.servingMl + 50)),
+                      ],
+                    ),
                   ],
                 ),
               ),
@@ -340,6 +452,22 @@ Widget _pillBtn(String label, Color color, VoidCallback onTap) {
       decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(9)),
       child: Text(label, style: const TextStyle(fontSize: DaozaiSize.body, color: DaozaiColors.white, fontWeight: FontWeight.w600)),
     ),
+  );
+}
+
+/// 带 ± 的数值调节器（喝水目标/单次量）。
+Widget _stepper(String label, int value, VoidCallback onMinus, VoidCallback onPlus) {
+  return Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Text('$label ', style: const TextStyle(fontSize: DaozaiSize.tiny, color: DaozaiColors.dim)),
+      GestureDetector(onTap: onMinus, child: const Icon(Icons.remove_circle_outline, size: 14, color: DaozaiColors.gray)),
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 3),
+        child: Text('$value', style: const TextStyle(fontSize: DaozaiSize.small, color: DaozaiColors.white)),
+      ),
+      GestureDetector(onTap: onPlus, child: const Icon(Icons.add_circle_outline, size: 14, color: DaozaiColors.gray)),
+    ],
   );
 }
 

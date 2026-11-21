@@ -67,11 +67,12 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
   /// 光标停留 hoverIntent 才展开；移开超过 leaveDelay 才收起。
   /// 在每帧 Ticker 里判断，避免延迟回调与帧时序竞态导致误展开/误收起。
   void _updateHover(double t) {
-    if (_inside) {
+    final locked = context.read<AppState>().interactionLock;
+    if (_inside || locked) {
       _leaveSince = -1;
       if (!_open) {
         if (_hoverSince < 0) _hoverSince = t;
-        if (t - _hoverSince >= DaozaiMotion.hoverIntent) {
+        if (t - _hoverSince >= DaozaiMotion.hoverIntent || locked) {
           _open = true;
           context.read<AppState>().setExpanded(true);
         }

@@ -24,6 +24,15 @@ class AppState extends ChangeNotifier {
   // 页面
   IslandPage page = IslandPage.weather;
   bool expanded = false;
+  // 操作锁定：输入框聚焦或刚交互时为 true，桌面岛在此期间不收起，
+  // 保证用户来得及输入城市/切页/点按钮（解决悬停展开打断操作的问题）。
+  bool interactionLock = false;
+
+  void setInteractionLock(bool v) {
+    if (interactionLock == v) return;
+    interactionLock = v;
+    notifyListeners();
+  }
 
   // 天气
   WeatherSnapshot? weather;
@@ -43,6 +52,8 @@ class AppState extends ChangeNotifier {
   bool focusRunning = false;
   bool focusIsRest = false;
   double focusRemaining = 25 * 60;
+  // 阶段结束提示（对齐原版「该休息了/该专注了」），用户据此手动开始下一阶段。
+  String? focusMessage;
 
   bool _initialized = false;
 
@@ -69,9 +80,11 @@ class AppState extends ChangeNotifier {
     if (focusRunning) {
       focusRemaining -= 1;
       if (focusRemaining <= 0) {
+        // 阶段结束：停止并提示用户开始下一阶段（对齐原版番茄钟逻辑）。
         focusRunning = false;
         focusIsRest = !focusIsRest;
         focusRemaining = (focusIsRest ? 5 : focusMinutes) * 60.0;
+        focusMessage = focusIsRest ? '专注完成，该休息一下了' : '休息结束，该专注了';
       }
     }
     notifyListeners();
@@ -79,7 +92,19 @@ class AppState extends ChangeNotifier {
 
   void setPage(IslandPage p) {
     page = p;
+    // 切页后短暂锁定展开，避免鼠标划出瞬间收起打断操作。
+    _lockFor(const Duration(milliseconds: 800));
     notifyListeners();
+  }
+
+  Timer? _lockTimer;
+  void _lockFor(Duration d) {
+    interactionLock = true;
+    _lockTimer?.cancel();
+    _lockTimer = Timer(d, () {
+      interactionLock = false;
+      notifyListeners();
+    });
   }
 
   void setExpanded(bool v) {
@@ -158,9 +183,22 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> setWaterGoal(int ml) async {
+    water.goalMl = ml.clamp(200, 6000);
+    await _store.saveWater(water);
+    notifyListeners();
+  }
+
+  Future<void> setWaterServing(int ml) async {
+    water.servingMl = ml.clamp(50, 1000);
+    await _store.saveWater(water);
+    notifyListeners();
+  }
+
   // ---- 专注 ----
   void toggleFocus() {
     focusRunning = !focusRunning;
+    if (focusRunning) focusMessage = null;
     notifyListeners();
   }
 
@@ -168,6 +206,7 @@ class AppState extends ChangeNotifier {
     focusRunning = false;
     focusIsRest = false;
     focusRemaining = focusMinutes * 60.0;
+    focusMessage = null;
     notifyListeners();
   }
 
@@ -187,6 +226,7 @@ class AppState extends ChangeNotifier {
   void dispose() {
     _ticker?.cancel();
     _weatherTimer?.cancel();
+    _lockTimer?.cancel();
     _weather.dispose();
     super.dispose();
   }
