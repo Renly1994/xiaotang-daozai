@@ -28,6 +28,8 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
   double _leaveSince = -1;
   bool _open = false;
   double _now = 0;
+  // 鼠标是否在岛体感应区内（由 MouseRegion 维护，供 Ticker 确定性判断）。
+  bool _inside = false;
 
   // 展开目标尺寸（含肩部余量）。
   static const double _openW = DaozaiGeom.panelW + DaozaiGeom.flare * 2 + 24;
@@ -52,11 +54,37 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
     _lastT = t;
     _now = t;
     if (widget.floating) {
+      _updateHover(t);
       _morph(dt);
     }
     _w.step(dt);
     _h.step(dt);
     if (mounted) setState(() {});
+  }
+
+  /// 悬停意图缓冲（确定性状态机，对齐原项目 morph 的 hover_since/leave_since）：
+  /// 光标停留 hoverIntent 才展开；移开超过 leaveDelay 才收起。
+  /// 在每帧 Ticker 里判断，避免延迟回调与帧时序竞态导致误展开/误收起。
+  void _updateHover(double t) {
+    if (_inside) {
+      _leaveSince = -1;
+      if (!_open) {
+        if (_hoverSince < 0) _hoverSince = t;
+        if (t - _hoverSince >= DaozaiMotion.hoverIntent) {
+          _open = true;
+          context.read<AppState>().setExpanded(true);
+        }
+      }
+    } else {
+      _hoverSince = -1;
+      if (_open) {
+        if (_leaveSince < 0) _leaveSince = t;
+        if (t - _leaveSince >= DaozaiMotion.leaveDelay) {
+          _open = false;
+          context.read<AppState>().setExpanded(false);
+        }
+      }
+    }
   }
 
   void _morph(double dt) {
@@ -78,27 +106,12 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
 
   void _onEnter() {
     if (!widget.floating) return;
-    _leaveSince = -1;
-    _hoverSince = _now;
-    // 意图缓冲：停留 0.2s 才展开（骨架阶段用延迟近似）。
-    Future.delayed(const Duration(milliseconds: 200), () {
-      if (mounted && _hoverSince >= 0 && _now - _hoverSince >= DaozaiMotion.hoverIntent - 0.02) {
-        setState(() => _open = true);
-        context.read<AppState>().setExpanded(true);
-      }
-    });
+    _inside = true;
   }
 
   void _onExit() {
     if (!widget.floating) return;
-    _hoverSince = -1;
-    _leaveSince = _now;
-    Future.delayed(const Duration(milliseconds: 120), () {
-      if (mounted && _leaveSince >= 0 && _now - _leaveSince >= DaozaiMotion.leaveDelay - 0.02) {
-        setState(() => _open = false);
-        context.read<AppState>().setExpanded(false);
-      }
-    });
+    _inside = false;
   }
 
   @override

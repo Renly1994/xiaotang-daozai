@@ -33,7 +33,7 @@ class DesktopShell extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '岛仔',
+      title: 'Daozai',
       debugShowCheckedModeBanner: false,
       theme: buildDaozaiTheme(),
       home: const _DesktopHome(),

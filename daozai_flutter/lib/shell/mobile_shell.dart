@@ -13,7 +13,7 @@ class MobileShell extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '岛仔',
+      title: 'Daozai',
       debugShowCheckedModeBanner: false,
       theme: buildDaozaiTheme().copyWith(
         scaffoldBackgroundColor: const Color.fromRGBO(12, 12, 14, 1),
@@ -33,7 +33,7 @@ class _MobileHome extends StatelessWidget {
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
-        title: const Text('岛仔', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+        title: const Text('Daozai', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh, size: 20),

@@ -152,7 +152,8 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> undoDrink() async {
-    water.drunkMl = (water.drunkMl - water.servingMl).clamp(0, water.goalMl * 2);
+    // 撤销只减一次饮水量，下限 0；不设上限截断（与 drink 的无上限保持一致）。
+    water.drunkMl = (water.drunkMl - water.servingMl).clamp(0, 1 << 31);
     await _store.saveWater(water);
     notifyListeners();
   }

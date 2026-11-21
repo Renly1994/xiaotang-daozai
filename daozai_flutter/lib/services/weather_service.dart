@@ -161,18 +161,23 @@ class WeatherService {
 
     final days = <WeatherDay>[];
     final now = DateTime.now();
+    final todayDate = DateTime(now.year, now.month, now.day);
     for (var i = 0; i < times.length && i < forecastDays; i++) {
       final dt = DateTime.tryParse(times[i]);
       String label;
       if (dt == null) {
         label = '';
-      } else if (dt.year == now.year && dt.month == now.month && dt.day == now.day) {
-        label = '今天';
-      } else if (dt.year == now.year && dt.month == now.month && dt.day == now.day + 1) {
-        label = '明天';
       } else {
-        const wd = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
-        label = wd[dt.weekday - 1];
+        // 用日期差判断，避免月末/年末 now.day+1 越界导致「明天」误判。
+        final diff = DateTime(dt.year, dt.month, dt.day).difference(todayDate).inDays;
+        if (diff == 0) {
+          label = '今天';
+        } else if (diff == 1) {
+          label = '明天';
+        } else {
+          const wd = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+          label = wd[dt.weekday - 1];
+        }
       }
       days.add(WeatherDay(
         label: label,

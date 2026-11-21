@@ -73,7 +73,7 @@ case "$PLATFORM" in
     # 合并 <receiver> 到 AndroidManifest.xml 的 </application> 前。
     MANIFEST="android/app/src/main/AndroidManifest.xml"
     if [ -f "$MANIFEST" ] && ! grep -q "DaozaiWidgetProvider" "$MANIFEST"; then
-      RECEIVER='        <receiver android:name=".widget.DaozaiWidgetProvider" android:exported="true" android:label="岛仔">\n            <intent-filter>\n                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />\n            </intent-filter>\n            <meta-data android:name="android.appwidget.provider" android:resource="@xml/daozai_widget_info" />\n        </receiver>\n'
+      RECEIVER='        <receiver android:name=".widget.DaozaiWidgetProvider" android:exported="true" android:label="Daozai">\n            <intent-filter>\n                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />\n            </intent-filter>\n            <meta-data android:name="android.appwidget.provider" android:resource="@xml/daozai_widget_info" />\n        </receiver>\n'
       sedi "s#</application>#${RECEIVER}    </application>#" "$MANIFEST"
     fi
     echo "[android] 小组件注入完成。"
