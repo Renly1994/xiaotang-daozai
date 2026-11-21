@@ -7,6 +7,7 @@ import '../core/theme.dart';
 import '../core/spring.dart';
 import '../core/weather_code.dart';
 import '../state/app_state.dart';
+import '../core/quit.dart';
 import 'island_shape.dart';
 import 'pages.dart';
 
@@ -137,15 +138,37 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
           width: DaozaiGeom.panelW,
           height: DaozaiGeom.panelH,
           child: _open || !widget.floating
-              ? Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 10),
-                  child: Column(
-                    children: [
-                      Expanded(child: pageBody(s.page)),
-                      const SizedBox(height: 4),
-                      _PageDots(current: s.page, onTap: s.setPage),
-                    ],
-                  ),
+              ? Stack(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 10),
+                      child: Column(
+                        children: [
+                          Expanded(child: pageBody(s.page)),
+                          const SizedBox(height: 4),
+                          _PageDots(current: s.page, onTap: s.setPage),
+                        ],
+                      ),
+                    ),
+                    // 桌面悬浮模式：右上角退出按钮（悬浮窗无标题栏，需显式退出入口）。
+                    if (widget.floating)
+                      Positioned(
+                        top: 2,
+                        right: 2,
+                        child: GestureDetector(
+                          onTap: quitApp,
+                          child: Container(
+                            width: 22,
+                            height: 22,
+                            decoration: BoxDecoration(
+                              color: DaozaiColors.btn,
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: const Icon(Icons.close, size: 13, color: DaozaiColors.gray),
+                          ),
+                        ),
+                      ),
+                  ],
                 )
               : const SizedBox.shrink(),
         ),
