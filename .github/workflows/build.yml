@@ -92,7 +92,9 @@ jobs:
         if: matrix.platform == 'macos'
         run: |
           cd build/macos/Build/Products/Release
-          ditto -c -k --sequesterRsrc --keepParent *.app ../../../../../daozai-macos.zip
+          # 用标准 zip（-y 保留符号链接），双击即可被「归档实用工具」解压；
+          # 不用 ditto --sequesterRsrc，避免部分 macOS 版本报「格式不支持」。
+          zip -r -y -q ../../../../../daozai-macos.zip *.app
 
       - name: 重命名 Android 产物
         if: matrix.platform == 'android'
