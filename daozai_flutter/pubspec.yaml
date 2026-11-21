@@ -1,0 +1,30 @@
+name: daozai_flutter
+description: "岛仔跨平台版 —— 基于开源岛仔(Rust/egui)重做的 Flutter 多平台桌面伙伴。支持 Windows / macOS / Android。"
+publish_to: "none"
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # 桌面悬浮岛：透明、置顶、无边框窗口（Windows / macOS / Linux；移动端为 no-op）。
+  window_manager: ^0.4.3
+  # 轻量状态管理
+  provider: ^6.1.2
+  # 本地持久化（待办 / 喝水 / 设置）
+  shared_preferences: ^2.3.2
+  # 天气等网络请求
+  http: ^1.2.2
+  # 日期格式化
+  intl: ^0.19.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

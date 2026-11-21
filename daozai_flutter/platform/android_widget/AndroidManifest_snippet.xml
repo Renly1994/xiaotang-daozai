@@ -1,0 +1,16 @@
+<!--
+  把下面这段合并进 android/app/src/main/AndroidManifest.xml 的 <application> 节点内。
+  小组件资源（res/layout、res/xml、res/drawable）复制到 android/app/src/main/res/ 对应目录，
+  DaozaiWidgetProvider.kt 复制到 android/app/src/main/kotlin/com/daozai/flutter/widget/。
+-->
+<receiver
+    android:name=".widget.DaozaiWidgetProvider"
+    android:exported="true"
+    android:label="岛仔">
+    <intent-filter>
+        <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+    </intent-filter>
+    <meta-data
+        android:name="android.appwidget.provider"
+        android:resource="@xml/daozai_widget_info" />
+</receiver>

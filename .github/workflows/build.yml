@@ -1,0 +1,103 @@
+name: 构建三端安装包
+
+# 推送 main 或手动触发；产出 Windows / macOS / Android 安装包供下载试用。
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'daozai_flutter/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            platform: windows
+            artifact: daozai-windows
+          - name: macOS
+            os: macos-latest
+            platform: macos
+            artifact: daozai-macos
+          - name: Android
+            os: ubuntu-latest
+            platform: android
+            artifact: daozai-android
+
+    defaults:
+      run:
+        working-directory: daozai_flutter
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: 安装 JDK（Android）
+        if: matrix.platform == 'android'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 生成平台工程
+        run: flutter create --platforms=${{ matrix.platform }} --org com.daozai --project-name daozai_flutter .
+
+      - name: 注入平台配置
+        shell: bash
+        run: bash ci/setup_platform.sh ${{ matrix.platform }}
+
+      - name: 拉取依赖
+        run: flutter pub get
+
+      - name: 纯逻辑测试
+        run: flutter test
+
+      - name: 构建 Windows
+        if: matrix.platform == 'windows'
+        run: flutter build windows --release
+
+      - name: 构建 macOS
+        if: matrix.platform == 'macos'
+        run: flutter build macos --release
+
+      - name: 构建 Android APK
+        if: matrix.platform == 'android'
+        run: flutter build apk --release
+
+      - name: 打包 Windows 产物
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath daozai-windows.zip
+
+      - name: 打包 macOS 产物
+        if: matrix.platform == 'macos'
+        run: |
+          cd build/macos/Build/Products/Release
+          ditto -c -k --sequesterRsrc --keepParent *.app ../../../../../daozai-macos.zip
+
+      - name: 重命名 Android 产物
+        if: matrix.platform == 'android'
+        run: cp build/app/outputs/flutter-apk/app-release.apk daozai-android.apk
+
+      - name: 上传安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            daozai_flutter/daozai-windows.zip
+            daozai_flutter/daozai-macos.zip
+            daozai_flutter/daozai-android.apk
+          if-no-files-found: ignore
+          retention-days: 14

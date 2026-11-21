@@ -13,3 +13,20 @@
 *.key
 .DS_Store
 Thumbs.db
+
+# WorkBuddy 本地工作数据（记忆日志等），不进仓库
+/.workbuddy/
+
+# Flutter 构建产物与缓存
+daozai_flutter/build/
+daozai_flutter/.dart_tool/
+daozai_flutter/.flutter-plugins
+daozai_flutter/.flutter-plugins-dependencies
+daozai_flutter/.packages
+daozai_flutter/pubspec.lock
+daozai_flutter/android/
+daozai_flutter/macos/
+daozai_flutter/windows/
+daozai_flutter/linux/
+daozai_flutter/ios/
+daozai_flutter/web/

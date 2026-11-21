@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 合并进 android/app/src/main/res/values/strings.xml -->
+<resources>
+    <string name="widget_description">岛仔：时间、天气与待办，抬眼即见。</string>
+</resources>
