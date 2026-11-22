@@ -29,7 +29,7 @@
 | 多平台可安装运行（Win/mac/Android） | ✅ Flutter 重做外壳 |
 | 安卓形态 | 小组件 + 完整 App |
 | 首期范围 | 先做可运行骨架 |
-| 功能取舍 | 优先通用功能（天气/待办/专注/喝水），音乐/消息/邮箱/额度/日历暂缓 |
+| 功能取舍（最新） | **保留：时钟常驻 + 待办清单 + 桌面悬浮岛 + 安卓小组件**。已删除：天气、喝水提醒、番茄专注。不再纳入路线：消息提醒、桌宠、音乐歌词、娱乐相关。后续仅扩展 AI 额度/邮箱验证码/日历/剪贴板等纯逻辑实用功能 |
 | 打包方式 | CI 云端自动打包（本机无工具链） |
 | 桌面交互 | 保留原版悬停展开（移开收起）手感 |
 | 命名规范 | 用户可见处统一项目名 Daozai，不用中文品牌称呼；产物名 daozai-平台 |
@@ -44,29 +44,30 @@ daozai_flutter/
 │   ├── core/                      # 从 Rust 复刻的纯逻辑 + 工具（跨平台复用）
 │   │   ├── theme.dart             #   配色/字号/几何（← theme.rs, app.rs）
 │   │   ├── spring.dart            #   二阶阻尼弹簧（← anim.rs，逐行复刻）
-│   │   ├── weather_code.dart      #   WMO 天气映射（← weather.rs）
-│   │   ├── otp.dart               #   验证码加权打分（← otp.rs，纯字母分支从简）
+│   │   ├── otp.dart               #   验证码加权打分（← otp.rs，保留供后续邮箱用）
 │   │   ├── quit.dart              #   桌面退出（关窗+exit(0)，独立文件避免循环依赖）
 │   │   └── window_pos.dart        #   窗口位置持久化（独立文件避免循环依赖）
 │   ├── services/
-│   │   ├── weather_service.dart   #   Open-Meteo 拉取+解析+缓存（请求参数与原版一致）
-│   │   └── local_store.dart       #   待办/喝水/城市/专注持久化（shared_preferences JSON）
-│   ├── state/app_state.dart       # 应用状态机 ChangeNotifier（← app.rs 精简）
+│   │   └── local_store.dart       #   待办持久化（shared_preferences JSON）
+│   ├── state/app_state.dart       # 应用状态机：时钟 + 待办（ChangeNotifier）
 │   ├── ui/
 │   │   ├── island_shape.dart      #   刘海轮廓 CustomPainter（← shape.rs）
 │   │   ├── island_widget.dart     #   收起↔展开弹簧形变 + 悬停状态机 + 拖动
-│   │   └── pages.dart             #   天气/待办/专注/喝水四页 + 公共控件
+│   │   └── pages.dart             #   待办页 + 公共控件
 │   └── shell/
 │       ├── desktop_shell.dart     #   透明置顶悬浮窗 + 右键菜单（关于/退出）
-│       └── mobile_shell.dart      #   安卓完整 App + 底部导航 + 城市输入
+│       └── mobile_shell.dart      #   安卓完整 App（时钟+待办卡片）
 ├── platform/android_widget/       # 安卓主屏小组件原生脚手架（Kotlin + res）
 ├── ci/setup_platform.sh           # CI 平台配置注入脚本
-├── test/core_test.dart            # 纯逻辑回归测试（弹簧/天气/验证码）
+├── test/core_test.dart            # 纯逻辑回归测试（弹簧/验证码）
 ├── pubspec.yaml
 ├── README.md                      # 构建运行指南
 ├── CI_GUIDE.md                    # CI 打包与下载指南
 └── HANDOFF.md                     # 本文档
 ```
+
+> 已删除文件：`core/weather_code.dart`、`services/weather_service.dart`（天气）；
+> 喝水/专注的状态、存储、UI 已从 app_state/local_store/pages 中移除。
 
 **关键设计**：
 - 时间驱动：岛体形变用 Ticker 每帧驱动复刻的 Spring（半隐式欧拉+子步，帧率无关）。
@@ -99,24 +100,25 @@ daozai_flutter/
 ## 7. 已知坑与限制（接手必读）
 
 1. **桌面精确点击穿透未做**：岛体窗口外的透明区域仍挡住下层桌面点击。原版用 Win32 命中区+HTTRANSPARENT 实现，window_manager 无逐区域穿透 API，需平台原生通道（Win32 SetWindowRgn/WM_NCHITTEST）。**这是桌面端最后一块基础体验短板。**
-2. **真实电量/系统状态未接**：收起药丸已移除假电池图标；真实电量需平台原生通道（Win GetSystemPowerStatus / mac IOKit / 安卓 BatteryManager）。
-3. **音乐/消息/邮箱/额度/日历未纳入**：这些是 Windows 专属或三端机制差异极大的高难度项，按用户"优先通用功能"决策暂缓。otp.dart 验证码逻辑已就绪可供邮箱功能复用。
+2. **真实电量/系统状态未接**：收起药丸仅显示时钟；真实电量需平台原生通道（Win GetSystemPowerStatus / mac IOKit / 安卓 BatteryManager）。
+3. **已删除/不再做的功能**：天气、喝水、专注（已删代码）；消息提醒、桌宠、音乐歌词、娱乐（不再纳入路线）。**接手者不要重新引入这些。** otp.dart 验证码逻辑保留供后续邮箱功能复用。
 4. **平台 runner 目录不入库**：android/macos/windows 由 CI 里 `flutter create` 生成（.gitignore 已排除）。本地运行需先 `flutter create --platforms=... .`。
-5. **安卓小组件数据**：骨架阶段读 shared_preferences 待办计数；天气需经 home_widget 插件或 MethodChannel 推送刷新（待补）。
+5. **安卓小组件数据**：读 shared_preferences 待办计数；后续可经 home_widget 插件或 MethodChannel 推送刷新。
 6. **推送认证**：本机 git 无 GitHub 凭据（osxkeychain 空、无 SSH key、无 gh），AI 无法代推，需用户手动 `git push origin main`（用户名+PAT）。
 7. **macOS 包双层 zip**：GitHub artifact 外层包装 + 内层 app 包，需逐层解压；未签名需 xattr -cr + 右键打开。
 
-## 8. 后续路线（按优先级）
+## 8. 后续路线（按优先级，已按用户取舍收窄）
 
 | 优先级 | 任务 | 说明 |
 |---|---|---|
-| P0 | 验证现有四功能真机好用 | 先确认逻辑正确，再扩展（符合用户原则） |
+| P0 | 验证时钟+待办真机好用 | 先确认逻辑正确，再扩展（符合用户原则） |
 | P1 | 桌面精确点击穿透 | 平台原生通道，桌面体验闭环 |
-| P1 | 真实电量/系统状态 | 平台原生通道 |
-| P2 | 设置页（城市管理/主题/专注时长） | 当前城市输入在天气页，专注时长固定 15/25/45 |
-| P2 | 音乐控制/歌词 | Win SMTC / mac MediaRemote / 安卓 MediaSession |
-| P3 | 邮箱+验证码 | IMAP 跨平台，凭据进 Keychain/Keystore，otp.dart 已就绪 |
-| P3 | AI 额度/日历 | HTTP 逻辑可复用 Rust（flutter_rust_bridge）或 Dart 重写 |
+| P2 | 待办本地提醒 | 到点系统通知（TodoItem.reminder 字段已预留） |
+| P2 | 邮箱+验证码 | IMAP 跨平台，凭据进 Keychain/Keystore，otp.dart 已就绪 |
+| P3 | AI 额度监控 | HTTP 逻辑可复用 Rust（flutter_rust_bridge）或 Dart 重写 |
+| P3 | 日历日程 / 剪贴板历史 | 纯逻辑实用功能 |
+
+> 明确不做：天气、喝水、专注、消息提醒、桌宠、音乐歌词、娱乐相关。
 
 ## 9. 构建与运行
 

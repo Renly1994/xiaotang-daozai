@@ -6,7 +6,6 @@ import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
 import '../core/theme.dart';
 import '../core/spring.dart';
-import '../core/weather_code.dart';
 import '../state/app_state.dart';
 import '../core/quit.dart';
 import '../core/window_pos.dart';
@@ -191,13 +190,8 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              // 不显示假电池图标（真实电量需平台原生通道，骨架阶段不用装饰图标误导用户）。
+              // 收起药丸仅显示时钟（天气功能已移除）。
               Text(s.clock, style: const TextStyle(fontSize: DaozaiSize.pillClock, fontWeight: FontWeight.w600, color: DaozaiColors.white)),
-              if (s.weather != null) ...[
-                const SizedBox(width: 8),
-                Text('${weatherEmoji(s.weather!.kind)} ${s.weather!.temp.round()}°',
-                    style: const TextStyle(fontSize: DaozaiSize.small, color: DaozaiColors.gray)),
-              ],
             ],
           ),
         ),

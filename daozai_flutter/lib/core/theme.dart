@@ -22,7 +22,6 @@ class DaozaiColors {
   static const Color card = Color.fromRGBO(22, 22, 24, 1);
   static const Color track = Color.fromRGBO(36, 36, 39, 1);
   static const Color arrowBg = Color.fromRGBO(48, 48, 51, 1);
-  static const Color waterTrack = Color.fromRGBO(15, 38, 64, 1);
   static const Color yellow = Color.fromRGBO(255, 196, 61, 1);
 
   /// 岛体底色（经典黑）。

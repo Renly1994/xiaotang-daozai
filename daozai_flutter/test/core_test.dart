@@ -1,7 +1,7 @@
-//! 核心纯逻辑回归测试 —— 验证从 Rust 复刻的弹簧 / 天气映射 / 验证码打分。
+//! 核心纯逻辑回归测试 —— 验证从 Rust 复刻的弹簧 / 验证码打分。
+//! 天气映射测试已随天气功能移除；验证码逻辑保留供后续邮箱功能复用。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:daozai_flutter/core/spring.dart';
-import 'package:daozai_flutter/core/weather_code.dart';
 import 'package:daozai_flutter/core/otp.dart';
 
 void main() {
@@ -36,21 +36,6 @@ void main() {
       for (var i = 0; i < 30; i++) { a.step(1 / 30); }
       for (var i = 0; i < 144; i++) { b.step(1 / 144); }
       expect((a.pos - b.pos).abs(), lessThan(0.01));
-    });
-  });
-
-  group('天气映射（复刻 weather.rs）', () {
-    test('WMO 代码 → 现象', () {
-      expect(weatherKind(0, true), WeatherKind.sun);
-      expect(weatherKind(0, false), WeatherKind.moon);
-      expect(weatherKind(61, true), WeatherKind.rain);
-      expect(weatherKind(95, true), WeatherKind.thunder);
-      expect(weatherKind(71, true), WeatherKind.snow);
-    });
-    test('中文描述', () {
-      expect(weatherDescribe(0), '晴');
-      expect(weatherDescribe(65), '大雨');
-      expect(weatherDescribe(96), '雷暴伴冰雹');
     });
   });
 
