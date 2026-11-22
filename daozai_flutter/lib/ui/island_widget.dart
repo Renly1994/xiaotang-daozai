@@ -1,5 +1,6 @@
 //! 岛体主组件 —— 对应原项目 app.rs 的 frame/morph（骨架精简版）。
 //! 收起药丸 ↔ 展开面板用复刻的二阶阻尼弹簧驱动，悬停意图缓冲防误触。
+import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:provider/provider.dart';
@@ -30,8 +31,13 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
   double _leaveSince = -1;
   bool _open = false;
   double _now = 0;
-  // 鼠标是否在岛体感应区内（由 MouseRegion 维护，供 Ticker 确定性判断）。
+  // 鼠标是否在岛体感应区内（由全局鼠标位置计算，供 Ticker 确定性判断）。
   bool _inside = false;
+  // 当前是否处于点击穿透状态（岛体外穿透到下层窗口）。
+  bool _ignoring = false;
+  // forward 鼠标转发仅 Windows/macOS 支持；Linux 不支持，启用穿透会导致岛体点不到，
+  // 故 Linux 保持整窗交互（不穿透）。
+  static final bool _supportsForward = Platform.isWindows || Platform.isMacOS;
 
   // 展开目标尺寸（含肩部余量）。
   static const double _openW = DaozaiGeom.panelW + DaozaiGeom.flare * 2 + 24;
@@ -49,6 +55,12 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
       _h.snap(_openH);
     } else {
       _ticker = createTicker(_onTick)..start();
+      // 桌面悬浮：启动即穿透（鼠标不在岛体上时不挡桌面），移到岛体上再恢复交互。
+      // 仅 Windows/macOS 支持 forward 转发；Linux 不穿透。
+      if (_supportsForward) {
+        _ignoring = true;
+        windowManager.setIgnoreMouseEvents(true, forward: true);
+      }
     }
   }
 
@@ -117,6 +129,30 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
   void _onExit() {
     if (!widget.floating) return;
     _inside = false;
+  }
+
+  /// 岛体命中矩形（窗口局部坐标）：水平居中、顶部对齐，尺寸随展开进度变化。
+  Rect _islandRect() {
+    final w = _w.pos;
+    final h = _h.pos;
+    final left = (_openW - w) / 2;
+    return Rect.fromLTWH(left, 0, w, h);
+  }
+
+  /// 全局鼠标移动驱动点击穿透：
+  /// 鼠标在岛体内 → 恢复交互；在岛体外 → 穿透到下层（forward 继续转发移动事件）。
+  /// 穿透状态下 MouseRegion 不触发，故悬停展开也由此处的 _inside 驱动。
+  void _onPointerMove(PointerEvent event) {
+    if (!widget.floating) return;
+    final hit = _islandRect().contains(event.localPosition);
+    _inside = hit;
+    // Linux 不支持 forward，不做穿透切换（保持整窗交互）。
+    if (!_supportsForward) return;
+    final wantIgnore = !hit;
+    if (wantIgnore != _ignoring) {
+      _ignoring = wantIgnore;
+      windowManager.setIgnoreMouseEvents(wantIgnore, forward: true);
+    }
   }
 
   @override
@@ -198,10 +234,13 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
       ),
     );
 
-    return MouseRegion(
-      onEnter: (_) => _onEnter(),
-      onExit: (_) => _onExit(),
-      child: GestureDetector(
+    return Listener(
+      onPointerHover: _onPointerMove,
+      onPointerMove: _onPointerMove,
+      child: MouseRegion(
+        onEnter: (_) => _onEnter(),
+        onExit: (_) => _onExit(),
+        child: GestureDetector(
         onTap: () {
           if (widget.floating && !_open) {
             setState(() => _open = true);
@@ -249,6 +288,7 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
             ],
           ),
         ),
+      ),
       ),
     );
   }
