@@ -109,14 +109,14 @@ daozai_flutter/
 
 ## 8. 后续路线（按优先级，已按用户取舍收窄）
 
-| 优先级 | 任务 | 说明 |
+| 优先级 | 任务 | 状态 |
 |---|---|---|
-| P0 | 验证时钟+待办真机好用 | 先确认逻辑正确，再扩展（符合用户原则） |
-| P1 | 桌面精确点击穿透 | 平台原生通道，桌面体验闭环 |
-| P2 | 待办本地提醒 | 到点系统通知（TodoItem.reminder 字段已预留） |
-| P2 | 邮箱+验证码 | IMAP 跨平台，凭据进 Keychain/Keystore，otp.dart 已就绪 |
-| P3 | AI 额度监控 | HTTP 逻辑可复用 Rust（flutter_rust_bridge）或 Dart 重写 |
-| P3 | 日历日程 / 剪贴板历史 | 纯逻辑实用功能 |
+| P0 | 验证时钟+待办真机好用 | 待用户推送+试用 |
+| P1 | 桌面精确点击穿透 | ✅ 已实现（de398ce）：setIgnoreMouseEvents forward 轮廓穿透，Win/mac 生效，Linux 整窗交互 |
+| P2 | 待办本地提醒 | ✅ 已实现（bf8e5bd）：系统级定时通知+岛内横幅，铃铛设置/长按清除 |
+| P2 | 邮箱+验证码 | 待做：IMAP 跨平台，凭据进 Keychain/Keystore，otp.dart 已就绪 |
+| P3 | AI 额度监控 | 待做：HTTP 逻辑可复用 Rust（flutter_rust_bridge）或 Dart 重写 |
+| P3 | 日历日程 / 剪贴板历史 | 待做：纯逻辑实用功能 |
 
 > 明确不做：天气、喝水、专注、消息提醒、桌宠、音乐歌词、娱乐相关。
 
