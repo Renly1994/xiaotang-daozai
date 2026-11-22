@@ -313,6 +313,29 @@ unsafe extern "system" fn on_foreground(
     }
 }
 
+/// 用系统关联的程序打开一个 URI：QQ 通知里的 `ntqq-notification://…` 就是这样直达具体会话的。
+/// 返回值表示系统是否接受（ShellExecute 的成功阈值是 32，小于它都是错误码）。
+pub fn open_uri(uri: &str) -> bool {
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    if uri.is_empty() {
+        return false;
+    }
+    let operation = HSTRING::from("open");
+    let file = HSTRING::from(uri);
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(operation.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    result.0 as isize > 32
+}
+
 /// winit 会在显示/改属性时重写窗口样式，所以每帧按需兜一次底。
 unsafe fn apply_style(hwnd: HWND, editing: bool, raise: bool) {
     let style = GetWindowLongPtrW(hwnd, GWL_STYLE);

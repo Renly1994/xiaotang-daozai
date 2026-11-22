@@ -555,7 +555,8 @@ unsafe fn avoidance_for_window(foreground:HWND,island:HWND,pid:u32,settings:&cra
 pub enum Incoming {
     Revoked,
     Status(String),
-    Message(String, String, String, Option<crate::messenger::Target>),
+    /// 正文之外再带上 QQ 的会话信息（跳会话地址 + 头像文件）；其他客户端恒为 None。
+    Message(String,String,String,Option<crate::messenger::Target>,Option<std::sync::Arc<crate::qq_toast::QqToast>>),
 }
 #[path="toast_source.rs"]
 mod toast_source;
@@ -734,14 +735,22 @@ fn connect_inner(ctx:eframe::egui::Context,filter:crate::messenger::Notification
                                 if target.is_none(){crate::messenger::windows::trace(format!("通知 {id}·创建 {created} 未能绑定 {} 账号",client.name()));}
                                 target
                             });
-                        if !body.trim().is_empty(){messages.push((created,app,id,body,target));}
+                        if !body.trim().is_empty(){
+                            // QQ 类系统通知的 payload 里带「点开跳哪条会话」和发送方头像；一次只读查询，取不到就不影响提醒。
+                            let toast=client.filter(|client|client.adapter().capture==crate::messenger::Capture::SystemToast)
+                                .and_then(|_|toast_source::payload(number,created))
+                                .map(|payload|crate::qq_toast::parse(&payload))
+                                .filter(|toast|toast.launch.is_some()||toast.avatar.is_some())
+                                .map(std::sync::Arc::new);
+                            messages.push((created,app,id,body,target,toast));
+                        }
                     }
                 }
                 baseline.finish(current,complete);
                 accounts.retain(|client,id,created|baseline.previous.as_ref().and_then(|items|items.get(&id)).is_some_and(|item|item.created==created && item.client==Some(client)));
                 messages.sort_by_key(|item|item.0);
-                for (_,app,id,body,target) in messages {
-                    if !send(Incoming::Message(app,id,body,target)){return Ok(());}
+                for (_,app,id,body,target,toast) in messages {
+                    if !send(Incoming::Message(app,id,body,target,toast)){return Ok(());}
                 }
                 let status=match filter{crate::messenger::NotificationFilter::Only(client)=>format!("仅监听 {} · {channels}",client.name()),crate::messenger::NotificationFilter::All=>format!("正在监听 Windows 通知 · 当前可见 {count} 条\n{channels}")};
                 if status!=last_status {

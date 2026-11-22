@@ -489,9 +489,9 @@ impl eframe::App for Shell {
                 while let Ok(event)=rx.try_recv(){match event {
                     daozai::system::Incoming::Revoked=>{self.app.settings.read_notifications=false;self.app.settings.save();},
                     daozai::system::Incoming::Status(s)=>self.app.listener_status=s,
-                    daozai::system::Incoming::Message(a,id,b,target)=>{
+                    daozai::system::Incoming::Message(a,id,b,target,toast)=>{
                         if target.is_some_and(|target|self.messengers.track(target)==Err(OpenError::Exited)){continue;}
-                        self.app.receive_notification_from(a,id,b,target.map(|target|target.unread));
+                        self.app.receive_notification_toast(a,id,b,target.map(|target|target.unread),toast);
                     }
                 }}
             }
@@ -706,6 +706,8 @@ impl eframe::App for Shell {
                             messenger::windows::trace(format!("唤起 {} 账号 {}：未开始，上一次唤起还没结束",unread.source.name(),unread.pid));
                             self.app.messenger_unavailable(OpenError::Busy.message(unread.source));ctx.request_repaint();continue;
                         }
+                        // 通知里带了会话地址就直接跳那一条聊天（等价于用户点系统通知），下面再把窗口抬到前台。
+                        if let Some(uri)=self.app.messenger_launch(unread){daozai::native::open_uri(&uri);}
                         match self.messengers.request(unread,&self.app.settings).start(ctx.clone()){
                             Ok(rx)=>self.tray_opening=Some((unread,rx)),
                             Err(error)=>{

@@ -841,6 +841,8 @@ pub struct App {
     notice_width: Spring,
     notice_details: bool,
     pub pending_messengers:Vec<Unread>,
+    /// 每个未读账号最近一条通知的会话信息（跳会话地址、头像文件），按时间先后存放。
+    pub messenger_toasts:Vec<(Unread,std::sync::Arc<crate::qq_toast::QqToast>)>,
     messenger_scroll: f32,
     pub(crate) alerts: std::collections::VecDeque<Alert>,
     pub(crate) history: std::collections::VecDeque<Alert>,
@@ -995,7 +997,7 @@ impl App {
             music_artwork: None,
             forced_open_until:0.0, settings_open:false, settings_window:std::sync::Arc::new(std::sync::Mutex::new(crate::settings_window::State::load())), displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_tab:0, settings_category:0, messenger_statuses:Default::default(), notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
             listener_status: "尚未连接".into(),
-            notification_bell_until: 0.0, notification_bell_at: -10.0, notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, pending_messengers:Vec::new(), messenger_scroll:0.0, alerts: Default::default(), history: Default::default(), pending: vec![],
+            notification_bell_until: 0.0, notification_bell_at: -10.0, notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, pending_messengers:Vec::new(), messenger_toasts:Vec::new(), messenger_scroll:0.0, alerts: Default::default(), history: Default::default(), pending: vec![],
             todo_first: 0, todo_choosing: false, pet: Default::default(), last_drink: None,
             toast: None, toast_below: false,
             last_input: 0.0, system_idle: None,
@@ -2116,7 +2118,7 @@ impl App {
             }else{
                 let horizontal=!(self.side() && self.notice.is_none());
                 let scale=self.messenger_stack_appear();
-                self.draw_unread_stack(&c.scaled(0.0,0.0,scale).faded(scale),horizontal,&mut cmds);
+                self.draw_unread_stack(&ctx,&c.scaled(0.0,0.0,scale).faded(scale),horizontal,&mut cmds);
             }
             keep_colors.push((from,crate::skin_paint::shape_count(&ctx,layer)));
         }
@@ -2410,11 +2412,18 @@ impl App {
             if cy< -slot || cy>height+slot {continue;}
             let scale=u.source.adapter().icon_scale;
             crate::extras::messenger_icon(&inner.scaled(x,cy,scale),x,cy,u.source);
-            inner.circle(x+10.0,cy-9.0,2.6,Color32::from_rgb(255,72,72));
+            let avatar=self.messenger_avatar(ctx,u);
             let tag=self.unread_tag(i).map(|tag|tag.to_string()).or_else(||(u.unidentified()).then(||"?".to_string()));
+            if let Some(texture)=&avatar{
+                // 头像挂在企鹅右下角；有头像时红点让位，未读数字挪到右上角，两者不打架。
+                inner.avatar_circle(x+9.5,cy+9.5,6.5,texture);
+            }else{
+                inner.circle(x+10.0,cy-9.0,2.6,Color32::from_rgb(255,72,72));
+            }
             if let Some(tag)=tag{
-                inner.circle(x+10.0,cy+8.5,6.0,Color32::from_gray(238));
-                inner.centered_text(x+10.0,cy+8.5,&tag,8.5,W::Bold,Color32::from_gray(28),H::Center);
+                let (tx,ty,r,size)=if avatar.is_some(){(x+9.5,cy-9.5,5.5,8.0)}else{(x+10.0,cy+8.5,6.0,8.5)};
+                inner.circle(tx,ty,r,Color32::from_gray(238));
+                inner.centered_text(tx,ty,&tag,size,W::Bold,Color32::from_gray(28),H::Center);
             }
             let name=if u.unidentified(){format!("{} · 账号未确认",u.source.name())}
                 else{match self.unread_tag(i){Some(n)=>format!("{} · 账号 {n}",u.source.name()),None=>u.source.name().to_string()}};
@@ -2438,21 +2447,28 @@ impl App {
     }
 
     /// 收起时的未读入口：每个来源一个图标加小红点（同一来源多个账号合成一个）。只有一条时点它直接跳转，多条时展开面板挑选。
-    fn draw_unread_stack(&mut self,c:&Card,horizontal:bool,cmds:&mut Vec<Cmd>){
+    fn draw_unread_stack(&mut self,ctx:&egui::Context,c:&Card,horizontal:bool,cmds:&mut Vec<Cmd>){
         let sources=self.unread_sources();
         let health=self.health_badges();
         let count=self.pending_messengers.len();
         let icons=sources.len()+health.len();
         let step=unread_step(horizontal);
         let at=|k:usize|if horizontal {(16.0+step*k as f32,14.0)}else{(16.0,14.0+step*k as f32)};
+        // 头像只按消息来源算（健康提醒没有头像）。
+        let avatars=(0..sources.len()).map(|k|self.pending_messengers.iter().copied().find(|u|u.source==sources[k]).and_then(|u|self.messenger_avatar(ctx,u))).collect::<Vec<_>>();
         for k in 0..sources.len() {
             let (x,y)=at(k);
             let scale=sources[k].adapter().collapsed_icon_scale;
             crate::extras::messenger_icon(&c.scaled(x,y,scale),x,y,sources[k]);
+            // 有头像就挂在图标右下角；没有头像的来源仍用右上角小红点表示未读。
+            match &avatars[k] {
+                Some(texture)=>c.avatar_circle(x+7.5,y+7.5,5.5,texture),
+                None=>c.circle(x+8.0,y-7.0,2.6,Color32::from_rgb(255,59,48)),
+            }
         }
         for (i,kind) in health.iter().enumerate(){let (x,y)=at(sources.len()+i);kind.icon(c,x,y,0.7);}
-        // 每个来源图标右上角一个小红点，不显示数字。
-        for k in 0..icons {let (x,y)=at(k);c.circle(x+8.0,y-7.0,2.6,Color32::from_rgb(255,59,48));}
+        // 健康提醒没有头像，仍用右上角小红点；消息来源的红点已在上面按「有没有头像」二选一画过。
+        for k in sources.len()..icons {let (x,y)=at(k);c.circle(x+8.0,y-7.0,2.6,Color32::from_rgb(255,59,48));}
         let length=self.unread_stack_len(horizontal);
         let messenger_length=if health.is_empty(){length}else{sources.len() as f32*step+if horizontal{5.0}else{3.0}};
         let (w,h)=if horizontal {(messenger_length,BAR_H)}else{(32.0,messenger_length)};

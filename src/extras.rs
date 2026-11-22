@@ -381,6 +381,36 @@ impl App {
         self.receive_notification_from(app,id,body,None);
     }
     pub fn receive_notification_from(&mut self,app:String,id:String,body:String,unread:Option<crate::app::Unread>){
+        self.receive_notification_toast(app,id,body,unread,None);
+    }
+    /// 系统通知带上了 QQ 的会话信息时，先照常入队，再把「跳哪条会话 / 用哪个头像」记到对应账号上。
+    pub fn receive_notification_toast(&mut self,app:String,id:String,body:String,unread:Option<crate::app::Unread>,toast:Option<std::sync::Arc<crate::qq_toast::QqToast>>){
+        let client=crate::app::Messenger::from_notification_id(&id);
+        self.receive_notification_from_inner(app,id,body,unread);
+        let Some(toast)=toast else{return};
+        let Some(client)=client else{return};
+        if client.adapter().capture!=crate::messenger::Capture::SystemToast{return;}
+        let unread=unread.filter(|u|u.source==client && u.pid!=0).unwrap_or(crate::app::Unread::of(client));
+        self.remember_messenger_toast(unread,toast);
+    }
+    fn remember_messenger_toast(&mut self,unread:crate::app::Unread,toast:std::sync::Arc<crate::qq_toast::QqToast>){
+        self.messenger_toasts.retain(|(current,_)|*current!=unread);
+        self.messenger_toasts.push((unread,toast));
+        while self.messenger_toasts.len()>8 {self.messenger_toasts.remove(0);}
+    }
+    /// 这个账号最近一条通知的会话跳转地址。
+    pub fn messenger_launch(&self,unread:crate::app::Unread)->Option<String>{
+        self.toast_of(unread).and_then(|toast|toast.launch.clone())
+    }
+    /// 这个账号最近一条通知的头像文件；设置里关掉头像时直接不取（也不读文件）。
+    pub(crate) fn messenger_avatar(&self,ctx:&egui::Context,unread:crate::app::Unread)->Option<egui::TextureHandle>{
+        if !self.settings.qq_avatar{return None;}
+        avatar_texture(ctx,&self.toast_of(unread)?.avatar.clone()?)
+    }
+    fn toast_of(&self,unread:crate::app::Unread)->Option<&crate::qq_toast::QqToast>{
+        self.messenger_toasts.iter().rev().find(|(current,_)|*current==unread).or_else(||self.messenger_toasts.iter().rev().find(|(current,_)|current.source==unread.source)).map(|(_,toast)|toast.as_ref())
+    }
+    fn receive_notification_from_inner(&mut self,app:String,id:String,body:String,unread:Option<crate::app::Unread>){
         if !self.settings.read_notifications || id.is_empty() || !crate::messenger::NotificationFilter::for_settings(&self.settings).allows(&id){return;}
         if crate::messenger::suppresses_toast(&app,&id,crate::messenger::toast_suppression(&self.settings)){return;}
         let client=crate::app::Messenger::from_notification_id(&id).filter(|client|client.adapter().capture==crate::messenger::Capture::SystemToast);
@@ -410,6 +440,9 @@ impl App {
     pub(crate) fn tick_alerts(&mut self) {
         self.pending_messengers.retain(|u|u.source.enabled(&self.settings) && (u.source.adapter().capture!=crate::messenger::Capture::SystemToast
             || self.notification_apps.items.iter().any(|(key,_,on)|key==u.source.adapter().notification_id && *on)));
+        // 提醒被清掉后，它的会话信息和头像也没有意义了，跟着一起扔。
+        let pending=self.pending_messengers.clone();
+        self.messenger_toasts.retain(|(unread,_)|pending.contains(unread));
         let allowed=|a:&Alert|match &a.source {
             AlertSource::Internal=>!self.fullscreen_hidden || a.health().is_none(),
             AlertSource::Messenger(client)=>client.enabled(&self.settings),
@@ -1900,6 +1933,7 @@ impl App {
                                     });
                                 });
                                 sub(ui,"显示通知正文","仅 QQ 与 Windows 通知；可能包含私密消息，屏幕共享时建议关闭",&mut self.settings.notification_preview);
+                                sub(ui,"显示发送方头像","群消息显示群头像、私聊显示对方头像；只读取本机 QQ 的缓存图片",&mut self.settings.qq_avatar);
                                 // 收到过通知的应用可能有几十个：默认收起，展开后用可点选的标签排成几行，不再一应用一行。
                                 let before_apps=self.notification_apps.items.clone();
                                 let total=self.notification_apps.items.len();
@@ -2334,4 +2368,24 @@ fn support_codes_are_cropped_small_and_released_when_hidden(){
     release_support_codes(&ctx);
     let _=ctx.run(Default::default(),|_|{});
     assert_eq!(ctx.tex_manager().read().allocated().filter(|(_,meta)|meta.name=="qr").count(),0,"收起后应释放收款码贴图");
+}
+
+/// 头像贴图缓存：同一路径只解码一次，解码失败也记下来，避免每帧重试同一个坏文件。
+#[derive(Clone)]
+struct AvatarSlot{texture:Option<egui::TextureHandle>}
+
+fn avatar_texture(ctx:&egui::Context,path:&std::path::Path)->Option<egui::TextureHandle>{
+    if !crate::qq_toast::usable_avatar(path){return None;}
+    let key=egui::Id::new(("messenger-avatar",path));
+    if let Some(slot)=ctx.data_mut(|data|data.get_temp::<AvatarSlot>(key)){return slot.texture;}
+    // 群头像原图只有 100×100：缩到 64 就够画 13px 的圆圈，省显存也省一次大纹理上传。
+    // QQ 的头像缓存文件没有扩展名，只能按内容猜格式（`image::open` 依赖扩展名，这里不能用）。
+    let Ok(bytes)=std::fs::read(path) else{return None;};
+    let Ok(decoded)=image::load_from_memory(&bytes) else{ctx.data_mut(|data|data.insert_temp(key,AvatarSlot{texture:None}));return None;};
+    let side=64usize;
+    let pixels=image::imageops::resize(&decoded.to_rgba8(),side as u32,side as u32,image::imageops::FilterType::Triangle);
+    let color=egui::ColorImage::from_rgba_unmultiplied([side,side],pixels.as_raw());
+    let texture=ctx.load_texture(format!("messenger-avatar-{}",path.display()),color,egui::TextureOptions::LINEAR);
+    ctx.data_mut(|data|data.insert_temp(key,AvatarSlot{texture:Some(texture.clone())}));
+    Some(texture)
 }

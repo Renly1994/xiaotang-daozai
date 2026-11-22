@@ -7888,6 +7888,35 @@ fn qq_unknown_reminders_survive_viewing_other_accounts(){
 }
 
 #[test]
+fn qq_avatar_and_launch_survive_the_toast_path_and_degrade_cleanly(){
+    use crate::app::{Messenger,Unread};
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();h.app.settings.read_notifications=true;h.app.settings.qq_avatar=true;
+    // QQ 的头像缓存文件没有扩展名，解码必须按内容判断，否则永远取不到头像。
+    let dir=std::env::temp_dir().join(format!("daozai-avatar-{}",std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file=dir.join("s_avatar_without_extension");
+    let mut bytes=Vec::new();
+    let pixel=image::RgbaImage::from_pixel(8,8,image::Rgba([200,40,40,255]));
+    image::DynamicImage::ImageRgba8(pixel).write_to(&mut std::io::Cursor::new(&mut bytes),image::ImageFormat::Png).unwrap();
+    std::fs::write(&file,&bytes).unwrap();
+    let toast=crate::qq_toast::QqToast{
+        launch:Some("ntqq-notification://externalCommand?subcmd=openExternalWindow;peerUid=163246372;chatType=2".into()),
+        avatar:Some(file.clone()),
+        chat_type:Some(2),
+    };
+    let unread=Unread{source:Messenger::Qq,pid:100,window:11};
+    h.app.receive_notification_toast("QQ".into(),"QQ".into(),"有新消息".into(),Some(unread),Some(std::sync::Arc::new(toast)));
+    assert!(h.app.pending_messengers.contains(&unread),"带 payload 的通知仍要走原来的未读流程");
+    assert_eq!(h.app.messenger_launch(unread).as_deref(),Some("ntqq-notification://externalCommand?subcmd=openExternalWindow;peerUid=163246372;chatType=2"));
+    assert!(h.app.messenger_avatar(&h.ctx,unread).is_some(),"按内容解码的缓存图应该能画出来");
+    for _ in 0..45{h.frame(vec![]);}
+    h.app.settings.qq_avatar=false;
+    assert!(h.app.messenger_avatar(&h.ctx,unread).is_none(),"关掉开关后不再读头像文件");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn messenger_window_replacement_removes_stale_banner_targets_without_clearing_other_accounts(){
     use crate::app::{Cmd,Messenger,Unread};
     let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
@@ -8297,6 +8326,31 @@ fn unread_gallery(){
             shoot_unread(&mut h,&mut r,&dest,&format!("unread-{key}-{tag}-open"),80,Some(near));
         }
     }
+}
+
+#[test]
+#[ignore="按需导出 QQ 未读头像的实际画面"]
+fn qq_avatar_gallery(){
+    use crate::app::{Messenger,Unread};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_FEATURE_PREVIEW_DIR").expect("需指定预览目录"));std::fs::create_dir_all(&dest).unwrap();
+    // QQ 的头像缓存文件没有扩展名，这里也按「无扩展名」造素材，顺带守住按内容解码。
+    let avatar=dest.join("qq-avatar-fixture");
+    let mut bytes=Vec::new();
+    let pixel=image::RgbaImage::from_pixel(64,64,image::Rgba([74,150,226,255]));
+    image::DynamicImage::ImageRgba8(pixel).write_to(&mut std::io::Cursor::new(&mut bytes),image::ImageFormat::Png).unwrap();
+    std::fs::write(&avatar,&bytes).unwrap();
+    let mut h=H::new();h.app.settings.read_notifications=true;h.app.settings.wechat_notifications=true;h.app.settings.pet=false;
+    let toast=crate::qq_toast::QqToast{launch:None,avatar:Some(avatar),chat_type:Some(2)};
+    let qq=Unread{source:Messenger::Qq,pid:101,window:11};
+    h.app.receive_notification_toast("QQ".into(),"QQ".into(),"群消息".into(),Some(qq),Some(std::sync::Arc::new(toast)));
+    h.app.receive_wechat_reminder_from(303,0);
+    h.app.alerts.clear();h.app.notice=None;h.app.notification_bell_until=0.0;
+    let mut r=feature_raster();
+    let away=Some(Pos2::new(WIN_W/2.0,WIN_H-6.0));
+    let near=Pos2::new(WIN_W/2.0,12.0);
+    shoot_unread(&mut h,&mut r,&dest,"qq-avatar-collapsed",60,away);
+    shoot_unread(&mut h,&mut r,&dest,"qq-avatar-open",80,Some(near));
 }
 
 #[test]
