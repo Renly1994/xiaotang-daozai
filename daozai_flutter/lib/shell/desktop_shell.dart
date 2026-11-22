@@ -49,7 +49,7 @@ class DesktopShell extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Daozai',
+      title: 'DynamicIsland',
       debugShowCheckedModeBanner: false,
       theme: buildDaozaiTheme(),
       home: const _DesktopHome(),
@@ -100,7 +100,7 @@ class _DesktopHome extends StatelessWidget {
             children: const [
               Icon(Icons.info_outline, size: 16, color: DaozaiColors.cyan),
               SizedBox(width: 8),
-              Text('关于 Daozai', style: TextStyle(fontSize: 13, color: DaozaiColors.white)),
+              Text('关于 DynamicIsland', style: TextStyle(fontSize: 13, color: DaozaiColors.white)),
             ],
           ),
         ),
@@ -111,7 +111,7 @@ class _DesktopHome extends StatelessWidget {
             children: const [
               Icon(Icons.power_settings_new, size: 16, color: DaozaiColors.red),
               SizedBox(width: 8),
-              Text('退出 Daozai', style: TextStyle(fontSize: 13, color: DaozaiColors.white)),
+              Text('退出 DynamicIsland', style: TextStyle(fontSize: 13, color: DaozaiColors.white)),
             ],
           ),
         ),
@@ -131,7 +131,7 @@ class _DesktopHome extends StatelessWidget {
       builder: (ctx) => AlertDialog(
         backgroundColor: DaozaiColors.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        title: const Text('Daozai', style: TextStyle(color: DaozaiColors.white, fontSize: 18, fontWeight: FontWeight.w700)),
+        title: const Text('DynamicIsland', style: TextStyle(color: DaozaiColors.white, fontSize: 18, fontWeight: FontWeight.w700)),
         content: const Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,

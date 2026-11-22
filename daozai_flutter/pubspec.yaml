@@ -1,5 +1,5 @@
-name: daozai_flutter
-description: "岛仔跨平台版 —— 基于开源岛仔(Rust/egui)重做的 Flutter 多平台桌面伙伴。支持 Windows / macOS / Android。"
+name: dynamic_island
+description: "DynamicIsland macOS 桌面伙伴。"
 publish_to: "none"
 version: 0.1.0+1
 

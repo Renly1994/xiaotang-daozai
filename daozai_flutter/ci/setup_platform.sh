@@ -23,6 +23,13 @@ case "$PLATFORM" in
 
   macos)
     echo "[macos] 注入联网权限（后续联网服务）..."
+    APP_INFO="macos/Runner/Configs/AppInfo.xcconfig"
+    if [ -f "$APP_INFO" ]; then
+      # Flutter 工程名只能小写下划线；这里覆盖用户可见的 app、包和版权名称。
+      sedi 's/^PRODUCT_NAME = .*/PRODUCT_NAME = DynamicIsland/' "$APP_INFO"
+      sedi 's/^PRODUCT_BUNDLE_IDENTIFIER = .*/PRODUCT_BUNDLE_IDENTIFIER = com.dynamicisland.app/' "$APP_INFO"
+      sedi 's/^PRODUCT_COPYRIGHT = .*/PRODUCT_COPYRIGHT = Copyright © 2026 DynamicIsland. All rights reserved./' "$APP_INFO"
+    fi
     for ENT in macos/Runner/DebugProfile.entitlements macos/Runner/Release.entitlements; do
       if [ -f "$ENT" ]; then
         # 在 </dict> 前插入 network.client（若尚未存在）。

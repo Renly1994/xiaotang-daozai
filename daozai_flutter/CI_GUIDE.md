@@ -37,17 +37,15 @@ git push
 1. 推送后打开仓库的 **Actions** 标签页，会看到「构建三端安装包」工作流在跑。
 2. 三个任务（Windows / macOS / Android）并行，约 5–15 分钟。
 3. 跑完后点进该次运行，页面底部 **Artifacts** 区下载：
-   - `daozai-windows.zip` → 解压运行 `daozai_flutter.exe`
-   - `daozai-macos.zip` → 解压得到 `.app`，拖进「应用程序」
-   - `daozai-android.apk` → 传到安卓手机安装（需允许「未知来源」）
+   - `DynamicIsland-macos.zip` → GitHub 的外层制品包。解压后得到 `DynamicIsland-macos.dmg`、校验文件和安装说明。
+   - 双击 `DynamicIsland-macos.dmg`，把 `DynamicIsland.app` 拖进「应用程序」。
 
 也可手动触发：Actions → 「构建三端安装包」→ **Run workflow**。
 
 ## 三、各平台试用注意
 
 - **Windows**：未签名，SmartScreen 可能提示「未知发布者」，点「仍要运行」。岛体停在屏幕顶部居中，鼠标靠近展开。
-- **macOS**：未签名/公证，首次打开右键 →「打开」绕过 Gatekeeper；若提示「已损坏」，执行 `xattr -cr /Applications/岛仔.app`。天气联网权限已由 CI 注入 entitlements。
-- **Android**：APK 为 debug 签名（release 未配密钥时 Flutter 默认用 debug 签名），仅供试用，不能上架。主屏长按 → 小组件 → 找到「岛仔」添加。
+- **macOS**：未签名/公证，首次打开按住 Control 点击 →「打开」；若提示「已损坏」，执行 `xattr -cr /Applications/DynamicIsland.app`。联网权限已由 CI 注入 entitlements。
 
 ## 四、独立仓库的工作流调整
 

@@ -1,6 +1,6 @@
-name: 构建三端安装包
+name: 构建 macOS 安装包
 
-# 推送 main 或手动触发；产出 Windows / macOS / Android 安装包供下载试用。
+# 当前只交付 macOS。GitHub artifact 下载后是外层 ZIP，里面是可直接挂载的 DMG。
 on:
   push:
     branches: [main, master]
@@ -9,27 +9,13 @@ on:
       - '.github/workflows/build.yml'
   workflow_dispatch:
 
-jobs:
-  build:
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Windows
-            os: windows-latest
-            platform: windows
-            artifact: daozai-windows
-          - name: macOS
-            os: macos-latest
-            platform: macos
-            artifact: daozai-macos
-          - name: Android
-            os: ubuntu-latest
-            platform: android
-            artifact: daozai-android
+permissions:
+  contents: read
 
+jobs:
+  macos:
+    name: macOS
+    runs-on: macos-latest
     defaults:
       run:
         working-directory: daozai_flutter
@@ -44,81 +30,37 @@ jobs:
           channel: stable
           cache: true
 
-      - name: 安装 JDK（Android）
-        if: matrix.platform == 'android'
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: 生成平台工程
-        run: flutter create --platforms=${{ matrix.platform }} --org com.daozai --project-name daozai_flutter .
+      - name: 生成 macOS 工程
+        run: flutter create --platforms=macos --org com.dynamicisland --project-name dynamic_island .
 
       - name: 移除默认模板测试
-        shell: bash
-        run: |
-          # flutter create 会生成引用 MyApp 的默认 widget_test.dart，
-          # 本工程入口为 AppState + Shell，无 MyApp，需删除以免测试失败。
-          rm -f test/widget_test.dart
+        run: rm -f test/widget_test.dart
 
-      - name: 注入平台配置
-        shell: bash
-        run: bash ci/setup_platform.sh ${{ matrix.platform }}
+      - name: 注入 macOS 配置
+        run: bash ci/setup_platform.sh macos
 
       - name: 拉取依赖
         run: flutter pub get
 
-      - name: 静态分析（analyze）
+      - name: 静态分析
         run: flutter analyze --no-fatal-infos
 
-      - name: 自动化测试（逻辑 + Widget）
+      - name: 自动化测试
         run: flutter test --coverage
 
-      - name: 上传测试覆盖率
-        if: matrix.platform == 'android'
-        uses: actions/upload-artifact@v4
-        with:
-          name: daozai-coverage
-          path: daozai_flutter/coverage/lcov.info
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: 构建 Windows
-        if: matrix.platform == 'windows'
-        run: flutter build windows --release
-
-      - name: 构建 macOS
-        if: matrix.platform == 'macos'
+      - name: 构建 DynamicIsland.app
         run: flutter build macos --release
 
-      - name: 构建 Android APK
-        if: matrix.platform == 'android'
-        run: flutter build apk --release
+      - name: 打包并验证 DMG
+        run: bash ci/package_macos.sh
 
-      - name: 打包 Windows 产物
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath daozai-windows.zip
-
-      - name: 打包 macOS 产物
-        if: matrix.platform == 'macos'
-        run: |
-          cd build/macos/Build/Products/Release
-          # 用标准 zip（-y 保留符号链接），双击即可被「归档实用工具」解压；
-          # 不用 ditto --sequesterRsrc，避免部分 macOS 版本报「格式不支持」。
-          zip -r -y -q ../../../../../daozai-macos.zip *.app
-
-      - name: 重命名 Android 产物
-        if: matrix.platform == 'android'
-        run: cp build/app/outputs/flutter-apk/app-release.apk daozai-android.apk
-
-      - name: 上传安装包
+      - name: 上传 macOS 安装包
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
+          name: DynamicIsland-macos
           path: |
-            daozai_flutter/daozai-windows.zip
-            daozai_flutter/daozai-macos.zip
-            daozai_flutter/daozai-android.apk
-          if-no-files-found: ignore
+            daozai_flutter/DynamicIsland-macos.dmg
+            daozai_flutter/SHA256SUMS.txt
+            daozai_flutter/README-macOS.txt
+          if-no-files-found: error
           retention-days: 14

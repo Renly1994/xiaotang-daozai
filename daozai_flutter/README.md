@@ -1,6 +1,6 @@
-# 岛仔跨平台版（daozai_flutter）
+# DynamicIsland（macOS）
 
-基于开源 [岛仔](https://github.com/Renly1994/xiaotang-daozai)（Rust + egui，Windows 专属）重做的 **Flutter 多平台版本**，目标覆盖 **Windows / macOS / Android**。
+基于开源桌面灵动岛项目重做的 **DynamicIsland macOS 版本**。
 
 > 📋 **接手开发请先读 [HANDOFF.md](HANDOFF.md)**：完整需求决策、改动历史与原因、当前状态、已知坑、后续路线。
 >
@@ -60,7 +60,7 @@ flutter doctor             # 按提示补齐各平台工具链
 cd daozai_flutter
 
 # 生成三端平台工程（不会覆盖已有 lib/）
-flutter create --platforms=windows,macos,android --org com.daozai --project-name daozai_flutter .
+flutter create --platforms=macos --org com.dynamicisland --project-name dynamic_island .
 
 flutter pub get
 
@@ -90,7 +90,7 @@ flutter run -d android     # 安卓完整 App
 
 ```bash
 flutter build windows --release      # build/windows/x64/runner/Release/
-flutter build macos --release        # build/macos/Build/Products/Release/岛仔.app
+flutter build macos --release        # build/macos/Build/Products/Release/DynamicIsland.app
 flutter build apk --release          # build/app/outputs/flutter-apk/app-release.apk
 # 或 flutter build appbundle --release  （上架 Google Play）
 ```

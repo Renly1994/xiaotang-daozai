@@ -3,11 +3,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
-import 'package:daozai_flutter/state/app_state.dart';
-import 'package:daozai_flutter/services/local_store.dart';
-import 'package:daozai_flutter/services/ports.dart';
-import 'package:daozai_flutter/ui/pages.dart';
-import 'package:daozai_flutter/core/theme.dart';
+import 'package:dynamic_island/state/app_state.dart';
+import 'package:dynamic_island/services/local_store.dart';
+import 'package:dynamic_island/services/ports.dart';
+import 'package:dynamic_island/ui/pages.dart';
+import 'package:dynamic_island/core/theme.dart';
 
 class FakeStore implements TodoStore {
   List<TodoItem> saved = [];

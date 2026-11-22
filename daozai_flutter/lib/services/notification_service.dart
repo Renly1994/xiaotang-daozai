@@ -23,7 +23,7 @@ class NotificationService {
   static final FlutterLocalNotificationsPlugin _plugin = FlutterLocalNotificationsPlugin();
   static bool _initialized = false;
 
-  static const _channelId = 'daozai_todo_reminder';
+  static const _channelId = 'dynamic_island_todo_reminder';
   static const _channelName = '待办提醒';
 
   /// 初始化插件 + 时区。失败时保留主功能，schedule 会向界面返回失败。
@@ -41,8 +41,8 @@ class NotificationService {
       );
       const linux = LinuxInitializationSettings(defaultActionName: '打开');
       const windows = WindowsInitializationSettings(
-        appName: 'Daozai',
-        appUserModelId: 'com.daozai.daozai_flutter',
+        appName: 'DynamicIsland',
+        appUserModelId: 'com.dynamicisland.app',
         guid: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
       );
       await _plugin.initialize(

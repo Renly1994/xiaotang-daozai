@@ -1,9 +1,9 @@
 //! 状态机单元测试 —— 待办增删改勾选、提醒设置/触发/取消、操作锁定。
 //! 用 fake store/notifier + 可控时钟，无需平台插件，CI 无设备可跑。
 import 'package:flutter_test/flutter_test.dart';
-import 'package:daozai_flutter/state/app_state.dart';
-import 'package:daozai_flutter/services/local_store.dart';
-import 'package:daozai_flutter/services/ports.dart';
+import 'package:dynamic_island/state/app_state.dart';
+import 'package:dynamic_island/services/local_store.dart';
+import 'package:dynamic_island/services/ports.dart';
 
 /// 内存 fake 存储。
 class FakeStore implements TodoStore {

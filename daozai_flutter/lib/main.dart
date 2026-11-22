@@ -1,5 +1,5 @@
-//! 岛仔跨平台版入口。
-//! 桌面（Windows/macOS/Linux）：透明置顶悬浮岛；Android：完整 App + 小组件。
+//! DynamicIsland 入口。
+//! 当前交付 macOS：透明置顶悬浮岛。
 import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';

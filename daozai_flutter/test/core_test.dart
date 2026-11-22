@@ -1,8 +1,8 @@
 //! 核心纯逻辑回归测试 —— 验证从 Rust 复刻的弹簧 / 验证码打分。
 //! 天气映射测试已随天气功能移除；验证码逻辑保留供后续邮箱功能复用。
 import 'package:flutter_test/flutter_test.dart';
-import 'package:daozai_flutter/core/spring.dart';
-import 'package:daozai_flutter/core/otp.dart';
+import 'package:dynamic_island/core/spring.dart';
+import 'package:dynamic_island/core/otp.dart';
 
 void main() {
   group('Spring（复刻 anim.rs）', () {
