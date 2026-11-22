@@ -38,7 +38,67 @@ case "$PLATFORM" in
         fi
       fi
     done
-    echo "[macos] 完成。透明无边框由 window_manager setAsFrameless 运行时处理。"
+    # 透明窗与鼠标转发必须原生兜底：window_manager setAsFrameless 会把 isOpaque
+    # 置回 true（整窗黑块），且 macOS ignoresMouseEvents 吞掉 mouseMoved。
+    cat > macos/Runner/MainFlutterWindow.swift <<'SWIFT'
+import Cocoa
+import FlutterMacOS
+
+class MainFlutterWindow: NSWindow {
+  override func awakeFromNib() {
+    let flutterViewController = FlutterViewController()
+    flutterViewController.backgroundColor = .clear
+    let windowFrame = self.frame
+    self.contentViewController = flutterViewController
+    self.setFrame(windowFrame, display: true)
+    self.isOpaque = false
+    self.backgroundColor = .clear
+    self.hasShadow = false
+    MouseForwarder.shared.attach(
+      window: self,
+      messenger: flutterViewController.registrar(forPlugin: "MouseForwarder").messenger)
+
+    RegisterGeneratedPlugins(registry: flutterViewController)
+
+    super.awakeFromNib()
+  }
+}
+
+final class MouseForwarder: NSObject {
+  static let shared = MouseForwarder()
+  private weak var window: NSWindow?
+  private var channel: FlutterMethodChannel?
+  private var globalMonitor: Any?
+  private var localMonitor: Any?
+
+  func attach(window: NSWindow, messenger: FlutterBinaryMessenger) {
+    self.window = window
+    channel = FlutterMethodChannel(name: "dynamicisland/mouse", binaryMessenger: messenger)
+    let handler: (NSEvent) -> Void = { [weak self] _ in self?.forward() }
+    globalMonitor = NSEvent.addGlobalMonitorForEvents(
+      matching: [.mouseMoved, .leftMouseDragged], handler: handler)
+    localMonitor = NSEvent.addLocalMonitorForEvents(
+      matching: [.mouseMoved, .leftMouseDragged]) { [weak self] event in
+      self?.forward()
+      return event
+    }
+  }
+
+  private func forward() {
+    guard let w = window, w.ignoresMouseEvents else { return }
+    let p = NSEvent.mouseLocation
+    let x = p.x - w.frame.minX
+    let y = w.frame.maxY - p.y
+    channel?.invokeMethod("mouseLocal", arguments: [x, y])
+  }
+
+  deinit {
+    if let m = globalMonitor { NSEvent.removeMonitor(m) }
+    if let m = localMonitor { NSEvent.removeMonitor(m) }
+  }
+}
+SWIFT
+    echo "[macos] 完成。透明与鼠标转发由 Runner 原生兜底。"
     ;;
 
   android)

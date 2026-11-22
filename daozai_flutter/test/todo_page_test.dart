@@ -1,6 +1,8 @@
 //! Widget 交互测试 —— 待办页输入添加、删除二次确认、提醒横幅。
 //! 用 fake 依赖注入 AppState，模拟真实用户交互，CI 无设备可跑。
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 import 'package:dynamic_island/state/app_state.dart';
@@ -32,6 +34,13 @@ Widget wrap(AppState state) {
     value: state,
     child: MaterialApp(
       theme: buildDaozaiTheme(),
+      locale: const Locale('zh'),
+      supportedLocales: const [Locale('zh'), Locale('en')],
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
       home: const Scaffold(body: SizedBox(width: 420, height: 200, child: TodoPage())),
     ),
   );
@@ -42,8 +51,20 @@ void main() {
 
   setUp(() {
     state = AppState(store: FakeStore(), notifier: FakeNotifier(), clock: () => DateTime(2026, 11, 22, 12));
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(const MethodChannel('window_manager'), (call) async {
+      if (call.method == 'getBounds') {
+        return {'x': 0.0, 'y': 0.0, 'width': 560.0, 'height': 220.0};
+      }
+      return null;
+    });
   });
-  tearDown(() => state.dispose());
+
+  tearDown(() {
+    state.dispose();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(const MethodChannel('window_manager'), null);
+  });
 
   testWidgets('输入待办回车后出现在列表', (tester) async {
     await tester.pumpWidget(wrap(state));
@@ -92,6 +113,20 @@ void main() {
     await tester.pump();
     // 有提醒 → 实心铃铛 notifications_active。
     expect(find.byIcon(Icons.notifications_active), findsOneWidget);
+  });
+
+  testWidgets('提醒日期选择器为中文文案', (tester) async {
+    await state.addTodo('开会');
+    await tester.pumpWidget(wrap(state));
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.notifications_none));
+    await tester.pumpAndSettle();
+    expect(find.text('选择提醒日期'), findsOneWidget);
+    expect(find.text('取消'), findsOneWidget);
+    expect(find.text('确定'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(state.interactionLock, isFalse);
   });
 
   testWidgets('到点提醒显示横幅文案', (tester) async {
