@@ -113,18 +113,31 @@ class _WeatherEmpty extends StatefulWidget {
 class _WeatherEmptyState extends State<_WeatherEmpty> {
   final _ctrl = TextEditingController();
   final _focus = FocusNode();
+  AppState? _state;
 
   @override
   void initState() {
     super.initState();
-    _focus.addListener(() {
-      context.read<AppState>().setInteractionLock(_focus.hasFocus);
-    });
+    // 监听器只在 initState 注册一次，避免 didChangeDependencies 多次调用导致重复注册。
+    _focus.addListener(_onFocusChange);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // 缓存 state 引用，dispose 阶段不能用 context.read（widget 已 unmount 会抛异常）。
+    _state = context.read<AppState>();
+  }
+
+  void _onFocusChange() {
+    _state?.setInteractionLock(_focus.hasFocus);
   }
 
   @override
   void dispose() {
-    context.read<AppState>().setInteractionLock(false);
+    _focus.removeListener(_onFocusChange);
+    // 失焦时监听器已把锁定解除；这里兜底用缓存引用，避免 context.read 崩溃。
+    _state?.setInteractionLock(false);
     _focus.dispose();
     _ctrl.dispose();
     super.dispose();
@@ -181,20 +194,30 @@ class TodoPage extends StatefulWidget {
 class _TodoPageState extends State<TodoPage> {
   final _ctrl = TextEditingController();
   final _focus = FocusNode();
-  // 待确认删除的索引：点一次 × 进入确认态（变红），再点才真正删除，防误触。
-  int? _confirmDelete;
+  AppState? _state;
+  // 待确认删除的项标识（用对象引用而非索引，避免列表增删后索引错位删错对象）。
+  TodoItem? _confirmDelete;
 
   @override
   void initState() {
     super.initState();
-    _focus.addListener(() {
-      context.read<AppState>().setInteractionLock(_focus.hasFocus);
-    });
+    _focus.addListener(_onFocusChange);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _state = context.read<AppState>();
+  }
+
+  void _onFocusChange() {
+    _state?.setInteractionLock(_focus.hasFocus);
   }
 
   @override
   void dispose() {
-    context.read<AppState>().setInteractionLock(false);
+    _focus.removeListener(_onFocusChange);
+    _state?.setInteractionLock(false);
     _focus.dispose();
     _ctrl.dispose();
     super.dispose();
@@ -260,17 +283,17 @@ class _TodoPageState extends State<TodoPage> {
                           ),
                           GestureDetector(
                             onTap: () {
-                              if (_confirmDelete == i) {
+                              if (_confirmDelete == t) {
                                 s.removeTodo(i);
                                 setState(() => _confirmDelete = null);
                               } else {
-                                setState(() => _confirmDelete = i);
+                                setState(() => _confirmDelete = t);
                               }
                             },
                             child: Icon(
-                              _confirmDelete == i ? Icons.delete_forever : Icons.close,
+                              _confirmDelete == t ? Icons.delete_forever : Icons.close,
                               size: 13,
-                              color: _confirmDelete == i ? DaozaiColors.red : DaozaiColors.dim,
+                              color: _confirmDelete == t ? DaozaiColors.red : DaozaiColors.dim,
                             ),
                           ),
                         ],

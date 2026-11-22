@@ -25,7 +25,7 @@ class IslandWidget extends StatefulWidget {
 class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderStateMixin {
   late final Spring _w;
   late final Spring _h;
-  late final Ticker _ticker;
+  Ticker? _ticker;
   double _lastT = 0;
   double _hoverSince = -1;
   double _leaveSince = -1;
@@ -44,11 +44,13 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
     _w = Spring(DaozaiGeom.barW, DaozaiMotion.closeK, DaozaiMotion.closeZ);
     _h = Spring(DaozaiGeom.barH, DaozaiMotion.closeK, DaozaiMotion.closeZ);
     if (!widget.floating) {
+      // 移动 App 模式：常驻展开，弹簧直接 snap 到位，无需 Ticker 每帧驱动（省电）。
       _open = true;
       _w.snap(_openW);
       _h.snap(_openH);
+    } else {
+      _ticker = createTicker(_onTick)..start();
     }
-    _ticker = createTicker(_onTick)..start();
   }
 
   void _onTick(Duration elapsed) {
@@ -120,7 +122,7 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
 
   @override
   void dispose() {
-    _ticker.dispose();
+    _ticker?.dispose();
     super.dispose();
   }
 
