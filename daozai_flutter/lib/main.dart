@@ -56,22 +56,36 @@ Future<void> main(List<String> args) async {
     ),
   );
 
-  // 主引擎承载悬浮岛。控制台是独立普通窗口，二者同时启动。
+  // 主引擎承载悬浮岛。首帧完成后再建控制台，避免子引擎插件尚未注册。
   if (desktop) {
-    await _showControlConsole();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _showControlConsole();
+    });
   }
 }
 
 Future<void> _showControlConsole() async {
-  final windows = await WindowController.getAll();
-  for (final window in windows) {
-    if (window.arguments == 'control-console') {
-      await window.show();
+  // desktop_multi_window 在 macOS 首帧后才完成主窗口通道注册。
+  // 首次创建失败时短暂重试，避免只留下悬浮岛。
+  for (var attempt = 0; attempt < 3; attempt++) {
+    try {
+      final windows = await WindowController.getAll();
+      for (final window in windows) {
+        if (window.arguments == 'control-console') {
+          await window.show();
+          return;
+        }
+      }
+      await WindowController.create(
+        const WindowConfiguration(
+          arguments: 'control-console',
+          hiddenAtLaunch: false,
+        ),
+      );
       return;
+    } catch (e) {
+      debugPrint('主控制台启动失败（第 ${attempt + 1} 次）: $e');
+      await Future<void>.delayed(const Duration(milliseconds: 350));
     }
   }
-  final console = await WindowController.create(
-    const WindowConfiguration(arguments: 'control-console', hiddenAtLaunch: true),
-  );
-  await console.show();
 }

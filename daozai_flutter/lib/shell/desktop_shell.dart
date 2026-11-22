@@ -211,17 +211,26 @@ class _DesktopHome extends StatelessWidget {
   }
 
   Future<void> _showControlConsole() async {
-    final windows = await WindowController.getAll();
-    for (final window in windows) {
-      if (window.arguments == 'control-console') {
-        await window.show();
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        final windows = await WindowController.getAll();
+        for (final window in windows) {
+          if (window.arguments == 'control-console') {
+            await window.show();
+            return;
+          }
+        }
+        await WindowController.create(
+          const WindowConfiguration(
+            arguments: 'control-console',
+            hiddenAtLaunch: false,
+          ),
+        );
         return;
+      } catch (_) {
+        await Future<void>.delayed(const Duration(milliseconds: 350));
       }
     }
-    final console = await WindowController.create(
-      const WindowConfiguration(arguments: 'control-console', hiddenAtLaunch: true),
-    );
-    await console.show();
   }
 
   void _showAbout(BuildContext context) {
