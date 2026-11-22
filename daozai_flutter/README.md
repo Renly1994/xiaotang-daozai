@@ -2,6 +2,8 @@
 
 基于开源 [岛仔](https://github.com/Renly1994/xiaotang-daozai)（Rust + egui，Windows 专属）重做的 **Flutter 多平台版本**，目标覆盖 **Windows / macOS / Android**。
 
+> 📋 **接手开发请先读 [HANDOFF.md](HANDOFF.md)**：完整需求决策、改动历史与原因、当前状态、已知坑、后续路线。
+>
 > 本目录是独立的 Flutter 工程，不修改原 Rust 仓库。原项目的精华（弹簧动效、刘海轮廓、配色、天气/验证码纯逻辑）已用 Dart 忠实复刻。
 
 ## 现状与边界（务必先读）
