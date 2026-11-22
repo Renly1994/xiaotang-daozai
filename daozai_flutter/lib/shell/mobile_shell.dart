@@ -1,9 +1,7 @@
 //! 移动 App 外壳 —— Android（完整 App 形态）。
 //! 精简版：时钟 + 待办。天气/喝水/专注已移除。
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 import '../core/theme.dart';
-import '../state/app_state.dart';
 import '../ui/island_widget.dart';
 
 class MobileShell extends StatelessWidget {

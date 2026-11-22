@@ -1,4 +1,5 @@
 //! 桌面窗口位置持久化 —— 独立文件，避免 shell 与 ui 循环依赖。
+import 'dart:ui' show Offset;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 

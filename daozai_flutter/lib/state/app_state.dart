@@ -86,19 +86,25 @@ class AppState extends ChangeNotifier {
   @visibleForTesting
   void debugTick() => _tick();
 
+  @visibleForTesting
+  int get debugFiredReminderCount => _firedReminders.length;
+
   /// 检测是否有待办到点：岛内弹提示 + 展开岛体让用户看到。
   void _checkReminders() {
+    final due = <String>[];
     for (final t in todos) {
       if (t.done) continue;
       final when = _parseReminder(t.reminder);
       if (when == null) continue;
-      final key = '${t.text}@${t.reminder}';
+      final key = _todoId(t).toString();
       // 到点（误差 1 秒内）且未触发过 → 提示。
       if (!now.isBefore(when) && now.difference(when).inSeconds < 2 && !_firedReminders.contains(key)) {
         _firedReminders.add(key);
-        _showAlert('待办：${t.text}');
+        due.add(t.text);
       }
     }
+    // 同一秒多条待办到点时合并显示，不能让后者覆盖前者。
+    if (due.isNotEmpty) _showAlert('待办：${due.join('、')}');
   }
 
   void _showAlert(String msg) {
@@ -183,7 +189,7 @@ class AppState extends ChangeNotifier {
   Future<void> removeTodo(int i) async {
     final t = todos[i];
     await _notifier.cancel(_todoId(t));
-    _firedReminders.removeWhere((k) => k.startsWith('${t.text}@'));
+    _firedReminders.remove(_todoId(t).toString());
     todos.removeAt(i);
     await _store.saveTodos(todos);
     notifyListeners();
@@ -192,9 +198,15 @@ class AppState extends ChangeNotifier {
   /// 设置/清除某条待办的提醒时间。[when] 为 null 表示清除提醒。
   Future<void> setTodoReminder(int i, DateTime? when) async {
     final t = todos[i];
+    // 先校验，不能为了一个无效的新时间取消原有的有效提醒。
+    if (when != null && !when.isAfter(_clock())) {
+      reminderNotice = '提醒时间必须晚于当前时间';
+      notifyListeners();
+      return;
+    }
     await _notifier.cancel(_todoId(t));
     t.reminder = when == null ? null : DateFormat('yyyy-MM-dd HH:mm').format(when);
-    _firedReminders.removeWhere((k) => k.startsWith('${t.text}@'));
+    _firedReminders.remove(_todoId(t).toString());
     if (when != null && !t.done && when.isAfter(_clock())) {
       await _scheduleChecked(t, when);
     }

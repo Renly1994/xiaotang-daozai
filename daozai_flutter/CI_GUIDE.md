@@ -62,7 +62,7 @@ git push
 ## 五、常见问题
 
 - **CI 里 `flutter test` 失败**：纯逻辑测试不依赖设备，若失败多为复刻逻辑边界问题，按报错修 `lib/core/` 对应文件。
-- **macOS 构建报签名错误**：CI 默认不签名即可产出 .app；若 runner 强制签名，加 `--no-codesign`（`flutter build macos --release --no-codesign`）。
+- **macOS 构建报签名错误**：CI 的 `flutter build macos --release` 默认产出未签名 .app。新版 Flutter 已移除 `--no-codesign`；需要正式签名时配置 Xcode 证书与签名设置。
 - **Android 小组件不显示数据**：小组件读 `shared_preferences` 的待办计数（只算未完成）；Flutter 每次保存经 `home_widget` 推送刷新，时钟/日期由 TextClock 自走。若计数不动，先查 home_widget 版本与 Provider 全名是否匹配 applicationId。
 - **想要正式签名/上架**：需配置 Android keystore、Apple 开发者证书、Windows 代码签名证书，另行接入。
 

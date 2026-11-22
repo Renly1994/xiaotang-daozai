@@ -31,7 +31,6 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
   double _hoverSince = -1;
   double _leaveSince = -1;
   bool _open = false;
-  double _now = 0;
   // 鼠标是否在岛体感应区内（由全局鼠标位置计算，供 Ticker 确定性判断）。
   bool _inside = false;
   // 当前是否处于点击穿透状态（岛体外穿透到下层窗口）。
@@ -69,7 +68,6 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
     final t = elapsed.inMicroseconds / 1e6;
     final dt = _lastT == 0 ? 0.0 : (t - _lastT).clamp(0.0, 0.1);
     _lastT = t;
-    _now = t;
     if (widget.floating) {
       final s = context.read<AppState>();
       // 到点提醒等外部展开意图：AppState.expanded 为真时岛体必须真的展开。
@@ -120,6 +118,7 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
         if (_leaveSince < 0) _leaveSince = t;
         if (t - _leaveSince >= DaozaiMotion.leaveDelay) {
           _open = false;
+          _leaveSince = -1;
           context.read<AppState>().setExpanded(false);
         }
       }

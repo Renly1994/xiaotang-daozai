@@ -108,6 +108,8 @@ void main() {
       final past = fakeNow.subtract(const Duration(hours: 1));
       await state.setTodoReminder(0, past);
       expect(notifier.scheduled, isEmpty);
+      expect(state.todos.first.reminder, isNull);
+      expect(state.reminderNotice, contains('晚于当前时间'));
     });
 
     test('清除提醒 → 取消通知', () async {
@@ -189,6 +191,29 @@ void main() {
       expect(state.reminderAlert, isNull);
     });
 
+    test('同文同时间的两条待办各自显示一次提醒', () async {
+      final when = fakeNow.add(const Duration(minutes: 5));
+      await state.addTodo('重复');
+      await state.addTodo('重复');
+      await state.setTodoReminder(0, when);
+      await state.setTodoReminder(1, when);
+      fakeNow = when.add(const Duration(seconds: 1));
+      state.debugTick();
+      expect(state.debugFiredReminderCount, 2);
+    });
+
+    test('同一秒多条待办到点 → 横幅合并显示', () async {
+      final when = fakeNow.add(const Duration(minutes: 5));
+      await state.addTodo('会议');
+      await state.addTodo('电话');
+      await state.setTodoReminder(0, when);
+      await state.setTodoReminder(1, when);
+      fakeNow = when.add(const Duration(seconds: 1));
+      state.debugTick();
+      expect(state.reminderAlert, contains('会议'));
+      expect(state.reminderAlert, contains('电话'));
+    });
+
     test('已完成待办不触发提醒', () async {
       await state.addTodo('任务');
       final when = fakeNow.add(const Duration(minutes: 5));
@@ -224,7 +249,6 @@ void main() {
     });
 
     test('init 重排未来提醒（重启不丢）', () async {
-      final future = fakeNow.add(const Duration(hours: 2));
       store.saved = [TodoItem(text: '未来任务', reminder: '2026-11-22 14:00')];
       await state.init();
       expect(notifier.scheduled, isNotEmpty);

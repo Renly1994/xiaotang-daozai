@@ -95,13 +95,13 @@ void main() {
   });
 
   testWidgets('到点提醒显示横幅文案', (tester) async {
-    // 用可控时钟：先 12:00 设置 12:05 提醒，再推进到 12:06 触发。
+    // 用可控时钟：先 12:00 设置 12:05 提醒，再推进到 12:05:01 触发（检测窗口 2 秒内）。
     var now = DateTime(2026, 11, 22, 12, 0);
     final s = AppState(store: FakeStore(), notifier: FakeNotifier(), clock: () => now);
     await s.addTodo('开会');
     await s.setTodoReminder(0, DateTime(2026, 11, 22, 12, 5));
     await tester.pumpWidget(wrap(s));
-    now = DateTime(2026, 11, 22, 12, 6);
+    now = DateTime(2026, 11, 22, 12, 5, 1);
     s.debugTick();
     await tester.pump();
     expect(find.textContaining('开会'), findsWidgets); // 横幅含待办文案

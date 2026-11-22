@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../core/dialog_room.dart';
 import '../core/theme.dart';
+import '../services/local_store.dart';
 import '../state/app_state.dart';
 
 /// 页标题（原版双色：白字 + 彩色副标题）。

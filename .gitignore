@@ -19,10 +19,13 @@ Thumbs.db
 
 # Flutter 构建产物与缓存
 daozai_flutter/build/
+daozai_flutter/coverage/
 daozai_flutter/.dart_tool/
 daozai_flutter/.flutter-plugins
 daozai_flutter/.flutter-plugins-dependencies
 daozai_flutter/.packages
+daozai_flutter/.idea/
+daozai_flutter/*.iml
 daozai_flutter/pubspec.lock
 daozai_flutter/android/
 daozai_flutter/macos/

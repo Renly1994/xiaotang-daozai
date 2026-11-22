@@ -1,6 +1,7 @@
 //! 待办本地提醒 —— 系统级定时通知。
 //! 用 flutter_local_notifications（v19 起支持 Windows，全平台覆盖）。
 //! 应用关闭后系统仍会到点通知；应用运行时由 AppState Ticker 额外做岛内提示。
+import 'dart:io' show Platform;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/data/latest_all.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
@@ -25,7 +26,7 @@ class NotificationService {
   static const _channelId = 'daozai_todo_reminder';
   static const _channelName = '待办提醒';
 
-  /// 初始化插件 + 时区。失败时静默降级（提醒不可用但不影响主功能）。
+  /// 初始化插件 + 时区。失败时保留主功能，schedule 会向界面返回失败。
   static Future<void> init() async {
     if (_initialized) return;
     try {
@@ -68,13 +69,22 @@ class NotificationService {
         windows: WindowsNotificationDetails(),
       );
 
-  /// 安排一条待办提醒。[id] 用待办的稳定哈希，[when] 为提醒时间。
+  /// 安排一条待办提醒。[id] 为待办持久化稳定 ID，[when] 为提醒时间。
   /// 过去的时间不安排（返回 false）。
   static Future<bool> schedule(int id, String text, DateTime when) async {
     if (!_initialized) await init();
     if (!_initialized) return false;
     if (!when.isAfter(DateTime.now())) return false;
     try {
+      // Android 13+ 通知、Android 14+ 精确闹钟均为运行时授权。
+      // 只在用户主动设置提醒时请求，避免启动应用即弹权限请求。
+      if (Platform.isAndroid) {
+        final android = _plugin.resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>();
+        final notificationsGranted = await android?.requestNotificationsPermission();
+        final exactAlarmGranted = await android?.requestExactAlarmsPermission();
+        if (notificationsGranted == false || exactAlarmGranted == false) return false;
+      }
       // 锁定 19.0.0：位置参数 (id, title, body, scheduledDate, details)。
       // 注意 20.x 改为命名参数，升级时需同步修改（见 pubspec 版本锁定说明）。
       await _plugin.zonedSchedule(

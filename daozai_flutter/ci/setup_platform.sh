@@ -22,7 +22,7 @@ case "$PLATFORM" in
     ;;
 
   macos)
-    echo "[macos] 注入联网权限（天气请求）..."
+    echo "[macos] 注入联网权限（后续联网服务）..."
     for ENT in macos/Runner/DebugProfile.entitlements macos/Runner/Release.entitlements; do
       if [ -f "$ENT" ]; then
         # 在 </dict> 前插入 network.client（若尚未存在）。
@@ -79,7 +79,7 @@ case "$PLATFORM" in
 
     # 待办本地提醒所需权限（Android 13+ 通知权限、精确闹钟、唤醒锁）。
     if [ -f "$MANIFEST" ] && ! grep -q "POST_NOTIFICATIONS" "$MANIFEST"; then
-      PERMS='    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>\n    <uses-permission android:name="android.permission.USE_EXACT_ALARM"/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"/>\n    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>\n'
+      PERMS='    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"/>\n    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>\n'
       sedi "s#<application#${PERMS}    <application#" "$MANIFEST"
     fi
     # flutter_local_notifications 的定时提醒 receiver（应用重启后恢复提醒）。

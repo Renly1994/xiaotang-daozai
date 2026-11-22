@@ -108,6 +108,35 @@ daozai_flutter/
 
 > 本机无工具链，以上为静态实现 + 自查；**必须推送让 CI 编译 + 跑测试验证**，再真机抽查扩窗手感与小组件刷新。
 
+### 5.2 CI 红灯根因与修复（已本地真跑验证）
+
+**根因**：`fbe6ef7` 加入 `flutter analyze` 后 CI 一直红（e627e2e、335ee2c 三端全挂在 analyze），此前从未绿过。analyze 的 warning 级问题即致命（`--no-fatal-infos` 只豁免 info）：
+
+| 问题 | 修法 |
+|---|---|
+| `window_pos.dart` 缺 Offset 导入（error） | 加 `dart:ui show Offset` |
+| `pages.dart` 缺 TodoItem 导入（error，d63d58f 引入对象引用时漏） | 加 local_store 导入 |
+| `mobile_shell.dart` 两个 unused import（warning） | 删除 |
+| `island_widget.dart` `_now` 只写不读（warning） | 删除字段 |
+| `app_state_test.dart` `future` 未使用（warning） | 删除 |
+| `todo_page_test.dart` 提醒用例推进 60s 超出 2s 检测窗（必挂） | 改为 +1s |
+
+**验证**：本机临时装 Flutter 3.50.1 stable（会话 scratch，非持久安装）真跑：`flutter analyze --no-fatal-infos` exit 0（余 20 条均 info）；`flutter test --coverage` **34/34 全过**。CI 同源 stable 应绿；若仍红看 job 日志新报错。
+
+### 5.3 第二轮全面检查（工作区未提交）
+
+| 问题 | 修法 |
+|---|---|
+| Android 只写权限、不向用户申请 `POST_NOTIFICATIONS` / 精确闹钟 | 用户设置提醒时调用插件授权接口；拒绝则返回失败并显示已有红条提示 |
+| Android 同时声明 `SCHEDULE_EXACT_ALARM` 与受政策限制的 `USE_EXACT_ALARM` | 删除 `USE_EXACT_ALARM`，只保留可由用户授权的前者 |
+| 同文同时间两条待办共用岛内已触发标记 | 标记改用持久化 TodoItem id；新增回归测试 |
+| 同一秒多条提醒，后者覆盖前者横幅 | 合并为一条横幅显示全部文本；新增回归测试 |
+| 岛体收起后 `_leaveSince` 未清空，Ticker 永远不满足停摆条件 | 收起时立即重置 `_leaveSince` |
+| 过去时间仍保存成提醒，铃铛显示已设置 | 先校验时间，保留原提醒并显示错误 |
+| CI 指南含新版 Flutter 已删除的 `--no-codesign` | 改为当前 `flutter build macos --release` 说明 |
+
+**本轮验证**：Flutter 3.50.1 stable 下 `flutter analyze --no-fatal-infos` exit 0；`flutter test --coverage` **36/36 全过**；Android 平台注入脚本经 `bash -n` 和生成 Manifest/XML 解析通过。macOS 发布构建无法本机执行，因为系统无完整 Xcode / CocoaPods；CI 必须完成该项验证。
+
 ## 6. 当前状态
 
 - **三端 CI 构建成功**（run 44917977836，提交 5e06992）：daozai-windows 11.6MB / daozai-macos 17.3MB / daozai-android 22.8MB。
