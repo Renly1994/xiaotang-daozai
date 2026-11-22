@@ -3,7 +3,7 @@ name: 构建 macOS 安装包
 # 当前只交付 macOS。GitHub artifact 下载后是外层 ZIP，里面是可直接挂载的 DMG。
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, fix/macos-live-round2]
     paths:
       - 'daozai_flutter/**'
       - '.github/workflows/build.yml'
