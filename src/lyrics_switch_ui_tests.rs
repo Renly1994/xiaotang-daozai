@@ -97,11 +97,13 @@ fn same_title_with_other_version_or_artist_is_a_different_song(){
 #[test]
 fn native_lyrics_polling_starts_on_switch_without_waiting_for_the_old_request(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-    for source in ["汽水音乐","KuGou.exe"] {
+    for source in ["汽水音乐","KuGou.exe","bodian_pc.exe"] {
         let mut h=H::new();lyrics_on(&mut h);let (release,_)=busy(&mut h);
         showing(&mut h,&song(source,"旧歌","歌手",200.0),"[00:01]旧歌词");
         let room=crate::resources::NATIVE_LYRICS.active()<2;
-        h.media=song(source,"阶段二测试歌曲","不存在的歌手",180.0);h.frame(vec![]);
+        h.media=song(source,"阶段二测试歌曲","不存在的歌手",180.0);
+        if source=="bodian_pc.exe" {h.media.song_id=Some(u64::MAX);}
+        h.frame(vec![]);
         if room {assert!(h.app.ly.native_rx.is_some(),"{source}：本机歌词轮询应立即开始");}
         assert!(h.app.ly.pending.is_some() && h.app.ly.rx.is_none(),"{source}：在线查询仍排队等待旧请求");
         // 本机歌词先到：排队的在线查询取消，不再联网。

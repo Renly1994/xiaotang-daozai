@@ -514,6 +514,7 @@ pub fn seek(seconds:f64,source:&str)->bool {
     if !seconds.is_finite() || seconds<0.0{return false;}
     static LOCK:Mutex<()>=Mutex::new(());
     let Ok(_lock)=LOCK.lock()else{return false;};
+    if crate::lyrics::is_bodian(source) { return bodian::seek(seconds); }
     if source.eq_ignore_ascii_case("kwmusic.exe"){return kuwo::seek(seconds);}
     if matches!(source.to_ascii_lowercase().as_str(),"kugou"|"kugou.exe") {
         let native=kugou_control::seek(seconds);
