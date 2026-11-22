@@ -14,12 +14,15 @@ dependencies:
   window_manager: ^0.4.3
   # 轻量状态管理
   provider: ^6.1.2
-  # 本地持久化（待办 / 喝水 / 设置）
+  # 本地持久化（待办 / 设置）
   shared_preferences: ^2.3.2
-  # 天气等网络请求
-  http: ^1.2.2
   # 日期格式化
   intl: ^0.19.0
+  # 待办本地提醒：系统级定时通知（v19 起支持 Windows，全平台覆盖）。
+  flutter_local_notifications: ^19.0.0
+  # zonedSchedule 需要的时区支持
+  timezone: ^0.10.0
+  flutter_timezone: ^4.1.0
 
 dev_dependencies:
   flutter_test:

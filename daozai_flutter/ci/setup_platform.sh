@@ -76,7 +76,18 @@ case "$PLATFORM" in
       RECEIVER='        <receiver android:name=".widget.DaozaiWidgetProvider" android:exported="true" android:label="Daozai">\n            <intent-filter>\n                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />\n            </intent-filter>\n            <meta-data android:name="android.appwidget.provider" android:resource="@xml/daozai_widget_info" />\n        </receiver>\n'
       sedi "s#</application>#${RECEIVER}    </application>#" "$MANIFEST"
     fi
-    echo "[android] 小组件注入完成。"
+
+    # 待办本地提醒所需权限（Android 13+ 通知权限、精确闹钟、唤醒锁）。
+    if [ -f "$MANIFEST" ] && ! grep -q "POST_NOTIFICATIONS" "$MANIFEST"; then
+      PERMS='    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>\n    <uses-permission android:name="android.permission.USE_EXACT_ALARM"/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"/>\n    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>\n'
+      sedi "s#<application#${PERMS}    <application#" "$MANIFEST"
+    fi
+    # flutter_local_notifications 的定时提醒 receiver（应用重启后恢复提醒）。
+    if [ -f "$MANIFEST" ] && ! grep -q "ScheduledNotificationReceiver" "$MANIFEST"; then
+      NOTIF_RECEIVER='        <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver"/>\n        <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver">\n            <intent-filter>\n                <action android:name="android.intent.action.BOOT_COMPLETED"/>\n                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>\n                <action android:name="android.intent.action.QUICKBOOT_POWERON"/>\n            </intent-filter>\n        </receiver>\n'
+      sedi "s#</application>#${NOTIF_RECEIVER}    </application>#" "$MANIFEST"
+    fi
+    echo "[android] 小组件 + 通知权限注入完成。"
     ;;
 
   *)

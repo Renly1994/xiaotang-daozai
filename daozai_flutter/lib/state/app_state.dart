@@ -1,9 +1,10 @@
-//! 应用状态 —— 精简版：时钟常驻 + 待办清单。
+//! 应用状态 —— 精简版：时钟常驻 + 待办清单（含本地提醒）。
 //! 天气/喝水/专注已按产品决策移除；消息提醒/桌宠/音乐歌词/娱乐不再纳入路线。
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:intl/intl.dart';
 import '../services/local_store.dart';
+import '../services/notification_service.dart';
 
 /// 当前仅待办一个功能页（保留枚举以便后续扩展 AI 额度/邮箱/日历等）。
 enum IslandPage { todo }
@@ -23,7 +24,6 @@ class AppState extends ChangeNotifier {
   IslandPage page = IslandPage.todo;
   bool expanded = false;
   // 操作锁定：输入框聚焦或刚切页时为 true，桌面岛在此期间不收起。
-  // 由两个独立来源合成：_focusLock（输入框聚焦，持久）+ _timedLock（切页，定时）。
   bool _focusLock = false;
   bool _timedLock = false;
   bool get interactionLock => _focusLock || _timedLock;
@@ -36,6 +36,11 @@ class AppState extends ChangeNotifier {
 
   // 待办
   List<TodoItem> todos = [];
+  // 到点提醒的岛内提示文案（短暂显示后自动清除）。
+  String? reminderAlert;
+  Timer? _alertTimer;
+  // 已触发过提醒的待办标识，防止同一秒重复触发。
+  final Set<String> _firedReminders = {};
 
   bool _initialized = false;
 
@@ -43,14 +48,57 @@ class AppState extends ChangeNotifier {
     if (_initialized) return;
     _initialized = true;
     todos = await _store.loadTodos();
+    await NotificationService.init();
+    // 启动时为所有未完成的未来提醒重新安排系统通知（应用重启后不丢提醒）。
+    for (final t in todos) {
+      final when = _parseReminder(t.reminder);
+      if (!t.done && when != null && when.isAfter(DateTime.now())) {
+        await NotificationService.schedule(_todoId(t), t.text, when);
+      }
+    }
     notifyListeners();
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
   }
 
   void _tick() {
     now = DateTime.now();
+    _checkReminders();
     notifyListeners();
   }
+
+  /// 检测是否有待办到点：岛内弹提示 + 展开岛体让用户看到。
+  void _checkReminders() {
+    for (final t in todos) {
+      if (t.done) continue;
+      final when = _parseReminder(t.reminder);
+      if (when == null) continue;
+      final key = '${t.text}@${t.reminder}';
+      // 到点（误差 1 秒内）且未触发过 → 提示。
+      if (!now.isBefore(when) && now.difference(when).inSeconds < 2 && !_firedReminders.contains(key)) {
+        _firedReminders.add(key);
+        _showAlert('待办：${t.text}');
+      }
+    }
+  }
+
+  void _showAlert(String msg) {
+    reminderAlert = msg;
+    expanded = true; // 展开岛体让用户看到提醒
+    _alertTimer?.cancel();
+    _alertTimer = Timer(const Duration(seconds: 8), () {
+      reminderAlert = null;
+      notifyListeners();
+    });
+    notifyListeners();
+  }
+
+  DateTime? _parseReminder(String? s) {
+    if (s == null || s.isEmpty) return null;
+    return DateTime.tryParse(s);
+  }
+
+  /// 待办稳定 ID（用于系统通知的取消/重排）。
+  int _todoId(TodoItem t) => (t.text.hashCode ^ (t.reminder?.hashCode ?? 0)) & 0x7fffffff;
 
   void setPage(IslandPage p) {
     page = p;
@@ -84,13 +132,38 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> toggleTodo(int i) async {
-    todos[i].done = !todos[i].done;
+    final t = todos[i];
+    t.done = !t.done;
+    // 完成 → 取消系统通知；取消完成 → 若提醒仍在未来则重排。
+    if (t.done) {
+      await NotificationService.cancel(_todoId(t));
+    } else {
+      final when = _parseReminder(t.reminder);
+      if (when != null && when.isAfter(DateTime.now())) {
+        await NotificationService.schedule(_todoId(t), t.text, when);
+      }
+    }
     await _store.saveTodos(todos);
     notifyListeners();
   }
 
   Future<void> removeTodo(int i) async {
+    final t = todos[i];
+    await NotificationService.cancel(_todoId(t));
     todos.removeAt(i);
+    await _store.saveTodos(todos);
+    notifyListeners();
+  }
+
+  /// 设置/清除某条待办的提醒时间。[when] 为 null 表示清除提醒。
+  Future<void> setTodoReminder(int i, DateTime? when) async {
+    final t = todos[i];
+    await NotificationService.cancel(_todoId(t));
+    t.reminder = when == null ? null : DateFormat('yyyy-MM-dd HH:mm').format(when);
+    _firedReminders.removeWhere((k) => k.startsWith('${t.text}@'));
+    if (when != null && !t.done && when.isAfter(DateTime.now())) {
+      await NotificationService.schedule(_todoId(t), t.text, when);
+    }
     await _store.saveTodos(todos);
     notifyListeners();
   }
@@ -99,6 +172,7 @@ class AppState extends ChangeNotifier {
   void dispose() {
     _ticker?.cancel();
     _lockTimer?.cancel();
+    _alertTimer?.cancel();
     super.dispose();
   }
 }
