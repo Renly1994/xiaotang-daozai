@@ -1,0 +1,43 @@
+{
+  "decisions": [
+    {
+      "id": "D1",
+      "title": "「无服务器」边界：MVP 是否接受仅局域网同步（跨网留到 M3）？",
+      "options": ["A. 接受，MVP 局域网直连，零第三方", "B. 首版就要跨网（引入公共中继/打洞）"],
+      "recommended": "A",
+      "answer": "A"
+    },
+    {
+      "id": "D2",
+      "title": "M3 跨网路线：公共中继盲转发密文 vs UDP 打洞 P2P？",
+      "options": ["A. 公共 MQTT/WebRTC 信令中继", "B. UDP 打洞 P2P（失败回落中继）", "C. 暂不决定，M2 验收后再议"],
+      "recommended": "C",
+      "answer": "C"
+    },
+    {
+      "id": "D3",
+      "title": "同步语义：索引即可见+内容按需拉取，还是自动全量镜像？",
+      "options": ["A. 按需拉取（省空间省流量）", "B. 自动全量镜像"],
+      "recommended": "A",
+      "answer": "A"
+    },
+    {
+      "id": "D4",
+      "title": "里程碑切分：按层横切（先单机再网络）还是按端到端薄片纵切？",
+      "options": ["A. 按层横切 M1-M4", "B. 端到端薄片 T1-T4"],
+      "recommended": "B",
+      "answer": "B"
+    },
+    {
+      "id": "D5",
+      "title": "接收文件默认存储位置？",
+      "options": ["应用目录下 download/（用户指定）", "仅加密 vault 不导出明文"],
+      "recommended": "应用目录下 download/（用户指定）",
+      "answer": "应用目录下 download/：Win 安装目录(不可写回落 LOCALAPPDATA)/mac Application Support/Android 外部私有目录；vault 仍为同步真相源；支持手动指定任意目录（T1 即落地，系统选择器+可写校验+失效回落+恢复默认）"
+    }
+  ],
+  "blocking": null,
+  "context": {
+    "template": "daozai_flutter/lib/services/ports.dart 依赖注入模式 + HANDOFF.md 开发原则"
+  }
+}

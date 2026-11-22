@@ -1,6 +1,7 @@
 //! 主控制台 —— 普通可缩放窗口。悬浮岛只承担快速查看与拖放。
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:window_manager/window_manager.dart';
 import '../core/theme.dart';
 
@@ -179,12 +180,30 @@ class _ControlConsoleState extends State<_ControlConsole> {
   Widget _islandSettings() => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         const Text('悬浮岛', style: TextStyle(fontSize: 28, fontWeight: FontWeight.w700)),
         const SizedBox(height: 12),
-        _switchRow('显示悬浮岛', '关闭后仍可从主控制台重新打开。', _islandEnabled, (v) => setState(() => _islandEnabled = v)),
+        _switchRow('显示悬浮岛', '关闭后仍可从主控制台重新打开。', _islandEnabled, (v) async {
+          setState(() => _islandEnabled = v);
+          await _setIslandVisible(v);
+        }),
         const SizedBox(height: 20),
         const Text('悬浮岛快捷功能', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
         const SizedBox(height: 10),
         const Text('时间、提醒、拖放文件和主控制台入口。', style: TextStyle(color: DaozaiColors.dim)),
       ]);
+
+  Future<void> _setIslandVisible(bool visible) async {
+    final windows = await WindowController.getAll();
+    // 主窗口参数为空，控制台参数固定为 control-console。
+    for (final window in windows) {
+      if (window.arguments.isEmpty) {
+        if (visible) {
+          await window.show();
+        } else {
+          await window.hide();
+        }
+        return;
+      }
+    }
+  }
 
   Widget _switchRow(String title, String subtitle, bool value, ValueChanged<bool> onChanged) => Container(
         margin: const EdgeInsets.only(bottom: 10),

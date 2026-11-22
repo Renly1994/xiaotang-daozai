@@ -88,4 +88,21 @@ void main() {
     sync.setInteractionLockForPairing(false);
     await tester.pump(const Duration(milliseconds: 400));
   });
+
+  testWidgets('底部导航有足够触控区域，点击可切换到文件页', (tester) async {
+    state.setExpanded(true);
+    sync.setInteractionLockForPairing(true);
+    await tester.pumpWidget(wrap());
+    // 弹簧每帧最多推进 100ms；连续 pump 才会抵达可交互阈值。
+    for (var i = 0; i < 10; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    final fileDot = find.byKey(const ValueKey('island-page-files'));
+    expect(fileDot, findsOneWidget);
+    await tester.tap(fileDot);
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(state.page, IslandPage.files);
+    sync.setInteractionLockForPairing(false);
+    await tester.pump(const Duration(seconds: 1));
+  });
 }

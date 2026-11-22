@@ -7,11 +7,11 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
+import 'package:desktop_multi_window/desktop_multi_window.dart';
 import '../core/theme.dart';
 import '../core/spring.dart';
 import '../state/app_state.dart';
 import '../state/sync_state.dart';
-import '../core/quit.dart';
 import '../core/window_pos.dart';
 import 'island_shape.dart';
 import 'drop_overlay.dart';
@@ -267,13 +267,13 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
                         ],
                       ),
                     ),
-                    // 桌面悬浮模式：右上角退出按钮（悬浮窗无标题栏，需显式退出入口）。
+                    // X 只隐藏悬浮岛。主控制台仍常驻，不能在这里退出整个进程。
                     if (widget.floating)
                       Positioned(
                         top: 2,
                         right: 2,
                         child: GestureDetector(
-                          onTap: quitApp,
+                          onTap: _hideIsland,
                           child: Container(
                             width: 22,
                             height: 22,
@@ -344,11 +344,13 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
           child: Stack(
             alignment: Alignment.topCenter,
             children: [
-              CustomPaint(
-                size: Size(_openW, _openH),
-                painter: IslandBodyPainter(
-                  w: bodyW, h: bodyH, progress: progress,
-                  pill: false,
+              IgnorePointer(
+                child: CustomPaint(
+                  size: Size(_openW, _openH),
+                  painter: IslandBodyPainter(
+                    w: bodyW, h: bodyH, progress: progress,
+                    pill: false,
+                  ),
                 ),
               ),
               // 内容居中于岛体（肩部在两侧，内容从顶部 fh 处开始）。
@@ -373,6 +375,34 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
       ),
     );
   }
+
+  Future<void> _hideIsland() async {
+    await windowManager.hide();
+    await _showControlConsole();
+  }
+
+  Future<void> _showControlConsole() async {
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        final windows = await WindowController.getAll();
+        for (final window in windows) {
+          if (window.arguments == 'control-console') {
+            await window.show();
+            return;
+          }
+        }
+        await WindowController.create(
+          const WindowConfiguration(
+            arguments: 'control-console',
+            hiddenAtLaunch: false,
+          ),
+        );
+        return;
+      } catch (_) {
+        await Future<void>.delayed(const Duration(milliseconds: 350));
+      }
+    }
+  }
 }
 
 class _PageDots extends StatelessWidget {
@@ -386,20 +416,44 @@ class _PageDots extends StatelessWidget {
       mainAxisAlignment: MainAxisAlignment.center,
       children: IslandPage.values.map((p) {
         final on = p == current;
-        return GestureDetector(
-          onTap: () => onTap(p),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 200),
-            margin: const EdgeInsets.symmetric(horizontal: 2),
-            width: on ? 16 : 4,
-            height: 4,
-            decoration: BoxDecoration(
-              color: on ? DaozaiColors.white : DaozaiColors.dim,
-              borderRadius: BorderRadius.circular(2),
+        // 原来触控目标高只有 4px，实际几乎点不到。保留圆点视觉，扩大到 44×28。
+        return Semantics(
+          button: true,
+          selected: on,
+          label: _pageLabel(p),
+          child: SizedBox(
+            width: 44,
+            height: 28,
+            child: InkWell(
+              key: ValueKey('island-page-${p.name}'),
+              borderRadius: BorderRadius.circular(8),
+              onTap: () => onTap(p),
+              child: Center(
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  width: on ? 16 : 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    color: on ? DaozaiColors.white : DaozaiColors.dim,
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                ),
+              ),
             ),
           ),
         );
       }).toList(),
     );
+  }
+
+  String _pageLabel(IslandPage page) {
+    switch (page) {
+      case IslandPage.todo:
+        return '待办';
+      case IslandPage.files:
+        return '文件置物架';
+      case IslandPage.devices:
+        return '设备与同步';
+    }
   }
 }
