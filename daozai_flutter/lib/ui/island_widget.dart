@@ -1,6 +1,7 @@
 //! 岛体主组件 —— 对应原项目 app.rs 的 frame/morph（骨架精简版）。
 //! 收起药丸 ↔ 展开面板用复刻的二阶阻尼弹簧驱动，悬停意图缓冲防误触。
 import 'dart:io' show Platform;
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:provider/provider.dart';
@@ -70,12 +71,33 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
     _lastT = t;
     _now = t;
     if (widget.floating) {
+      final s = context.read<AppState>();
+      // 到点提醒等外部展开意图：AppState.expanded 为真时岛体必须真的展开。
+      if (s.expanded && !_open) _open = true;
       _updateHover(t);
       _morph(dt);
     }
     _w.step(dt);
     _h.step(dt);
     if (mounted) setState(() {});
+    // 空闲停摆：收起、无悬停、无锁定且弹簧已静止 → 停 Ticker 省电。
+    // 指针移动 / 展开 / 锁定变化时会重新启动（见 _ensureTicker）。
+    if (widget.floating &&
+        !_open &&
+        !_inside &&
+        _hoverSince < 0 &&
+        _leaveSince < 0 &&
+        !context.read<AppState>().interactionLock &&
+        _w.settled(DaozaiGeom.barW) &&
+        _h.settled(DaozaiGeom.barH)) {
+      _ticker?.stop();
+    }
+  }
+
+  void _ensureTicker() {
+    if (!widget.floating) return;
+    _ticker ??= createTicker(_onTick);
+    if (!_ticker!.isActive) _ticker!.start();
   }
 
   /// 悬停意图缓冲（确定性状态机，对齐原项目 morph 的 hover_since/leave_since）：
@@ -121,13 +143,10 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
     }
   }
 
-  void _onEnter() {
-    if (!widget.floating) return;
-    _inside = true;
-  }
-
   void _onExit() {
     if (!widget.floating) return;
+    // 仅作安全网：指针真正离开岛体外框时清标志。
+    // 进入（onEnter）不写 _inside——命中与否只由指针坐标判定，避免双源竞态。
     _inside = false;
   }
 
@@ -139,13 +158,30 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
     return Rect.fromLTWH(left, 0, w, h);
   }
 
+  /// 圆角近似命中：底部大圆角用 RRect 判定，不再让透明四角挡住桌面点击。
+  /// 顶部肩部仍为矩形近似（误差小），完整轮廓匹配留待原生通道。
+  bool _hitIsland(Offset p) {
+    final r = _islandRect();
+    final bottomRad = math.min(DaozaiGeom.rad, r.height * 0.5);
+    final rr = RRect.fromRectAndCorners(
+      r,
+      bottomLeft: Radius.circular(bottomRad),
+      bottomRight: Radius.circular(bottomRad),
+      topLeft: const Radius.circular(6),
+      topRight: const Radius.circular(6),
+    );
+    return rr.contains(p);
+  }
+
   /// 全局鼠标移动驱动点击穿透：
   /// 鼠标在岛体内 → 恢复交互；在岛体外 → 穿透到下层（forward 继续转发移动事件）。
   /// 穿透状态下 MouseRegion 不触发，故悬停展开也由此处的 _inside 驱动。
   void _onPointerMove(PointerEvent event) {
     if (!widget.floating) return;
-    final hit = _islandRect().contains(event.localPosition);
+    final hit = _hitIsland(event.localPosition);
     _inside = hit;
+    // 只有需要动画/判定时才唤醒 Ticker，避免空闲时每次划过都启动一帧。
+    if (hit || _open || context.read<AppState>().interactionLock) _ensureTicker();
     // Linux 不支持 forward，不做穿透切换（保持整窗交互）。
     if (!_supportsForward) return;
     final wantIgnore = !hit;
@@ -158,12 +194,24 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
   @override
   void dispose() {
     _ticker?.dispose();
+    // 退出时恢复鼠标事件，避免残留整窗穿透状态。
+    if (widget.floating && _supportsForward && _ignoring) {
+      windowManager.setIgnoreMouseEvents(false);
+    }
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final s = context.watch<AppState>();
+    // 空闲停摆后，锁定/展开/悬停任一成立时唤醒 Ticker（post-frame 避免 build 中副作用）。
+    if (widget.floating &&
+        (_open || _inside || s.interactionLock || s.expanded) &&
+        !(_ticker?.isActive ?? false)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _ensureTicker();
+      });
+    }
     final progress = ((_w.pos - DaozaiGeom.barW) / (_openW - DaozaiGeom.barW)).clamp(0.0, 1.0);
     final reveal = smoothstep(0.5, 0.97, progress);
     final bodyW = _w.pos;
@@ -238,11 +286,11 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
       onPointerHover: _onPointerMove,
       onPointerMove: _onPointerMove,
       child: MouseRegion(
-        onEnter: (_) => _onEnter(),
         onExit: (_) => _onExit(),
         child: GestureDetector(
         onTap: () {
           if (widget.floating && !_open) {
+            _ensureTicker();
             setState(() => _open = true);
             context.read<AppState>().setExpanded(true);
           }

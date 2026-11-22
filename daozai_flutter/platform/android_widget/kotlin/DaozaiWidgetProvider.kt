@@ -5,25 +5,21 @@ import android.appwidget.AppWidgetProvider
 import android.content.Context
 import android.widget.RemoteViews
 import __APP_PACKAGE__.R
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 /**
  * Daozai 主屏小组件。
  *
- * 显示当前时间/日期 + 待办计数，点击拉起完整 App。
+ * 时间/日期由布局里的 TextClock 系统自走（不依赖刷新周期）；
+ * 本 Provider 只负责待办计数与点击拉起 App。
  * 包名占位符 __APP_PACKAGE__ 由 ci/setup_platform.sh 替换为 Flutter 实际 applicationId。
- * 待办数据经 shared_preferences 从 Flutter 侧写入，本 Provider 读取刷新。
+ * 待办数据经 shared_preferences 从 Flutter 侧写入；Flutter 每次保存后经
+ * home_widget 推送 UPDATE 广播，计数即时刷新。
  */
 class DaozaiWidgetProvider : AppWidgetProvider() {
 
     override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) {
         for (id in ids) {
             val views = RemoteViews(context.packageName, R.layout.daozai_widget)
-            val now = Date()
-            views.setTextViewText(R.id.widget_clock, SimpleDateFormat("HH:mm", Locale.getDefault()).format(now))
-            views.setTextViewText(R.id.widget_date, SimpleDateFormat("M月d日 EEEE", Locale.CHINA).format(now))
 
             // 读取 Flutter 侧缓存（shared_preferences 的 key 前缀为 flutter.）。
             val prefs = context.getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)

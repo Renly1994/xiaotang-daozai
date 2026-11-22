@@ -1,7 +1,29 @@
 name: Windows 检查
 on:
   push:
+    paths:
+      - 'src/**'
+      - 'vendor/**'
+      - 'tests/**'
+      - 'installer/**'
+      - 'scripts/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'app.rc'
+      - '.github/workflows/ci.yml'
   pull_request:
+    paths:
+      - 'src/**'
+      - 'vendor/**'
+      - 'tests/**'
+      - 'installer/**'
+      - 'scripts/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'app.rc'
+      - '.github/workflows/ci.yml'
 permissions:
   contents: read
 jobs:

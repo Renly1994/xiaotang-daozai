@@ -1,7 +1,7 @@
 # 交接文档（HANDOFF）
 
 > 面向后续接手的开发者 / AI Harness。读完本文即可了解项目全貌、所有改动、当前状态、已知坑与继续开发的方法。
-> 最后更新：2026-11-22 · 对应提交 `bdc9dcf`（已推送至 origin/main）
+> 最后更新：2026-11-22 · 对应提交 `e627e2e`（origin/main）+ 工作区一轮未提交修复（见 §5.1）
 
 ---
 
@@ -88,22 +88,40 @@ daozai_flutter/
 | `9b30a8f` | 产品级致命+逻辑修复 | ① 桌面天气页加城市输入框（原本无处设城市）② interactionLock 操作锁定 ③ 专注阶段结束提示 ④ 喝水目标/单次量可调 ⑤ 待办删除两段式确认 |
 | `bdc9dcf` | 体验修复 | ① 移除假电池图标（不显示假信息）② 窗口可拖动+位置记忆 ③ 右键菜单加"关于" |
 
-> 全部已推送至 origin/main（远程 HEAD = bdc9dcf）。
+> 全部已推送至 origin/main（远程 HEAD = e627e2e）。
+
+### 5.1 本轮修复（工作区未提交，待推送 + CI 验证）
+
+| 问题 | 修法 | 文件 |
+|---|---|---|
+| 桌面窗口 220px 裁掉日期/时间选择器（提醒流程走不通） | 弹前临时扩窗 560×560、关闭恢复并钉回左上角；菜单/关于期间加操作锁定 | core/dialog_room.dart（新）、shell/desktop_shell.dart、ui/pages.dart |
+| 小组件时钟冻 30 分钟、计数不刷新 | 时钟/日期改 TextClock 系统自走；待办每次保存经 home_widget 0.10.0 推送刷新 | platform/android_widget/res/layout/daozai_widget.xml、kotlin/DaozaiWidgetProvider.kt、services/local_store.dart、pubspec.yaml |
+| 穿透命中是矩形包围盒，圆角透明区挡点击 | RRect 圆角近似命中（底部大圆角），顶部肩部仍矩形近似 | ui/island_widget.dart |
+| `_inside` 双写入源竞态 | MouseRegion.onEnter 不再写标志，只留 onExit 安全网；命中只由指针坐标判定 | ui/island_widget.dart |
+| 提醒安排失败静默 | AppState.reminderNotice 可见红条提示，成功即清除 | state/app_state.dart、ui/pages.dart |
+| 到点提醒设 expanded=true 但岛体不真展开 | Ticker 内同步 AppState.expanded → _open | ui/island_widget.dart |
+| 桌面 Ticker 空闲满帧空转 | 收起+静止+无悬停/锁定时停 Ticker，指针/展开/锁定唤醒 | ui/island_widget.dart |
+| 选时间 await 后旧索引错位 | 改用对象引用，await 后 indexOf 重查 | ui/pages.dart |
+| 通知 id 文本哈希碰撞 | TodoItem 持久化稳定 id，旧数据迁移补分配 | services/local_store.dart、state/app_state.dart |
+| Rust CI 每次 Flutter 提交都跑 | ci.yml 加 paths 过滤（src/vendor/tests/installer/scripts/Cargo*/build.rs/app.rc） | ../.github/workflows/ci.yml |
+| 测试同步 | FakeStore 带 id；新增碰撞/失败提示/迁移 3 用例（共 34） | test/app_state_test.dart |
+
+> 本机无工具链，以上为静态实现 + 自查；**必须推送让 CI 编译 + 跑测试验证**，再真机抽查扩窗手感与小组件刷新。
 
 ## 6. 当前状态
 
 - **三端 CI 构建成功**（run 44917977836，提交 5e06992）：daozai-windows 11.6MB / daozai-macos 17.3MB / daozai-android 22.8MB。
-- 后续修复（a0e5e76~bdc9dcf）已推送，**需触发新一轮 CI 才产出含全部修复的包**。
+- a0e5e76~e627e2e 已全部推送；**§5.1 本轮修复在工作区未提交**，需提交 + 推送触发 CI 才产出含修复的包。
 - macOS 版已帮用户解包安装到 /Applications/daozai_flutter.app（旧版，不含最新修复）。
 - 本机（macOS arm64）**无 Flutter/Dart/Rust/Xcode/Android SDK**，无法本地编译；只能交付源码 + CI 云端构建。
 
 ## 7. 已知坑与限制（接手必读）
 
-1. **桌面精确点击穿透未做**：岛体窗口外的透明区域仍挡住下层桌面点击。原版用 Win32 命中区+HTTRANSPARENT 实现，window_manager 无逐区域穿透 API，需平台原生通道（Win32 SetWindowRgn/WM_NCHITTEST）。**这是桌面端最后一块基础体验短板。**
+1. **桌面精确点击穿透已实现但有近似**：setIgnoreMouseEvents forward 轮廓穿透（Win/mac），命中用 RRect 圆角近似，顶部肩部仍矩形；完整轮廓匹配需平台原生通道。Linux 不支持 forward，整窗交互。
 2. **真实电量/系统状态未接**：收起药丸仅显示时钟；真实电量需平台原生通道（Win GetSystemPowerStatus / mac IOKit / 安卓 BatteryManager）。
 3. **已删除/不再做的功能**：天气、喝水、专注（已删代码）；消息提醒、桌宠、音乐歌词、娱乐（不再纳入路线）。**接手者不要重新引入这些。** otp.dart 验证码逻辑保留供后续邮箱功能复用。
 4. **平台 runner 目录不入库**：android/macos/windows 由 CI 里 `flutter create` 生成（.gitignore 已排除）。本地运行需先 `flutter create --platforms=... .`。
-5. **安卓小组件数据**：读 shared_preferences 待办计数；后续可经 home_widget 插件或 MethodChannel 推送刷新。
+5. **安卓小组件数据**：读 shared_preferences 待办计数（只算未完成）；Flutter 每次保存经 home_widget 推送刷新；时钟/日期由 TextClock 自走。home_widget 锁定 0.10.0，qualifiedAndroidName 写死 CI 的 applicationId，改 org/project 需同步。
 6. **推送认证**：本机 git 无 GitHub 凭据（osxkeychain 空、无 SSH key、无 gh），AI 无法代推，需用户手动 `git push origin main`（用户名+PAT）。
 7. **macOS 包双层 zip**：GitHub artifact 外层包装 + 内层 app 包，需逐层解压；未签名需 xattr -cr + 右键打开。
 

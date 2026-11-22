@@ -4,16 +4,22 @@
 //! 拖动：收起态按住药丸拖动窗口，位置持久化（重启恢复到上次位置）。
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
+import '../core/dialog_room.dart';
 import '../core/theme.dart';
 import '../core/quit.dart';
 import '../core/window_pos.dart';
+import '../state/app_state.dart';
 import '../ui/island_widget.dart';
+
+/// 岛体窗口常态尺寸（收起/展开面板都装得下）。
+const _normalSize = Size(560, 220);
 
 Future<void> setupDesktopWindow() async {
   await windowManager.ensureInitialized();
   const opts = WindowOptions(
-    size: Size(560, 220),
+    size: _normalSize,
     center: false,
     backgroundColor: Colors.transparent,
     // 保留任务栏/Dock 图标，用户可从 Dock 右键退出（不再 skipTaskbar）。
@@ -78,7 +84,10 @@ class _DesktopHome extends StatelessWidget {
   }
 
   void _showContextMenu(BuildContext context, Offset position) {
-    showMenu<String>(
+    final s = context.read<AppState>();
+    // 菜单期间锁定岛体，防止悬停判定把岛收起、菜单跟着错位。
+    s.setInteractionLock(true);
+    withDialogRoom(() => showMenu<String>(
       context: context,
       position: RelativeRect.fromLTRB(position.dx, position.dy, position.dx + 1, position.dy + 1),
       color: DaozaiColors.card,
@@ -107,14 +116,17 @@ class _DesktopHome extends StatelessWidget {
           ),
         ),
       ],
-    ).then((value) {
+    )).then((value) {
+      s.setInteractionLock(false);
       if (value == 'quit') quitApp();
       if (value == 'about') _showAbout(context);
     });
   }
 
   void _showAbout(BuildContext context) {
-    showDialog<void>(
+    final s = context.read<AppState>();
+    s.setInteractionLock(true);
+    withDialogRoom(() => showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: DaozaiColors.card,
@@ -139,7 +151,7 @@ class _DesktopHome extends StatelessWidget {
           ),
         ],
       ),
-    );
+    )).then((_) => s.setInteractionLock(false));
   }
 }
 

@@ -24,6 +24,9 @@ dependencies:
   # zonedSchedule 需要的时区支持（timezone 也是插件传递依赖，宽范围让 pub 解析兼容版）
   timezone: '>=0.9.0 <0.11.0'
   flutter_timezone: 4.1.0
+  # 待办变化即推送安卓小组件刷新计数。锁定 0.10.0：updateWidget 用命名参数
+  # qualifiedAndroidName，升级需核对签名（教训同 flutter_local_notifications）。
+  home_widget: 0.10.0
 
 dev_dependencies:
   flutter_test:

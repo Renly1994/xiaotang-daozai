@@ -2,6 +2,7 @@
 //! 天气/喝水/专注页已按产品决策移除。
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../core/dialog_room.dart';
 import '../core/theme.dart';
 import '../state/app_state.dart';
 
@@ -66,26 +67,30 @@ class _TodoPageState extends State<TodoPage> {
   }
 
   /// 设置待办提醒：选日期 + 时间；已有提醒时可清除。
-  Future<void> _pickReminder(BuildContext context, AppState s, int i, TodoItem t) async {
+  /// 用对象引用定位，await 之后重新查索引——期间列表增删不会设错对象。
+  Future<void> _pickReminder(BuildContext context, AppState s, TodoItem t) async {
     // 操作锁定，避免选时间过程中岛体收起。
     s.setInteractionLock(true);
     final now = DateTime.now();
     final initial = DateTime.tryParse(t.reminder ?? '') ?? now.add(const Duration(hours: 1));
-    final date = await showDatePicker(
+    final date = await withDialogRoom(() => showDatePicker(
       context: context,
       initialDate: initial.isBefore(now) ? now : initial,
       firstDate: now,
       lastDate: now.add(const Duration(days: 365)),
       helpText: '选择提醒日期',
-    );
+    ));
     if (date == null) { s.setInteractionLock(false); return; }
     if (!context.mounted) return;
-    final time = await showTimePicker(
+    final time = await withDialogRoom(() => showTimePicker(
       context: context,
       initialTime: TimeOfDay.fromDateTime(initial),
       helpText: '选择提醒时间',
-    );
+    ));
     if (time == null) { s.setInteractionLock(false); return; }
+    if (!context.mounted) return;
+    final i = s.todos.indexOf(t);
+    if (i < 0) { s.setInteractionLock(false); return; } // 待办已被删除
     final when = DateTime(date.year, date.month, date.day, time.hour, time.minute);
     await s.setTodoReminder(i, when);
     s.setInteractionLock(false);
@@ -115,6 +120,28 @@ class _TodoPageState extends State<TodoPage> {
                   child: Text(s.reminderAlert!,
                       maxLines: 1, overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontSize: DaozaiSize.small, color: DaozaiColors.cyan)),
+                ),
+              ],
+            ),
+          ),
+        ],
+        // 提醒安排失败可见提示（不静默吞掉，用户知道铃铛没设上）。
+        if (s.reminderNotice != null) ...[
+          const SizedBox(height: 4),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: DaozaiColors.red.withOpacity(0.15),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.error_outline, size: 13, color: DaozaiColors.red),
+                const SizedBox(width: 5),
+                Expanded(
+                  child: Text(s.reminderNotice!,
+                      maxLines: 2, overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: DaozaiSize.small, color: DaozaiColors.red)),
                 ),
               ],
             ),
@@ -173,8 +200,13 @@ class _TodoPageState extends State<TodoPage> {
                           ),
                           // 提醒设置：点按选时间，长按清除。有提醒显示实心铃铛。
                           GestureDetector(
-                            onTap: () => _pickReminder(context, s, i, t),
-                            onLongPress: t.reminder != null ? () => s.setTodoReminder(i, null) : null,
+                            onTap: () => _pickReminder(context, s, t),
+                            onLongPress: t.reminder != null
+                                ? () {
+                                    final i = s.todos.indexOf(t);
+                                    if (i >= 0) s.setTodoReminder(i, null);
+                                  }
+                                : null,
                             child: Icon(
                               t.reminder != null ? Icons.notifications_active : Icons.notifications_none,
                               size: 13,

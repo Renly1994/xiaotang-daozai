@@ -13,20 +13,25 @@ class FakeStore implements TodoStore {
   Future<List<TodoItem>> loadTodos() async => saved;
   @override
   Future<void> saveTodos(List<TodoItem> items) async {
-    saved = items.map((e) => TodoItem(text: e.text, done: e.done, reminder: e.reminder)).toList();
+    saved = items.map((e) => TodoItem(id: e.id, text: e.text, done: e.done, reminder: e.reminder)).toList();
     saveCount++;
   }
 }
 
-/// 记录调用的 fake 通知器。
+/// 记录调用的 fake 通知器。failSchedule 模拟系统通知不可用。
 class FakeNotifier implements ReminderNotifier {
   final List<int> scheduled = [];
   final List<int> cancelled = [];
   bool initCalled = false;
+  bool failSchedule = false;
   @override
   Future<void> init() async { initCalled = true; }
   @override
-  Future<bool> schedule(int id, String text, DateTime when) async { scheduled.add(id); return true; }
+  Future<bool> schedule(int id, String text, DateTime when) async {
+    if (failSchedule) return false;
+    scheduled.add(id);
+    return true;
+  }
   @override
   Future<void> cancel(int id) async { cancelled.add(id); }
 }
@@ -129,6 +134,32 @@ void main() {
       await state.removeTodo(0);
       expect(notifier.cancelled, isNotEmpty);
     });
+
+    test('同文同提醒的两条待办通知 id 不碰撞', () async {
+      final when = fakeNow.add(const Duration(hours: 1));
+      await state.addTodo('重复');
+      await state.addTodo('重复');
+      await state.setTodoReminder(0, when);
+      await state.setTodoReminder(1, when);
+      expect(notifier.scheduled.length, 2);
+      expect(notifier.scheduled[0], isNot(notifier.scheduled[1]));
+      // 取消其中一条，只杀它自己的通知 id，不波及另一条。
+      notifier.cancelled.clear();
+      await state.removeTodo(0);
+      expect(notifier.cancelled.single, notifier.scheduled[0]);
+      expect(notifier.cancelled.single, isNot(notifier.scheduled[1]));
+    });
+
+    test('安排失败 → 留下可见提示，不静默', () async {
+      notifier.failSchedule = true;
+      await state.addTodo('任务');
+      await state.setTodoReminder(0, fakeNow.add(const Duration(hours: 1)));
+      expect(state.reminderNotice, isNotNull);
+      // 恢复后再次设置 → 提示清除。
+      notifier.failSchedule = false;
+      await state.setTodoReminder(0, fakeNow.add(const Duration(hours: 2)));
+      expect(state.reminderNotice, isNull);
+    });
   });
 
   group('提醒到点触发（岛内提示）', () {
@@ -197,6 +228,14 @@ void main() {
       store.saved = [TodoItem(text: '未来任务', reminder: '2026-11-22 14:00')];
       await state.init();
       expect(notifier.scheduled, isNotEmpty);
+    });
+
+    test('旧数据无 id → init 后补分配且互不相同', () async {
+      store.saved = [TodoItem(text: 'A'), TodoItem(text: 'B')];
+      await state.init();
+      expect(state.todos[0].id, isNotNull);
+      expect(state.todos[1].id, isNotNull);
+      expect(state.todos[0].id, isNot(state.todos[1].id));
     });
   });
 }

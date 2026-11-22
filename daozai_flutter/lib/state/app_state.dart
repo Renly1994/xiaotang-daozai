@@ -47,6 +47,8 @@ class AppState extends ChangeNotifier {
   List<TodoItem> todos = [];
   // 到点提醒的岛内提示文案（短暂显示后自动清除）。
   String? reminderAlert;
+  // 提醒安排失败的可见提示（静默失败会让用户以为设好了，必须说出来）。
+  String? reminderNotice;
   Timer? _alertTimer;
   // 已触发过提醒的待办标识，防止同一秒重复触发。
   final Set<String> _firedReminders = {};
@@ -57,12 +59,17 @@ class AppState extends ChangeNotifier {
     if (_initialized) return;
     _initialized = true;
     todos = await _store.loadTodos();
+    // 不变量：每条待办都有稳定 id（旧数据/任意 store 实现都补齐）。
+    var next = todos.fold<int>(0, (m, t) => (t.id ?? 0) > m ? t.id! : m) + 1;
+    for (final t in todos) {
+      t.id ??= next++;
+    }
     await _notifier.init();
     // 启动时为所有未完成的未来提醒重新安排系统通知（应用重启后不丢提醒）。
     for (final t in todos) {
       final when = _parseReminder(t.reminder);
       if (!t.done && when != null && when.isAfter(_clock())) {
-        await _notifier.schedule(_todoId(t), t.text, when);
+        await _scheduleChecked(t, when);
       }
     }
     notifyListeners();
@@ -111,7 +118,20 @@ class AppState extends ChangeNotifier {
   }
 
   /// 待办稳定 ID（用于系统通知的取消/重排）。
-  int _todoId(TodoItem t) => (t.text.hashCode ^ (t.reminder?.hashCode ?? 0)) & 0x7fffffff;
+  /// 用持久化 id 而非文本哈希：同文同提醒的两条待办不再共享通知。
+  int _todoId(TodoItem t) {
+    t.id ??= _nextId();
+    return t.id!;
+  }
+
+  int _nextId() =>
+      todos.fold<int>(0, (m, t) => (t.id ?? 0) > m ? t.id! : m) + 1;
+
+  /// 安排通知并如实反馈结果：失败时留下可见提示，成功则清除旧提示。
+  Future<void> _scheduleChecked(TodoItem t, DateTime when) async {
+    final ok = await _notifier.schedule(_todoId(t), t.text, when);
+    reminderNotice = ok ? null : '提醒安排失败：系统通知不可用或被限制';
+  }
 
   void setPage(IslandPage p) {
     page = p;
@@ -139,7 +159,7 @@ class AppState extends ChangeNotifier {
   Future<void> addTodo(String text) async {
     final t = text.trim();
     if (t.isEmpty) return;
-    todos.insert(0, TodoItem(text: t));
+    todos.insert(0, TodoItem(text: t, id: _nextId()));
     await _store.saveTodos(todos);
     notifyListeners();
   }
@@ -153,7 +173,7 @@ class AppState extends ChangeNotifier {
     } else {
       final when = _parseReminder(t.reminder);
       if (when != null && when.isAfter(_clock())) {
-        await _notifier.schedule(_todoId(t), t.text, when);
+        await _scheduleChecked(t, when);
       }
     }
     await _store.saveTodos(todos);
@@ -163,6 +183,7 @@ class AppState extends ChangeNotifier {
   Future<void> removeTodo(int i) async {
     final t = todos[i];
     await _notifier.cancel(_todoId(t));
+    _firedReminders.removeWhere((k) => k.startsWith('${t.text}@'));
     todos.removeAt(i);
     await _store.saveTodos(todos);
     notifyListeners();
@@ -175,7 +196,7 @@ class AppState extends ChangeNotifier {
     t.reminder = when == null ? null : DateFormat('yyyy-MM-dd HH:mm').format(when);
     _firedReminders.removeWhere((k) => k.startsWith('${t.text}@'));
     if (when != null && !t.done && when.isAfter(_clock())) {
-      await _notifier.schedule(_todoId(t), t.text, when);
+      await _scheduleChecked(t, when);
     }
     await _store.saveTodos(todos);
     notifyListeners();

@@ -84,7 +84,7 @@ flutter run -d android     # 安卓完整 App
 1. `res/layout/daozai_widget.xml`、`res/drawable/widget_bg.xml`、`res/xml/daozai_widget_info.xml`、`res/values/strings.xml` → 合并进 `android/app/src/main/res/` 对应目录。
 2. `kotlin/DaozaiWidgetProvider.kt` → `android/app/src/main/kotlin/com/daozai/flutter/widget/`。
 3. `AndroidManifest_snippet.xml` 的 `<receiver>` → 合并进 `android/app/src/main/AndroidManifest.xml` 的 `<application>` 内。
-4. 小组件读取 Flutter 侧 `shared_preferences`（key 前缀 `flutter.`）显示待办计数；天气数据后续经 `home_widget` 插件或 MethodChannel 推送刷新。
+4. 小组件读取 Flutter 侧 `shared_preferences`（key 前缀 `flutter.`）显示未完成待办计数；每次保存经 `home_widget` 推送刷新，时钟/日期由 TextClock 系统自走。
 
 ## 构建安装包
 
