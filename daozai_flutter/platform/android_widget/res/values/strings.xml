@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- 小组件描述字符串。CI 复制为 res/values/daozai_widget_strings.xml，独立于 Flutter 默认 strings.xml。 -->
 <resources>
-    <string name="widget_description">Daozai：时间、天气与待办，抬眼即见。</string>
+    <string name="widget_description">Daozai：时间与待办，抬眼即见。</string>
 </resources>

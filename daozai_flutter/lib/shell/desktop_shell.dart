@@ -53,10 +53,9 @@ class DesktopShell extends StatelessWidget {
 
 /// 桌面岛体宿主。
 ///
-/// 说明：原版 native.rs 用「命中区 + HTTRANSPARENT」做到只有岛体外点击穿透。
-/// window_manager 暂无逐区域穿透 API，骨架阶段保持整窗接收鼠标，确保药丸可被
-/// 悬停/点击唤醒；窗口已收窄到岛体尺寸，遮挡范围有限。精确命中穿透列为后续工作
-/// （Windows 侧可经 Win32 SetWindowRgn / WM_NCHITTEST 通道实现）。
+/// 点击穿透：IslandWidget 用 window_manager.setIgnoreMouseEvents(forward:true)
+/// 实现轮廓穿透——鼠标在岛体内正常交互，岛体外透明区点击落到下层窗口
+/// （Windows/macOS 生效；Linux 不支持 forward，保持整窗交互）。
 class _DesktopHome extends StatelessWidget {
   const _DesktopHome();
 
@@ -127,9 +126,9 @@ class _DesktopHome extends StatelessWidget {
           children: [
             Text('跨平台桌面伙伴 · v0.1.0', style: TextStyle(color: DaozaiColors.gray, fontSize: 13)),
             SizedBox(height: 10),
-            Text('天气 · 待办 · 专注 · 喝水', style: TextStyle(color: DaozaiColors.white, fontSize: 13)),
+            Text('时钟 · 待办清单 · 到点提醒', style: TextStyle(color: DaozaiColors.white, fontSize: 13)),
             SizedBox(height: 10),
-            Text('基于开源岛仔重做的 Flutter 多平台版。\n悬停展开，按住药丸可拖动位置。',
+            Text('基于开源岛仔重做的 Flutter 多平台版。\n悬停展开，按住药丸可拖动位置，右键退出。',
                 style: TextStyle(color: DaozaiColors.dim, fontSize: 12, height: 1.5)),
           ],
         ),

@@ -63,6 +63,8 @@ class NotificationService {
     if (!_initialized) return false;
     if (!when.isAfter(DateTime.now())) return false;
     try {
+      // 锁定 19.0.0：位置参数 (id, title, body, scheduledDate, details)。
+      // 注意 20.x 改为命名参数，升级时需同步修改（见 pubspec 版本锁定说明）。
       await _plugin.zonedSchedule(
         id, '待办提醒', text,
         tz.TZDateTime.from(when, tz.local),

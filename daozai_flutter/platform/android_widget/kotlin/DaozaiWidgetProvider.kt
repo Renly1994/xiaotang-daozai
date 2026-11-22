@@ -10,12 +10,11 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 岛仔主屏小组件。
+ * Daozai 主屏小组件。
  *
- * 骨架阶段：显示当前时间/日期，点击拉起完整 App。
+ * 显示当前时间/日期 + 待办计数，点击拉起完整 App。
  * 包名占位符 __APP_PACKAGE__ 由 ci/setup_platform.sh 替换为 Flutter 实际 applicationId。
- * 天气与待办数据后续经 home_widget 插件或 MethodChannel 从 Flutter 侧写入
- * SharedPreferences，再由本 Provider 读取刷新。
+ * 待办数据经 shared_preferences 从 Flutter 侧写入，本 Provider 读取刷新。
  */
 class DaozaiWidgetProvider : AppWidgetProvider() {
 
@@ -48,7 +47,14 @@ class DaozaiWidgetProvider : AppWidgetProvider() {
     private fun countTodos(json: String?): Int {
         if (json.isNullOrEmpty()) return 0
         return try {
-            org.json.JSONArray(json).length()
+            val arr = org.json.JSONArray(json)
+            // 只统计未完成的待办（已勾选的不计入「待办 N 项」）。
+            var n = 0
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i)
+                if (obj != null && !obj.optBoolean("done", false)) n++
+            }
+            n
         } catch (e: Exception) {
             0
         }
