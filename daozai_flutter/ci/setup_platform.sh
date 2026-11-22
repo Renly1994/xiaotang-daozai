@@ -36,6 +36,13 @@ case "$PLATFORM" in
         if ! grep -q "com.apple.security.network.client" "$ENT"; then
           sedi 's#</dict>#\t<key>com.apple.security.network.client</key>\n\t<true/>\n</dict>#' "$ENT"
         fi
+        # T1 置物架：监听端口（设备间直连）+ 用户拖入/选定文件读取。
+        if ! grep -q "com.apple.security.network.server" "$ENT"; then
+          sedi 's#</dict>#\t<key>com.apple.security.network.server</key>\n\t<true/>\n</dict>#' "$ENT"
+        fi
+        if ! grep -q "com.apple.security.files.user-selected.read-write" "$ENT"; then
+          sedi 's#</dict>#\t<key>com.apple.security.files.user-selected.read-write</key>\n\t<true/>\n</dict>#' "$ENT"
+        fi
       fi
     done
     # 透明窗与鼠标转发必须原生兜底：window_manager setAsFrameless 会把 isOpaque
@@ -43,6 +50,7 @@ case "$PLATFORM" in
     cat > macos/Runner/MainFlutterWindow.swift <<'SWIFT'
 import Cocoa
 import FlutterMacOS
+import desktop_multi_window
 
 class MainFlutterWindow: NSWindow {
   override func awakeFromNib() {
@@ -59,6 +67,9 @@ class MainFlutterWindow: NSWindow {
       messenger: flutterViewController.registrar(forPlugin: "MouseForwarder").messenger)
 
     RegisterGeneratedPlugins(registry: flutterViewController)
+    FlutterMultiWindowPlugin.setOnWindowCreatedCallback { controller in
+      RegisterGeneratedPlugins(registry: controller)
+    }
 
     super.awakeFromNib()
   }

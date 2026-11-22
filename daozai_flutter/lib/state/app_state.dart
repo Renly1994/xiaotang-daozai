@@ -7,8 +7,8 @@ import '../services/local_store.dart';
 import '../services/notification_service.dart';
 import '../services/ports.dart';
 
-/// 当前仅待办一个功能页（保留枚举以便后续扩展 AI 额度/邮箱/日历等）。
-enum IslandPage { todo }
+/// 功能页：待办 + 文件置物架 + 设备同步（T1）。后续可扩 AI 额度/邮箱/日历等。
+enum IslandPage { todo, files, devices }
 
 class AppState extends ChangeNotifier {
   /// 依赖注入：测试可传入 fake store/notifier 与可控 clock。

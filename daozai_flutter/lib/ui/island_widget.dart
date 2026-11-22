@@ -10,9 +10,11 @@ import 'package:window_manager/window_manager.dart';
 import '../core/theme.dart';
 import '../core/spring.dart';
 import '../state/app_state.dart';
+import '../state/sync_state.dart';
 import '../core/quit.dart';
 import '../core/window_pos.dart';
 import 'island_shape.dart';
+import 'drop_overlay.dart';
 import 'pages.dart';
 
 class IslandWidget extends StatefulWidget {
@@ -222,9 +224,18 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
   @override
   Widget build(BuildContext context) {
     final s = context.watch<AppState>();
+    // T1 置物架：投放态/配对锁定时岛体强制展开（SyncState 可能未注入，如旧测试）。
+    final sync = context.watch<SyncState?>();
+    final dropHot = sync?.dropHot ?? false;
+    final pairingLock = sync?.pairingLock ?? false;
+    if (widget.floating && (dropHot || pairingLock) && !_open) {
+      _open = true;
+      _inside = true;
+      _ensureTicker();
+    }
     // 空闲停摆后，锁定/展开/悬停任一成立时唤醒 Ticker（post-frame 避免 build 中副作用）。
     if (widget.floating &&
-        (_open || _inside || s.interactionLock || s.expanded) &&
+        (_open || _inside || s.interactionLock || s.expanded || dropHot || pairingLock) &&
         !(_ticker?.isActive ?? false)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _ensureTicker();
@@ -346,9 +357,12 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
                 child: SizedBox(
                   width: bodyW,
                   height: bodyH,
-                  child: Stack(
-                    alignment: Alignment.center,
-                    children: [pill, content],
+                  child: DropOverlay(
+                    hot: dropHot,
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [pill, content],
+                    ),
                   ),
                 ),
               ),

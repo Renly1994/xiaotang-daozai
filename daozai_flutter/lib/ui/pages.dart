@@ -6,6 +6,8 @@ import '../core/dialog_room.dart';
 import '../core/theme.dart';
 import '../services/local_store.dart';
 import '../state/app_state.dart';
+import 'files_page.dart';
+import 'devices_page.dart';
 
 /// 页标题（原版双色：白字 + 彩色副标题）。
 class PageTitle extends StatelessWidget {
@@ -257,5 +259,7 @@ Widget _iconBtn(IconData icon, VoidCallback onTap) {
 Widget pageBody(IslandPage page) {
   switch (page) {
     case IslandPage.todo: return const TodoPage();
+    case IslandPage.files: return const FilesPage();
+    case IslandPage.devices: return const DevicesPage();
   }
 }

@@ -30,6 +30,22 @@ dependencies:
   # 待办变化即推送安卓小组件刷新计数。锁定 0.10.0：updateWidget 用命名参数
   # qualifiedAndroidName，升级需核对签名（教训同 flutter_local_notifications）。
   home_widget: 0.10.0
+  # ---- T1 跨端文件置物架（锁精确版本，N3 教训；升级需核对 API 签名）----
+  # 索引库：macOS/Android 原生通道；Windows/Linux 走 sqflite_common_ffi。
+  sqflite: 2.4.6
+  sqflite_common_ffi: 2.4.7
+  # 纯 Dart 加密：X25519/Ed25519/XChaCha20-Poly1305/AES-GCM/HKDF（三端一致，无 FFI）。
+  cryptography: 2.9.0
+  # 密钥安全存储：macOS Keychain / Windows DPAPI / Android Keystore。
+  flutter_secure_storage: 11.2.0
+  # Win/mac 系统拖放（OLE/NSDragging）；onDragEntered/Exited/Done 回调。
+  desktop_drop: 0.9.2
+  # 桌面双窗口：主控制台与悬浮岛独立运行。
+  desktop_multi_window: 0.3.1
+  uuid: 4.6.0
+  path_provider: 2.1.6
+  # SHA-256 流式哈希（内容去重与校验）。
+  crypto: 3.0.8
 
 dev_dependencies:
   flutter_test:

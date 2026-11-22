@@ -3,15 +3,19 @@
 //! 退出入口：右键岛体弹菜单「退出」；展开面板右上角关闭按钮；macOS Dock 图标右键退出。
 //! 拖动：收起态按住药丸拖动窗口，位置持久化（重启恢复到上次位置）。
 import 'dart:io';
+import 'package:desktop_drop/desktop_drop.dart';
+import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
 import '../core/dialog_room.dart';
+import '../core/shelf_runtime.dart';
 import '../core/theme.dart';
 import '../core/quit.dart';
 import '../core/window_pos.dart';
 import '../state/app_state.dart';
+import '../state/sync_state.dart';
 import '../ui/island_widget.dart';
 
 /// 岛体窗口常态尺寸（收起/展开面板都装得下）。
@@ -76,17 +80,49 @@ class _DesktopHome extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final shelf = context.read<ShelfRuntime?>();
+    final sync = context.read<SyncState?>();
+    final island = GestureDetector(
+      onSecondaryTapDown: (details) => _showContextMenu(context, details.globalPosition),
+      child: const IslandWidget(floating: true),
+    );
     return Scaffold(
       backgroundColor: Colors.transparent,
       body: Align(
         alignment: Alignment.topCenter,
         child: Padding(
           padding: const EdgeInsets.only(top: DaozaiGeom.pillGap),
-          // 右键岛体弹出菜单，提供「退出」入口（悬浮窗无标题栏关闭按钮）。
-          child: GestureDetector(
-            onSecondaryTapDown: (details) => _showContextMenu(context, details.globalPosition),
-            child: const IslandWidget(floating: true),
-          ),
+          // T1 拖放收纳：整窗接收（560×220 小窗误触成本低，T3 收窄到岛体轮廓）。
+          // 拖拽期临时关穿透（OLE/NSDragging 需要窗口可接收），结束恢复。
+          child: shelf == null
+              ? island
+              : DropTarget(
+                  acceptedKinds: const {DropItemKind.file, DropItemKind.directory},
+                  onEnter: (_) {
+                    sync?.setDropHot(true);
+                    if (Platform.isWindows || Platform.isMacOS) {
+                      windowManager.setIgnoreMouseEvents(false);
+                    }
+                  },
+                  onLeave: () {
+                    sync?.setDropHot(false);
+                  },
+                  onDrop: (details) async {
+                    sync?.setDropHot(false);
+                    final paths = <String>[];
+                    for (final item in details.items) {
+                      if (item is DropFileItem && item.localPath != null) {
+                        paths.add(item.localPath!);
+                      } else if (item is DropDirectoryItem && item.localPath != null) {
+                        paths.add(item.localPath!);
+                      }
+                    }
+                    if (paths.isNotEmpty) {
+                      await shelf.intake.intakePaths(paths);
+                    }
+                  },
+                  child: island,
+                ),
         ),
       ),
     );
@@ -102,6 +138,39 @@ class _DesktopHome extends StatelessWidget {
       color: DaozaiColors.card,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       items: [
+        PopupMenuItem<String>(
+          value: 'console',
+          height: 36,
+          child: Row(
+            children: const [
+              Icon(Icons.dashboard_outlined, size: 16, color: DaozaiColors.cyan),
+              SizedBox(width: 8),
+              Text('打开主控制台', style: TextStyle(fontSize: 13, color: DaozaiColors.white)),
+            ],
+          ),
+        ),
+        PopupMenuItem<String>(
+          value: 'files',
+          height: 36,
+          child: Row(
+            children: const [
+              Icon(Icons.folder_outlined, size: 16, color: DaozaiColors.blue),
+              SizedBox(width: 8),
+              Text('文件置物架', style: TextStyle(fontSize: 13, color: DaozaiColors.white)),
+            ],
+          ),
+        ),
+        PopupMenuItem<String>(
+          value: 'devices',
+          height: 36,
+          child: Row(
+            children: const [
+              Icon(Icons.devices, size: 16, color: DaozaiColors.softGreen),
+              SizedBox(width: 8),
+              Text('设备与同步', style: TextStyle(fontSize: 13, color: DaozaiColors.white)),
+            ],
+          ),
+        ),
         PopupMenuItem<String>(
           value: 'about',
           height: 36,
@@ -129,7 +198,30 @@ class _DesktopHome extends StatelessWidget {
       s.setInteractionLock(false);
       if (value == 'quit') quitApp();
       if (value == 'about') _showAbout(context);
+      if (value == 'console') _showControlConsole();
+      if (value == 'files') {
+        s.setPage(IslandPage.files);
+        s.setExpanded(true);
+      }
+      if (value == 'devices') {
+        s.setPage(IslandPage.devices);
+        s.setExpanded(true);
+      }
     });
+  }
+
+  Future<void> _showControlConsole() async {
+    final windows = await WindowController.getAll();
+    for (final window in windows) {
+      if (window.arguments == 'control-console') {
+        await window.show();
+        return;
+      }
+    }
+    final console = await WindowController.create(
+      const WindowConfiguration(arguments: 'control-console', hiddenAtLaunch: true),
+    );
+    await console.show();
   }
 
   void _showAbout(BuildContext context) {
