@@ -5,6 +5,18 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/data/latest_all.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
 import 'package:flutter_timezone/flutter_timezone.dart';
+import 'ports.dart';
+
+/// ReminderNotifier 的真实实现，委托给静态 NotificationService。
+class SystemReminderNotifier implements ReminderNotifier {
+  @override
+  Future<void> init() => NotificationService.init();
+  @override
+  Future<bool> schedule(int id, String text, DateTime when) =>
+      NotificationService.schedule(id, text, when);
+  @override
+  Future<void> cancel(int id) => NotificationService.cancel(id);
+}
 
 class NotificationService {
   static final FlutterLocalNotificationsPlugin _plugin = FlutterLocalNotificationsPlugin();

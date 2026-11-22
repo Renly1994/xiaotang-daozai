@@ -5,12 +5,21 @@ import 'package:flutter/foundation.dart';
 import 'package:intl/intl.dart';
 import '../services/local_store.dart';
 import '../services/notification_service.dart';
+import '../services/ports.dart';
 
 /// 当前仅待办一个功能页（保留枚举以便后续扩展 AI 额度/邮箱/日历等）。
 enum IslandPage { todo }
 
 class AppState extends ChangeNotifier {
-  final LocalStore _store = LocalStore();
+  /// 依赖注入：测试可传入 fake store/notifier 与可控 clock。
+  AppState({TodoStore? store, ReminderNotifier? notifier, Clock? clock})
+      : _store = store ?? LocalStore(),
+        _notifier = notifier ?? SystemReminderNotifier(),
+        _clock = clock ?? defaultClock;
+
+  final TodoStore _store;
+  final ReminderNotifier _notifier;
+  final Clock _clock;
   Timer? _ticker;
 
   // 时钟
@@ -48,12 +57,12 @@ class AppState extends ChangeNotifier {
     if (_initialized) return;
     _initialized = true;
     todos = await _store.loadTodos();
-    await NotificationService.init();
+    await _notifier.init();
     // 启动时为所有未完成的未来提醒重新安排系统通知（应用重启后不丢提醒）。
     for (final t in todos) {
       final when = _parseReminder(t.reminder);
-      if (!t.done && when != null && when.isAfter(DateTime.now())) {
-        await NotificationService.schedule(_todoId(t), t.text, when);
+      if (!t.done && when != null && when.isAfter(_clock())) {
+        await _notifier.schedule(_todoId(t), t.text, when);
       }
     }
     notifyListeners();
@@ -61,10 +70,14 @@ class AppState extends ChangeNotifier {
   }
 
   void _tick() {
-    now = DateTime.now();
+    now = _clock();
     _checkReminders();
     notifyListeners();
   }
+
+  /// 测试专用：手动驱动一次 tick（用注入的 clock 推进时间，验证提醒触发）。
+  @visibleForTesting
+  void debugTick() => _tick();
 
   /// 检测是否有待办到点：岛内弹提示 + 展开岛体让用户看到。
   void _checkReminders() {
@@ -136,11 +149,11 @@ class AppState extends ChangeNotifier {
     t.done = !t.done;
     // 完成 → 取消系统通知；取消完成 → 若提醒仍在未来则重排。
     if (t.done) {
-      await NotificationService.cancel(_todoId(t));
+      await _notifier.cancel(_todoId(t));
     } else {
       final when = _parseReminder(t.reminder);
-      if (when != null && when.isAfter(DateTime.now())) {
-        await NotificationService.schedule(_todoId(t), t.text, when);
+      if (when != null && when.isAfter(_clock())) {
+        await _notifier.schedule(_todoId(t), t.text, when);
       }
     }
     await _store.saveTodos(todos);
@@ -149,7 +162,7 @@ class AppState extends ChangeNotifier {
 
   Future<void> removeTodo(int i) async {
     final t = todos[i];
-    await NotificationService.cancel(_todoId(t));
+    await _notifier.cancel(_todoId(t));
     todos.removeAt(i);
     await _store.saveTodos(todos);
     notifyListeners();
@@ -158,11 +171,11 @@ class AppState extends ChangeNotifier {
   /// 设置/清除某条待办的提醒时间。[when] 为 null 表示清除提醒。
   Future<void> setTodoReminder(int i, DateTime? when) async {
     final t = todos[i];
-    await NotificationService.cancel(_todoId(t));
+    await _notifier.cancel(_todoId(t));
     t.reminder = when == null ? null : DateFormat('yyyy-MM-dd HH:mm').format(when);
     _firedReminders.removeWhere((k) => k.startsWith('${t.text}@'));
-    if (when != null && !t.done && when.isAfter(DateTime.now())) {
-      await NotificationService.schedule(_todoId(t), t.text, when);
+    if (when != null && !t.done && when.isAfter(_clock())) {
+      await _notifier.schedule(_todoId(t), t.text, when);
     }
     await _store.saveTodos(todos);
     notifyListeners();

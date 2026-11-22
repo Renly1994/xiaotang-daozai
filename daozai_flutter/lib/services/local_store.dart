@@ -3,11 +3,12 @@
 //! 用 shared_preferences（JSON）；正式版可换 sqlite/文件以对齐原格式。
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'ports.dart';
 
 class TodoItem {
   String text;
   bool done;
-  String? reminder; // 'YYYY-MM-DD HH:MM' 或 null（预留，后续本地提醒用）
+  String? reminder; // 'YYYY-MM-DD HH:MM' 或 null
   TodoItem({required this.text, this.done = false, this.reminder});
 
   Map<String, dynamic> toJson() => {'text': text, 'done': done, 'reminder': reminder};
@@ -18,9 +19,10 @@ class TodoItem {
       );
 }
 
-class LocalStore {
+class LocalStore implements TodoStore {
   static const _todoKey = 'daozai.todos';
 
+  @override
   Future<List<TodoItem>> loadTodos() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_todoKey);
@@ -34,6 +36,7 @@ class LocalStore {
     }
   }
 
+  @override
   Future<void> saveTodos(List<TodoItem> items) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_todoKey, jsonEncode(items.map((e) => e.toJson()).toList()));
