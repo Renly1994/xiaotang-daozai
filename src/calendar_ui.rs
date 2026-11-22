@@ -1,5 +1,5 @@
 //! 岛内日程：左侧月历，右侧按时间排列邮件邀请与工作日程。
-use crate::{app::{App, Cmd, Env, CALENDAR_PAGE}, calendar, mail, paint::{self,Card,H}, theme::{self,W}};
+use crate::{app::{App, Cmd, Env, CALENDAR_PAGE, Ctl}, calendar, mail, paint::{self,Card,H}, theme::{self,W}};
 use chrono::{Datelike, NaiveDate};
 use eframe::egui::{self,Color32};
 
@@ -270,7 +270,20 @@ impl App {
         source_icon(c,Source::Calendar(None),43.0,13.0,10.0);
         c.centered_text(69.0,18.0,"日程",10.0,W::Semibold,theme::WHITE,H::Center);
         if c.hit(37.0,9.0,54.0,18.0,"calendar-today").on_hover_text("回到今天").clicked(){self.select_calendar_day(today);}
-        let (add,b)=paint::capsule(c,101.0,9.0,46.0,18.0,"calendar-add-local",theme::BTN,theme::BTN_HOVER);
+        // GPU 玻璃分支：透镜由着色器画，这里只留命中区、悬停反馈和文字。
+        let (add,b)=if self.glassy() && self.ctl_on_gpu(Ctl::CalAdd) {
+            let add=c.hit(101.0,9.0,46.0,18.0,"calendar-add-local");
+            let (hover,_)=c.hover_t(&add);
+            let b=c.scaled(124.0,18.0,self.ctl_scale(Ctl::CalAdd));
+            if hover>0.01 {
+                let from=paint::chrome_mark(c);
+                b.fill(101.0,9.0,46.0,18.0,9.0,Color32::from_white_alpha((12.0+hover*16.0) as u8));
+                paint::chrome_since(c,from);
+            }
+            (add,b)
+        }else{
+            paint::capsule(c,101.0,9.0,46.0,18.0,"calendar-add-local",theme::BTN,theme::BTN_HOVER)
+        };
         b.centered_text(124.0,18.0,"＋ 新增",9.0,W::Regular,theme::WHITE,H::Center);
         if add.clicked(){self.open_calendar_editor(None);return;}
         c.seg((155.0,36.0),(155.0,208.0),0.6,Color32::from_gray(38));

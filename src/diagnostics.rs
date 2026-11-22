@@ -72,6 +72,9 @@ pub fn spawn_replacement() -> bool {
     let Ok(exe) = std::env::current_exe() else { return false };
     let mut command = std::process::Command::new(exe);
     command.arg("--restart-after").arg(std::process::id().to_string()).env_remove("DAOZAI_TEST_CRASH");
+    // DAOZAI_DCOMP 只在图形初始化那次尝试期间有效；诊断/重启不能继承，
+    // 否则关掉兼容渲染后重启会带着旧标记，窗口没有 GDI 表面。
+    command.env_remove("DAOZAI_DCOMP");
     if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)) { command.current_dir(dir); }
     command.spawn().is_ok()
 }

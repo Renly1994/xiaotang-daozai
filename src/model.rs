@@ -109,18 +109,19 @@ pub enum Skin {
     GlassLight,
     GlassDark,
     Fluid,
+    Liquid,
 }
 
 impl Skin {
-    pub const ALL: [Skin; 5] = [Skin::Classic, Skin::Cream, Skin::GlassLight, Skin::GlassDark, Skin::Fluid];
+    pub const ALL: [Skin; 6] = [Skin::Classic, Skin::Cream, Skin::GlassLight, Skin::GlassDark, Skin::Fluid, Skin::Liquid];
     pub fn key(self) -> &'static str {
-        match self { Self::Classic => "classic", Self::Fluid => "fluid", Self::Cream => "cream", Self::GlassLight => "glass_light", Self::GlassDark => "glass" }
+        match self { Self::Classic => "classic", Self::Fluid => "fluid", Self::Cream => "cream", Self::GlassLight => "glass_light", Self::GlassDark => "glass", Self::Liquid => "liquid_glass" }
     }
     pub fn parse(value: &str) -> Self {
-        match value { "fluid" => Self::Fluid, "cream" => Self::Cream, "glass_light" => Self::GlassLight, "glass" | "glass_dark" => Self::GlassDark, _ => Self::Classic }
+        match value { "fluid" => Self::Fluid, "cream" => Self::Cream, "glass_light" => Self::GlassLight, "glass" | "glass_dark" => Self::GlassDark, "liquid_glass" | "liquid" => Self::Liquid, _ => Self::Classic }
     }
     pub fn label(self) -> &'static str {
-        match self { Self::Classic => "经典", Self::Fluid => "悬浮云", Self::Cream => "奶油", Self::GlassLight => "毛玻璃·浅", Self::GlassDark => "毛玻璃·深" }
+        match self { Self::Classic => "经典", Self::Fluid => "悬浮云", Self::Cream => "奶油", Self::GlassLight => "毛玻璃·浅", Self::GlassDark => "毛玻璃·深", Self::Liquid => "液态玻璃" }
     }
     pub fn description(self) -> &'static str {
         match self {
@@ -129,6 +130,7 @@ impl Skin {
             Self::Cream => "暖白底色配深棕文字和橙色强调，柔和明亮。",
             Self::GlassLight => "浅色磨砂玻璃，透出身后桌面的颜色，文字为深色；按背景明暗自动调整，保证清晰。",
             Self::GlassDark => "深色磨砂玻璃，透出身后桌面的颜色，文字为白色；按背景明暗自动调整，保证清晰。",
+            Self::Liquid => "液态玻璃，GPU 物理折射 + 真实桌面底片，自动切深/浅材质。需要开启「兼容渲染（Direct3D 12）」并重启岛仔；不开则回退为普通玻璃。皮肤作者：轻九九九（@cayww）",
         }
     }
     pub fn is_glass(self) -> bool { matches!(self, Self::GlassLight | Self::GlassDark) }
@@ -203,6 +205,44 @@ pub struct Settings {
     pub skin: Skin,
     pub island_shape: IslandShape,
     pub glass_blur: bool,
+    /// 液态玻璃：展开/折叠瞬间边缘折射的增强倍数（0 = 关闭，默认 1.0）。
+    /// 只影响形变那一百多毫秒，静止状态完全不受影响。
+    pub liquid_morph: f32,
+    /// 液态玻璃优先使用独立显卡。核显没有独立显存，玻璃的纹理与帧缓冲会全部从
+    /// 系统内存分配（实测同一构建包：核显 548MB / 独显 274MB）。启动时决定，改后需重启。
+    pub liquid_prefer_dgpu: bool,
+    /// 液态玻璃：折射强度（CSS px，默认 48）。
+    /// 边缘处背景被往内弯折的像素数，越大越像厚透镜。
+    pub liquid_refract_px: f32,
+    /// 液态玻璃：色散强度（CSS px，默认 8）。R / B 通道各自的采样位移，
+    /// 红蓝实际分离是它的两倍。默认 8，比 12 低一档，因为
+    /// 抓屏是 1:1 的锐利画面，12 在文字与封面边缘会先出彩边。
+    pub liquid_chroma_px: f32,
+    /// 液态玻璃：内部模糊（CSS px，默认 1.5）。
+    /// 边缘折射带里的五点十字采样的步长，调大整个折射带更「磨」。
+    pub liquid_blur_px: f32,
+    /// 液态玻璃：折射带宽（CSS px，默认 87 ≈ 旧写死的 130 设备 px）。
+    /// 折射从边缘往里延伸多深，小 = 只有边缘一圈在弯。
+    pub liquid_band_px: f32,
+    /// 液态玻璃：白边宽度（CSS px，默认 1.5）。
+    pub liquid_edge_w_px: f32,
+    /// 液态玻璃：白边亮度（0~1，默认 0.90）。
+    pub liquid_edge_op: f32,
+    /// 控件弹簧刚度倍率：>1 更快更弹，<1 更慢更柔。乘在按压/入场弹簧刚度、
+    /// 按压果冻幅度、进度条圆钮放大弹簧上（默认 1.0 = 资料包标准）。
+    pub liquid_spring: f32,
+    /// 控件弹簧阻尼比 ζ：小 = 弹跳多次更 Q 弹，1.0 = 不弹跳直接到位
+    /// （默认 0.5 = 资料包标准；作用于按压/入场/邮件指示器，圆钮放大弹簧恒为 1.0）。
+    pub liquid_zeta: f32,
+    /// 液态玻璃静止刷新率（Hz，默认 15）：无悬停/无动画时的重绘节拍。
+    /// 30 = 静止不降档；收起深度休眠（1Hz）由 `liquid_deep_sleep` 单独开关。
+    pub liquid_idle_fps: u8,
+    /// 收起深度休眠开关（默认开）：收起 + 完全静止 2 分钟 → 整条管线降到 1Hz。
+    /// 实测它只省电不省内存（内存大头在 Direct3D 12 抓屏管线），留开关给用户。
+    pub liquid_deep_sleep: bool,
+    /// 岛体投影开关（默认开）：胶囊外围的多层落影。关掉后 `shadow_k` 归零，
+    /// 玻璃内部的接触阴影（shader 侧）不受影响。
+    pub liquid_shadow: bool,
     pub island_size: u32,
     pub island_offset: i32,
     /// OLED 像素偏移：岛体收起静止时沿停靠边缓慢移动几个像素，减轻 OLED 静态显示留下的痕迹。
@@ -285,11 +325,71 @@ pub struct Settings {
     pub render_compat: bool,
     /// 自动切换到兼容渲染的原因；手动开启时为空。
     pub render_compat_reason: String,
+    /// 收起 ↔ 展开的过渡动效（交互设置；液态玻璃调参弹窗据此预览动效）。
+    pub open_anim: OpenAnim,
+    /// 悬停多久后展开（毫秒，默认 200；0..=500）。80–120 可避开鼠标划过误触。
+    pub hover_delay_ms: u32,
+}
+
+/// 收起 ↔ 展开的过渡动效。刚度 k 越大越快，阻尼比 zeta < 1 会过冲、=1 为临界阻尼。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OpenAnim {
+    /// 官方默认：欠阻尼垂落，末段约 5% 过冲。
+    #[default]
+    Elastic,
+    /// 临界阻尼，无回弹。
+    Smooth,
+    /// 更快的刚度 + 更低的阻尼，回弹更明显。
+    Snappy,
+    /// 低刚度、大阻尼，慢慢铺开。
+    Gentle,
+    /// 不做形变动画，直接切换大小。
+    Instant,
+}
+
+/// 一组动效的弹簧参数：(宽度刚度, 高度刚度, 收起刚度)，每项都是 `(k, zeta)`。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AnimTuning {
+    pub open_w: (f32, f32),
+    pub open_h: (f32, f32),
+    pub close: (f32, f32),
+}
+
+impl OpenAnim {
+    pub const ALL: [OpenAnim; 5] = [Self::Elastic, Self::Smooth, Self::Snappy, Self::Gentle, Self::Instant];
+    pub fn key(self) -> &'static str {
+        match self { Self::Elastic => "elastic", Self::Smooth => "smooth", Self::Snappy => "snappy", Self::Gentle => "gentle", Self::Instant => "instant" }
+    }
+    pub fn parse(value: &str) -> Self {
+        match value { "smooth" => Self::Smooth, "snappy" => Self::Snappy, "gentle" => Self::Gentle, "instant" => Self::Instant, _ => Self::Elastic }
+    }
+    pub fn label(self) -> &'static str {
+        match self { Self::Elastic => "弹性", Self::Smooth => "平滑", Self::Snappy => "轻快", Self::Gentle => "柔和", Self::Instant => "瞬时" }
+    }
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Elastic => "默认。欠阻尼弹簧，末段约 5% 过冲后回落，像垂落下来。",
+            Self::Smooth => "临界阻尼，没有回弹，展开和收起都干净利落。",
+            Self::Snappy => "刚度更高、阻尼更低，展开更快，回弹也更明显。",
+            Self::Gentle => "刚度低、阻尼大，慢慢铺开。",
+            Self::Instant => "不做形变动画，直接切换大小；仍保留悬停防误触的短暂延迟。",
+        }
+    }
+    /// `None` 表示不做形变动画（瞬时切换）。
+    pub fn tuning(self) -> Option<AnimTuning> {
+        Some(match self {
+            Self::Elastic => AnimTuning { open_w: (330.0, 0.70), open_h: (290.0, 0.74), close: (620.0, 1.0) },
+            Self::Smooth  => AnimTuning { open_w: (300.0, 1.00), open_h: (260.0, 1.00), close: (620.0, 1.0) },
+            Self::Snappy  => AnimTuning { open_w: (560.0, 0.58), open_h: (500.0, 0.62), close: (760.0, 1.0) },
+            Self::Gentle  => AnimTuning { open_w: (170.0, 0.92), open_h: (150.0, 0.95), close: (320.0, 1.0) },
+            Self::Instant => return None,
+        })
+    }
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, oled_shift: false, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 9], page_order: [0,1,2,3,4,5,6,7,8], show_clock: true, show_battery: true, show_weather: true, clock_12h: false, clock_period: 0, clock_seconds: false, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wecom_notifications:false, feishu_notifications:false, dingtalk_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, system_notify: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, avoid_top_bar: true, top_bar_on_top: false, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, sit_remind: true, sit_minutes: 60, lunch_rest: true, lunch_start: 720, lunch_end: 810, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, weather_city: String::new(), weather_position: None, weather_saved: Vec::new(), render_compat: false, render_compat_reason: String::new() }
+        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, liquid_morph: 1.0, liquid_prefer_dgpu: true, liquid_refract_px: 48.0, liquid_chroma_px: 8.0, liquid_blur_px: 1.5, liquid_band_px: 87.0, liquid_edge_w_px: 1.5, liquid_edge_op: 0.90, liquid_spring: 1.0, liquid_zeta: 0.5, liquid_idle_fps: 15, liquid_deep_sleep: true, liquid_shadow: true, island_size: 100, island_offset: 0, oled_shift: false, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 9], page_order: [0,1,2,3,4,5,6,7,8], show_clock: true, show_battery: true, show_weather: true, clock_12h: false, clock_period: 0, clock_seconds: false, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wecom_notifications:false, feishu_notifications:false, dingtalk_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, system_notify: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, avoid_top_bar: true, top_bar_on_top: false, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, sit_remind: true, sit_minutes: 60, lunch_rest: true, lunch_start: 720, lunch_end: 810, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, weather_city: String::new(), weather_position: None, weather_saved: Vec::new(), render_compat: false, render_compat_reason: String::new(), open_anim: OpenAnim::default(), hover_delay_ms: 200 }
     }
 }
 
@@ -334,6 +434,19 @@ impl Settings {
                 "island_shape" => s.island_shape = IslandShape::parse(&v),
                 "dock" => s.dock = Dock::parse(&v),
                 "glass_blur" => s.glass_blur = v != "0",
+                "liquid_morph" => s.liquid_morph = v.parse::<f32>().unwrap_or(1.0).clamp(0.0, 3.0),
+                "liquid_prefer_dgpu" => s.liquid_prefer_dgpu = v != "0",
+                "liquid_refract_px" => s.liquid_refract_px = v.parse::<f32>().unwrap_or(48.0).clamp(0.0, 120.0),
+                "liquid_chroma_px" => s.liquid_chroma_px = v.parse::<f32>().unwrap_or(8.0).clamp(0.0, 30.0),
+                "liquid_spring" => s.liquid_spring = v.parse::<f32>().unwrap_or(1.0).clamp(0.2, 3.0),
+                "liquid_zeta" => s.liquid_zeta = v.parse::<f32>().unwrap_or(0.5).clamp(0.1, 1.0),
+                "liquid_idle_fps" => s.liquid_idle_fps = v.parse::<u8>().unwrap_or(15).clamp(1, 30),
+                "liquid_deep_sleep" => s.liquid_deep_sleep = v != "0",
+                "liquid_shadow" => s.liquid_shadow = v != "0",
+                "liquid_blur_px" => s.liquid_blur_px = v.parse::<f32>().unwrap_or(1.5).clamp(0.0, 4.0),
+                "liquid_band_px" => s.liquid_band_px = v.parse::<f32>().unwrap_or(87.0).clamp(10.0, 140.0),
+                "liquid_edge_w_px" => s.liquid_edge_w_px = v.parse::<f32>().unwrap_or(1.5).clamp(0.0, 4.0),
+                "liquid_edge_op" => s.liquid_edge_op = v.parse::<f32>().unwrap_or(0.90).clamp(0.0, 1.0),
                 "island_size" => s.island_size = island_size_value(v.parse::<u32>().unwrap_or(100)),
                 "island_offset" => s.island_offset = v.parse::<i32>().unwrap_or(0).clamp(-ISLAND_OFFSET_MAX, ISLAND_OFFSET_MAX),
                 "oled_shift" => s.oled_shift = v != "0",
@@ -415,6 +528,8 @@ impl Settings {
                 "weather_saved" => s.weather_saved=serde_json::from_str::<Vec<crate::weather::Position>>(&v).unwrap_or_default().into_iter().filter(|p|p.valid()).collect(),
                 "render_compat" => s.render_compat = v == "1",
                 "render_compat_reason" => s.render_compat_reason = v.chars().filter(|c| !c.is_control()).take(200).collect(),
+                "open_anim" => s.open_anim = OpenAnim::parse(&v),
+                "hover_delay_ms" => s.hover_delay_ms = v.parse::<u32>().unwrap_or(200).min(500),
                 _ => {}
             }
         }
@@ -436,6 +551,19 @@ impl Settings {
                 ("island_shape".into(),self.island_shape.key().into()),
                 ("dock".into(),self.dock.key().into()),
                 ("glass_blur".into(),(self.glass_blur as u8).to_string()),
+                ("liquid_morph".into(),format!("{:.2}",self.liquid_morph)),
+                ("liquid_prefer_dgpu".into(),if self.liquid_prefer_dgpu {"1"}else{"0"}.into()),
+                ("liquid_refract_px".into(),format!("{:.1}",self.liquid_refract_px)),
+                ("liquid_chroma_px".into(),format!("{:.1}",self.liquid_chroma_px)),
+                ("liquid_spring".into(),format!("{:.2}",self.liquid_spring)),
+                ("liquid_zeta".into(),format!("{:.2}",self.liquid_zeta)),
+                ("liquid_idle_fps".into(),self.liquid_idle_fps.to_string()),
+                ("liquid_deep_sleep".into(),if self.liquid_deep_sleep {"1"}else{"0"}.into()),
+                ("liquid_shadow".into(),if self.liquid_shadow {"1"}else{"0"}.into()),
+                ("liquid_blur_px".into(),format!("{:.1}",self.liquid_blur_px)),
+                ("liquid_band_px".into(),format!("{:.1}",self.liquid_band_px)),
+                ("liquid_edge_w_px".into(),format!("{:.1}",self.liquid_edge_w_px)),
+                ("liquid_edge_op".into(),format!("{:.2}",self.liquid_edge_op)),
                 ("island_size".into(),island_size_value(self.island_size).to_string()),
                 ("island_offset".into(),self.island_offset.clamp(-ISLAND_OFFSET_MAX,ISLAND_OFFSET_MAX).to_string()),
                 ("oled_shift".into(),(self.oled_shift as u8).to_string()),
@@ -499,6 +627,8 @@ impl Settings {
                 ("weather_saved".into(), serde_json::to_string(&self.weather_saved).unwrap()),
                 ("render_compat".into(), (self.render_compat as u8).to_string()),
                 ("render_compat_reason".into(), self.render_compat_reason.clone()),
+                ("open_anim".into(), self.open_anim.key().into()),
+                ("hover_delay_ms".into(), self.hover_delay_ms.to_string()),
             ],
         );
     }
