@@ -4,6 +4,7 @@ import 'dart:io' show Platform;
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
 import '../core/theme.dart';
@@ -38,6 +39,7 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
   // forward 鼠标转发仅 Windows/macOS 支持；Linux 不支持，启用穿透会导致岛体点不到，
   // 故 Linux 保持整窗交互（不穿透）。
   static final bool _supportsForward = Platform.isWindows || Platform.isMacOS;
+  static const MethodChannel _mouseChannel = MethodChannel('dynamicisland/mouse');
 
   // 展开目标尺寸（含肩部余量）。
   static const double _openW = DaozaiGeom.panelW + DaozaiGeom.flare * 2 + 24;
@@ -61,7 +63,16 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
         _ignoring = true;
         windowManager.setIgnoreMouseEvents(true, forward: true);
       }
+      if (Platform.isMacOS) {
+        _mouseChannel.setMethodCallHandler(_onNativeMouse);
+      }
     }
+  }
+
+  Future<void> _onNativeMouse(MethodCall call) async {
+    if (call.method != 'mouseLocal') return;
+    final a = call.arguments as List;
+    _handleLocalMove(Offset((a[0] as num).toDouble(), (a[1] as num).toDouble()));
   }
 
   void _onTick(Duration elapsed) {
@@ -119,6 +130,7 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
         if (t - _leaveSince >= DaozaiMotion.leaveDelay) {
           _open = false;
           _leaveSince = -1;
+          _hoverSince = -1;
           context.read<AppState>().setExpanded(false);
         }
       }
@@ -128,13 +140,11 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
   void _morph(double dt) {
     final want = _open;
     if (want) {
-      _leaveSince = -1;
       _w.tune(DaozaiMotion.openWk, DaozaiMotion.openWz);
       _h.tune(DaozaiMotion.openHk, DaozaiMotion.openHz);
       _w.target = _openW;
       _h.target = _openH;
     } else {
-      _hoverSince = -1;
       _w.tune(DaozaiMotion.closeK, DaozaiMotion.closeZ);
       _h.tune(DaozaiMotion.closeK, DaozaiMotion.closeZ);
       _w.target = DaozaiGeom.barW;
@@ -149,12 +159,12 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
     _inside = false;
   }
 
-  /// 岛体命中矩形（窗口局部坐标）：水平居中、顶部对齐，尺寸随展开进度变化。
+  /// 岛体命中矩形（窗口坐标）：水平居中、顶部 pillGap，尺寸随展开进度变化。
   Rect _islandRect() {
+    final windowW = MediaQuery.of(context).size.width;
     final w = _w.pos;
     final h = _h.pos;
-    final left = (_openW - w) / 2;
-    return Rect.fromLTWH(left, 0, w, h);
+    return Rect.fromLTWH((windowW - w) / 2, DaozaiGeom.pillGap, w, h);
   }
 
   /// 圆角近似命中：底部大圆角用 RRect 判定，不再让透明四角挡住桌面点击。
@@ -177,7 +187,13 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
   /// 穿透状态下 MouseRegion 不触发，故悬停展开也由此处的 _inside 驱动。
   void _onPointerMove(PointerEvent event) {
     if (!widget.floating) return;
-    final hit = _hitIsland(event.localPosition);
+    final windowW = MediaQuery.of(context).size.width;
+    _handleLocalMove(event.localPosition + Offset((windowW - _openW) / 2, DaozaiGeom.pillGap));
+  }
+
+  void _handleLocalMove(Offset local) {
+    if (!widget.floating) return;
+    final hit = _hitIsland(local);
     _inside = hit;
     // 只有需要动画/判定时才唤醒 Ticker，避免空闲时每次划过都启动一帧。
     if (hit || _open || context.read<AppState>().interactionLock) _ensureTicker();
@@ -193,6 +209,9 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
   @override
   void dispose() {
     _ticker?.dispose();
+    if (Platform.isMacOS) {
+      _mouseChannel.setMethodCallHandler(null);
+    }
     // 退出时恢复鼠标事件，避免残留整窗穿透状态。
     if (widget.floating && _supportsForward && _ignoring) {
       windowManager.setIgnoreMouseEvents(false);
@@ -289,6 +308,7 @@ class _IslandWidgetState extends State<IslandWidget> with SingleTickerProviderSt
         child: GestureDetector(
         onTap: () {
           if (widget.floating && !_open) {
+            _inside = true;
             _ensureTicker();
             setState(() => _open = true);
             context.read<AppState>().setExpanded(true);

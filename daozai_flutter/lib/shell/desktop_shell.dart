@@ -4,6 +4,7 @@
 //! 拖动：收起态按住药丸拖动窗口，位置持久化（重启恢复到上次位置）。
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
 import '../core/dialog_room.dart';
@@ -25,10 +26,11 @@ Future<void> setupDesktopWindow() async {
     // 保留任务栏/Dock 图标，用户可从 Dock 右键退出（不再 skipTaskbar）。
     skipTaskbar: false,
     titleBarStyle: TitleBarStyle.hidden,
+    windowButtonVisibility: false,
     alwaysOnTop: true,
   );
   await windowManager.waitUntilReadyToShow(opts, () async {
-    await windowManager.setAsFrameless();
+    await windowManager.setHasShadow(false);
     await windowManager.setBackgroundColor(Colors.transparent);
     await windowManager.setAlwaysOnTop(true);
     // 恢复上次拖动到的位置；首次启动默认顶部居中。
@@ -52,6 +54,13 @@ class DesktopShell extends StatelessWidget {
       title: 'DynamicIsland',
       debugShowCheckedModeBanner: false,
       theme: buildDaozaiTheme(),
+      locale: const Locale('zh'),
+      supportedLocales: const [Locale('zh'), Locale('en')],
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
       home: const _DesktopHome(),
     );
   }

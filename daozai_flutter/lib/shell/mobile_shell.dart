@@ -1,6 +1,7 @@
 //! 移动 App 外壳 —— Android（完整 App 形态）。
 //! 精简版：时钟 + 待办。天气/喝水/专注已移除。
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import '../core/theme.dart';
 import '../ui/island_widget.dart';
 
@@ -15,6 +16,13 @@ class MobileShell extends StatelessWidget {
       theme: buildDaozaiTheme().copyWith(
         scaffoldBackgroundColor: const Color.fromRGBO(12, 12, 14, 1),
       ),
+      locale: const Locale('zh'),
+      supportedLocales: const [Locale('zh'), Locale('en')],
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
       home: const _MobileHome(),
     );
   }

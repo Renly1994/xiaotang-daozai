@@ -38,6 +38,8 @@ Path pillOutline(double w, double h) {
     ..addRRect(RRect.fromRectAndRadius(Rect.fromLTWH(0, 0, w, h), Radius.circular(r)));
 }
 
+double islandBodyOffsetX(double canvasW, double bodyW) => (canvasW - bodyW) / 2;
+
 class IslandBodyPainter extends CustomPainter {
   final double w;
   final double h;
@@ -63,6 +65,8 @@ class IslandBodyPainter extends CustomPainter {
             DaozaiGeom.flareH * progress,
             DaozaiGeom.rad * progress.clamp(0.3, 1.0),
           );
+    canvas.save();
+    canvas.translate(islandBodyOffsetX(size.width, w), 0);
     // 柔和投影（多层叠加近似高斯，对应原版 pill_shadow / shape::shadow）。
     final shadowPaint = Paint()..color = Colors.black.withOpacity(0.10);
     canvas.save();
@@ -83,6 +87,7 @@ class IslandBodyPainter extends CustomPainter {
       ..strokeWidth = 1
       ..isAntiAlias = true;
     canvas.drawPath(path, rim);
+    canvas.restore();
   }
 
   @override

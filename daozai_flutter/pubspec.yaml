@@ -17,7 +17,10 @@ dependencies:
   # 本地持久化（待办 / 设置）
   shared_preferences: ^2.3.2
   # 日期格式化
-  intl: ^0.19.0
+  intl: ^0.20.0
+  # 系统控件中文文案（日期/时间选择器等）。
+  flutter_localizations:
+    sdk: flutter
   # 待办本地提醒：系统级定时通知（v19 起支持 Windows，全平台覆盖）。
   # 锁定 19.0.0：该版 zonedSchedule/initialize 用位置参数；20.x 改命名参数，升级需同步改代码。
   flutter_local_notifications: 19.0.0
