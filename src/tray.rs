@@ -37,6 +37,8 @@ pub const WM_TRAY: u32 = WM_APP + 9;
 pub const WM_TRAY_DUMP: u32 = WM_APP + 2;
 /// 在屏幕坐标 (wparam, lparam) 弹出菜单（隐藏桌面取证用）。
 pub const WM_TRAY_MENU: u32 = WM_APP + 3;
+/// Agent 通知：wparam 是固定信号 id（见 `agent_notice::wire_id`）。
+const WM_AGENT_NOTICE: u32 = WM_APP + 6;
 
 const TRAY_UID: u32 = 1;
 const CMD_EXIT: u32 = 1;
@@ -84,6 +86,7 @@ pub enum Event {
     TogglePet,
     OpenSettings,
     OpenCalendar,
+    AgentNotice(crate::agent_notice::Notice),
     ToggleMinimal,
     ToggleAutostart,
 }
@@ -324,6 +327,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     }
     if msg == WM_APP+4 {return LRESULT(ctx.tx.send(Event::OpenSettings).is_ok() as isize);}
     if msg == WM_APP+5 {return LRESULT(ctx.tx.send(Event::OpenCalendar).is_ok() as isize);}
+    if msg == WM_AGENT_NOTICE {
+        if let Some(notice) = crate::agent_notice::decode(wp.0) {
+            let _ = ctx.tx.send(Event::AgentNotice(notice));
+        }
+        return LRESULT(0);
+    }
     if msg == WM_TRAY_DUMP {
         if let Ok(menu) = popup_menu(ctx.state()) {
             dump_menu(hwnd, ctx, menu);
@@ -601,6 +610,24 @@ mod tests {
     }
 
     #[test]
+    fn agent_notice_tray_messages_are_fixed_and_ignore_unknown_ids() {
+        let tray=Tray::start(State::default()).unwrap();
+        for id in [0,7,usize::MAX,1,2,3,4,5,6] {
+            unsafe { PostMessageW(tray.hwnd(),WM_AGENT_NOTICE,WPARAM(id),LPARAM(0)).unwrap(); }
+        }
+        for (id,(provider,status)) in [
+            ("dsh","finished"),("dsh","approval"),("dsh","question"),
+            ("codex","finished"),("codex","approval"),("codex","question"),
+        ].into_iter().enumerate() {
+            assert_eq!(crate::agent_notice::wire_id(provider,status),Some(id+1));
+            assert_eq!(tray.events.recv_timeout(Duration::from_secs(2)).unwrap(),
+                Event::AgentNotice(crate::agent_notice::decode(id+1).unwrap()));
+        }
+        assert!(tray.events.try_recv().is_err());
+        assert_eq!(crate::agent_notice::wire_id("codex","unknown"),None);
+    }
+
+    #[test]
     fn menu_order_checks_and_separator() {
         for (state, want) in [
             (State { pet: false, minimal: false, autostart: false }, [false, false, false]),
@@ -669,3 +696,11 @@ pub fn activate_existing(calendar:bool)->bool {unsafe{
     let _=AllowSetForegroundWindow(tray_pid);
     request_existing_window(tray,calendar)
 }}
+
+pub fn post_agent_notice(id:usize) {
+    unsafe {
+        if let Ok(tray)=FindWindowW(w!("DaozaiTray"), PCWSTR::null()) {
+            let _=PostMessageW(tray, WM_AGENT_NOTICE, WPARAM(id), LPARAM(0));
+        }
+    }
+}

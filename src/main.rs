@@ -100,6 +100,10 @@ const MODULE_OFF:&str="该功能已在「页面管理」中关闭";
 impl Shell {
     /// 按模块开关启停后台服务：关闭的模块不保留任何线程，重新开启时从头对齐配置。
     fn reconcile_modules(&mut self,ctx:&egui::Context){
+        #[cfg(windows)]
+        self.app.agent_setup.update(&self.app.settings,ctx);
+        #[cfg(windows)]
+        for (p,text) in self.app.agent_cards.update(&self.app.settings,ctx){self.app.agent_finished(p,text);}
         let mail_on=self.app.module_on(app::MAIL_PAGE);
         if mail_on!=self.mail.is_some() {self.mail=mail_on.then(daozai::mail::Service::start);self.mail_sig=None;}
         let cal_on=self.app.module_on(app::CALENDAR_PAGE);
@@ -138,6 +142,17 @@ impl Shell {
 
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         diagnostics::graphics(cc);
+        // 会话导航通道：只监听 127.0.0.1 的 token 队列，供 DSH 前端插件精确切换会话。
+        // 起不来不影响主功能，跳转自动退回「把客户端带到前台」。
+        if let Some(nav)=daozai::dsh_nav::start(Some(&daozai::model::config_dir())) {
+            daozai::agent_jump::install_navigation(nav);
+            // 已接入过 DSH 的用户：把这次的 endpoint 刷进 kit，插件下次加载就能用。
+            // （端口通常是固定值，写入是 no-op；端口或 token 变了才真正改写。）
+            if let Ok(exe)=std::env::current_exe() {
+                let kit=daozai::model::config_dir().join("agent-notices");
+                if kit.is_dir() { let _=daozai::agent_notice::export(&kit,&exe); }
+            }
+        }
         let running_compat=cc.wgpu_render_state.is_some();
         diagnostics::startup("加载本地配置");
         let mut app = App::new(&cc.egui_ctx, Options::default());
@@ -245,6 +260,7 @@ impl Shell {
             match e {
                 Event::OpenSettings=>self.app.open_settings(),
                 Event::OpenCalendar=>self.app.open_calendar(None),
+                Event::AgentNotice(notice)=>self.app.receive_agent_notice(notice),
                 Event::TogglePet => {
                     self.app.set_pet(!self.app.settings.pet);
                     self.app.say(if self.app.settings.pet { "吉祥物已打开" } else { "吉祥物已关闭" });
@@ -357,6 +373,10 @@ impl eframe::App for Shell {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        { // 启动期追踪：只在前 3 帧写，避免刷日志。
+            static FRAMES_SEEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = FRAMES_SEEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         daozai::resources::FRAMES.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
         let frame_start=Instant::now();
         if self.resource_at.ready(Duration::from_secs(30)){
@@ -1045,6 +1065,18 @@ mod open_path_tests {
 }
 
 fn main() -> std::process::ExitCode {
+    #[cfg(windows)]
+    {
+        let mut args=std::env::args_os().skip(1);
+        if args.next().as_deref()==Some(std::ffi::OsStr::new("--agent-notice")) {
+            if let (Some(provider),Some(status),None)=(args.next(),args.next(),args.next()) {
+                if let Some(id)=provider.to_str().zip(status.to_str()).and_then(|(p,s)|daozai::agent_notice::wire_id(p,s)) {
+                    daozai::tray::post_agent_notice(id);
+                }
+            }
+            return std::process::ExitCode::SUCCESS;
+        }
+    }
     diagnostics::install();
     // 收集诊断：在单实例检查、创建窗口和初始化显卡之前处理，岛仔启动即崩溃、卡死时也能用。
     #[cfg(windows)]

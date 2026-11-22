@@ -8,6 +8,7 @@ use crate::anim::{self, lerp, smoothstep, Spring};
 use crate::bar_layout::{self as bar, Layout};
 use crate::calendar;
 use crate::glass;
+use crate::agent_ui;
 use crate::lyrics;
 use crate::mail;
 use crate::model;
@@ -49,7 +50,9 @@ pub const FLARE_H: f32 = 16.0; // 外翻收敛高度
 pub const RAD: f32 = 33.0; // 底部圆角
 pub const WIN_W: f32 = 640.0; // 窗口（透明画布）
 pub const CANVAS_W: f32 = WIN_W + 320.0; // 保留右侧通知及阴影的完整空间，原岛仍按 WIN_W 定位。
-pub const WIN_H: f32 = 270.0;
+/// 透明画布高度。普通形态只用顶部 270，Agent 审批/提问/结果卡需要更高的卡片：
+/// 画布一次性给到 520，由 `SetWindowRgn` 把不可见部分裁掉，命中区仍只覆盖岛体与卡片。
+pub const WIN_H: f32 = 520.0;
 /// 胶囊皮肤与屏幕顶边的间隙。
 pub const PILL_GAP: f32 = 6.0;
 
@@ -833,13 +836,20 @@ pub struct App {
     pub(crate) subpage:Option<usize>,
     pub(crate) task_dialog:Option<crate::extras::TaskDraft>,
     pub listener_status: String,
+    pub agent_setup: crate::agent_notice::Setup,
+    pub agent_cards: crate::agent_cards::Cards,
     pub(crate) notification_bell_until: f64,
     pub(crate) notification_bell_at: f64,
     pub(crate) notice: Option<Alert>,
+    /// 最近一次完成通知的正文：点常驻角标时，如果客户端本来就在最前台（切窗口没有可见变化），
+    /// 就在岛上直接打开结果层，保证「点一下一定有东西」。
+    pub(crate) last_done_body: String,
     pub(crate) hud_notice: Option<Alert>,
     hud_alpha: f32,
     notice_width: Spring,
     notice_details: bool,
+    /// 上一帧结果层是否打开：关闭结果时同步收起面板，避免留下一个空白岛。
+    result_was_active: bool,
     pub pending_messengers:Vec<Unread>,
     messenger_scroll: f32,
     pub(crate) alerts: std::collections::VecDeque<Alert>,
@@ -852,6 +862,8 @@ pub struct App {
     // 其它
     toast: Option<(String, f64)>,
     toast_below: bool,
+    /// 最近一次跳转结论：toast 只有 2.4 秒，详情卡/提示卡打开时需要常驻一行「为什么没跳成」。
+    jump_note: Option<(String, f64)>,
     last_input: f64,
     system_idle: Option<f64>,
     last_cursor: Option<Pos2>,
@@ -995,9 +1007,15 @@ impl App {
             music_artwork: None,
             forced_open_until:0.0, settings_open:false, settings_window:std::sync::Arc::new(std::sync::Mutex::new(crate::settings_window::State::load())), displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_tab:0, settings_category:0, messenger_statuses:Default::default(), notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
             listener_status: "尚未连接".into(),
-            notification_bell_until: 0.0, notification_bell_at: -10.0, notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, pending_messengers:Vec::new(), messenger_scroll:0.0, alerts: Default::default(), history: Default::default(), pending: vec![],
+            agent_setup: Default::default(),
+            agent_cards: {
+                let mut cards = crate::agent_cards::Cards::default();
+                cards.bind_ctx(ctx);
+                cards
+            },
+            notification_bell_until: 0.0, notification_bell_at: -10.0, last_done_body: String::new(), notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, result_was_active:false, pending_messengers:Vec::new(), messenger_scroll:0.0, alerts: Default::default(), history: Default::default(), pending: vec![],
             todo_first: 0, todo_choosing: false, pet: Default::default(), last_drink: None,
-            toast: None, toast_below: false,
+            toast: None, toast_below: false, jump_note: None,
             last_input: 0.0, system_idle: None,
             last_cursor: None,
             pet_a: 0.0,
@@ -1032,6 +1050,22 @@ impl App {
     pub fn say(&mut self, msg: impl Into<String>) {
         self.toast = Some((msg.into(), self.t));
         self.toast_below = false;
+    }
+
+    /// 测试观察用：最近一次跳转结论（生产只在卡片里绘制）。
+    #[cfg(test)]
+    pub(crate) fn jump_note_text(&self) -> Option<&str> { self.jump_note.as_ref().map(|(text,_)|text.as_str()) }
+    /// 测试观察用：岛体下方短提示（say）的文案。
+    #[cfg(test)]
+    pub(crate) fn toast_text(&self) -> Option<&str> { self.toast.as_ref().map(|(text,_)|text.as_str()) }
+    /// 跳转结论：详细卡/提示卡打开时在岛体下方常驻一行。
+    /// 短暂 toast 在卡片占满岛体时看不到，而「已在前台/切换失败」恰恰是用户最需要看到的结论。
+    pub(crate) fn jump_feedback(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        if message.trim().is_empty() {
+            return;
+        }
+        self.jump_note = Some((message, self.t));
     }
 
     pub fn messenger_unavailable(&mut self, message: impl Into<String>) {
@@ -1528,7 +1562,11 @@ impl App {
             self.open_settings();
             return;
         }
-        self.notice=None;
+        // 切页只收起普通通知：待审批/待回答的请求卡必须留着。
+        // 请求仍挂在宿主里等答复，切个页就把提示卡撤掉，用户会以为没事了、实际一直卡着。
+        if !self.notice.as_ref().is_some_and(|a|matches!(a.source,crate::extras::AlertSource::AgentCard(..))){
+            self.notice=None;
+        }
         self.go(page,1.0);
         self.open=true; self.forced_open_until=self.t+4.0;
         self.w.tune(OPEN_W.0,OPEN_W.1);self.h.tune(OPEN_H.0,OPEN_H.1);
@@ -1635,7 +1673,7 @@ impl App {
     }
 
     pub fn is_editing(&self) -> bool {
-        self.adding || self.editing.is_some() || self.todo_choosing || self.task_dialog.is_some() || self.calendar.draft.is_some() || self.settings_editing
+        self.adding || self.editing.is_some() || self.todo_choosing || self.task_dialog.is_some() || self.calendar.draft.is_some() || self.settings_editing || self.agent_cards.editing()
     }
 
     pub fn filter_todo_input(&mut self,input:&mut egui::RawInput) {
@@ -1711,7 +1749,7 @@ impl App {
         self.settings.island_lyrics && self.settings.visible_pages[0] && self.media.is_music() && self.media.playing
             && !self.browser_minimal_active
     }
-    pub(crate) fn compact_notices(&self)->bool {self.island_lyrics_active()&&!self.open&&!self.notice.as_ref().is_some_and(|a|a.meeting.is_some()||self.settings.notification_preview&&matches!(a.source,crate::extras::AlertSource::External(_)))}
+    pub(crate) fn compact_notices(&self)->bool {self.island_lyrics_active()&&!self.open&&!self.notice.as_ref().is_some_and(|a|a.meeting.is_some()||matches!(a.source,crate::extras::AlertSource::AgentCard(..))||self.settings.agent.expanded&&matches!(a.source,crate::extras::AlertSource::AgentDone(_))||self.settings.notification_preview&&matches!(a.source,crate::extras::AlertSource::External(_)))}
 
     /// 换句、分段和展开高亮共用时间调整；正数延后，负数提前。
     pub(crate) fn lyric_position(&self)->f32 {(self.media.position-self.settings.lyric_delay_ms as f64/1000.0)as f32}
@@ -1768,7 +1806,26 @@ impl App {
     pub(crate) fn pet_space(&self)->f32 {if self.pet_enabled(){44.0}else{0.0}}
     fn lyric_focus_space(&self)->f32 {if self.pomo.running{crate::focus_bar::LYRIC_WIDTH+10.0}else{0.0}}
     fn lyric_bar_width(&self)->f32 {LYRIC_BAR_W+if self.pet_enabled(){48.0}else{0.0}+self.lyric_focus_space()}
+    pub(crate) fn agent_detail_active(&self)->bool {
+        self.open && self.notice_details
+            && self.agent_cards.active().is_some_and(|(id,_,_,_)|self.agent_cards.details_open(id))
+    }
+    /// 「查看回复」打开的结果层：和详情一样占用展开面板。
+    pub(crate) fn result_active(&self)->bool {
+        self.open && self.agent_cards.result_open()
+    }
+    /// 面板是否正被 Agent 卡片占用（决定宽度、高度与是否画页面内容）。
+    pub(crate) fn agent_panel_active(&self)->bool {
+        self.agent_detail_active() || self.result_active()
+    }
     fn notice_size(&self,a:&Alert)->(f32,f32) {
+        if let crate::extras::AlertSource::AgentCard(_,id)=&a.source {
+            return self.agent_cards.detail_size(id);
+        }
+        if let crate::extras::AlertSource::AgentDone(provider)=a.source {
+            // 完成卡高度必须实测：正文可能是两三行，固定 112 会让文字压到按钮上。
+            return self.agent_cards.done_size(provider,&a.body,!self.settings.agent.expanded);
+        }
         let (width,height)=if a.meeting.is_some(){(360.0,136.0)}else if a.source==crate::extras::AlertSource::Internal && a.title=="蓝牙设备"{(HUD_W,48.0)}else if a.is_hud(){(HUD_W,38.0)}else{(334.0,44.0)};
         (width,height)
     }
@@ -1778,7 +1835,7 @@ impl App {
     pub fn set_minimal(&mut self,enabled:bool) {
         self.settings.minimal=enabled;if enabled {self.settings.pet=false;}self.settings.save();
     }
-    fn base_size(&self) -> (f32, f32) {
+    pub(crate) fn base_size(&self) -> (f32, f32) {
         if !self.compact_notices()&&!self.open {
             if let Some(a)=&self.notice {let (width,height)=self.notice_size(a);return (width+self.pet_space(),height);}
         }
@@ -1811,7 +1868,13 @@ impl App {
     }
 
     pub(crate) fn expanded_height(&self)->f32 {
-        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==WEATHER_PAGE {WEATHER_H}else if self.page==6{176.0}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
+        if self.result_active() {
+            self.agent_cards.result_size().1.max(PH).min(WIN_H-8.0)
+        } else if self.agent_detail_active() {
+            self.agent_cards.active()
+                .map(|(id,_,_,_)|self.agent_cards.detail_size(id).1.max(PH).min(WIN_H-8.0))
+                .unwrap_or(PH)
+        }else if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==WEATHER_PAGE {WEATHER_H}else if self.page==6{176.0}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
     }
 
     // ---------------------------------------------------------------
@@ -1859,15 +1922,47 @@ impl App {
 
         self.tick(env, dt, elapsed);
         self.sync_device(env);
+        if self.agent_cards.hovering || self.agent_cards.result.is_some() || self.fullscreen_hidden || self.open {
+            if let Some(a)=self.notice.as_mut().filter(|a|matches!(a.source,crate::extras::AlertSource::AgentDone(_))){a.at+=f64::from(elapsed);}
+        }
         self.tick_alerts();
+        // 跳转失败的原因已经常驻在岛体下方，同文案的 toast 不必再叠一层（extras 的 jump_error 通道）。
+        let duplicate_jump_toast=self.jump_note.as_ref().zip(self.toast.as_ref())
+            .is_some_and(|((note,_),(text,_))|note==text);
+        if duplicate_jump_toast {self.toast=None;}
+        self.agent_cards.hovering=false;
         let hud_active=self.notice.clone();
-        if hud_active.as_ref().map(|a|&a.title)!=self.hud_notice.as_ref().map(|a|&a.title)||hud_active.is_none(){self.notice_details=false;}
+        let hud_changed=match (&hud_active,&self.hud_notice) {
+            (Some(current),Some(previous))=>current.title!=previous.title||current.body!=previous.body||current.source!=previous.source,
+            (None,Some(_))|(Some(_),None)=>true,
+            (None,None)=>false,
+        };
+        if hud_changed && !self.agent_panel_active() {self.notice_details=false;}
         if let Some(a)=&hud_active {self.hud_notice=Some(a.clone());}
         self.hud_alpha=anim::approach(self.hud_alpha,if hud_active.is_some(){1.0}else{0.0},if hud_active.is_some(){16.0}else{8.0},dt);
         if hud_active.is_none() && self.hud_alpha<0.003 {self.hud_notice=None;}
         let notice_target=if !self.notice.as_ref().is_some_and(|a|a.messenger().is_some()) && self.compact_notices()&&(self.notice.is_some()||self.t<self.notification_bell_until) {44.0}else{0.0};
         self.notice_width.target=notice_target;
-        if self.compact_notices(){self.notice_width.step(dt);}else{self.notice_width.snap(0.0);self.notice_details=false;}
+        let agent_details=self.agent_panel_active();
+        // 卡片自己收起（Action::Collapse）或被处理掉后立刻回到收起态提示卡，
+        // 否则要等 forced_open 到期，中间会露出一个没有内容的空面板。
+        if self.open && self.notice_details && !agent_details && self.notice.is_some() {
+            self.open=false;
+            self.notice_details=false;
+            self.forced_open_until=0.0;
+        }
+        if self.result_was_active && !self.result_active() {
+            // 「查看回复」关闭后立即收起面板；否则会留下一个没有内容的空岛。
+            self.open=false;
+            self.forced_open_until=0.0;
+        }
+        self.result_was_active=self.result_active();
+        if self.compact_notices(){
+            self.notice_width.step(dt);
+        }else{
+            self.notice_width.snap(0.0);
+            if !agent_details {self.notice_details=false;}
+        }
         self.update_media(env,&ctx);
         let bell=self.t<self.notification_bell_until&&!self.compact_notices();
         self.resident_power=(env.battery,env.charging);
@@ -1943,10 +2038,25 @@ impl App {
         if self.music_volume_open && ctx.input_mut(|i|i.consume_key(egui::Modifiers::NONE,egui::Key::Escape)) {
             self.music_volume_open=false;
         }
+        // Esc 先处理卡片：审批/提问详情与结果层打开时，Esc = 收起详情（不交回请求），
+        // 与参考项目一致；否则用户按 Esc 只会把岛体收起来，卡片还挂在展开态。
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.agent_panel_active() {
+            if self.result_active() {
+                self.agent_cards.close_result();
+            } else if let Some(id)=self.agent_cards.active().map(|(id,_,_,_)|id.to_owned()) {
+                if self.agent_cards.details_open(&id) {
+                    // 丢掉 details 后由面板收口逻辑（open/notice_details 复位）接管，
+                    // 与点「收起」走同一条路径：先回到收起态提示卡，再随鼠标离开收起。
+                    self.agent_cards.close_detail(&id);
+                }
+            }
+        }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.is_editing() {
             self.cancel_edit();
         }
-        if (!self.is_editing() || self.todo_choosing) && page_hover && self.open && self.reveal > 0.95 {
+        // 审批详情/提问/结果层占用面板时，滚轮和左右方向键要留给卡片正文自己滚，
+        // 不能被“滚轮翻页”吞掉（否则结果层里滚一下就翻到下一张岛页，正文永远滚不动）。
+        if (!self.is_editing() || self.todo_choosing) && !self.agent_panel_active() && page_hover && self.open && self.reveal > 0.95 {
             let (scroll, left, right, esc) = ctx.input(|i| (i.raw_scroll_delta.y, i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight), i.key_pressed(egui::Key::Escape)));
             if esc { self.hover_lock = true; }
             if (left || right) && !self.todo_choosing {
@@ -2074,7 +2184,22 @@ impl App {
         let banner=!self.compact_notices()&&self.notice.is_some()&&!self.open;
         let restoring_lyrics=!self.open&&self.notice.is_none()&&self.island_lyrics_active()&&self.hud_notice.as_ref().is_some_and(|a|a.meeting.is_some()||a.source!=crate::extras::AlertSource::Internal);
         let fading_hud=!self.compact_notices()&&!self.open&&self.hud_notice.as_ref().is_some_and(|a|a.is_hud())&&(banner||self.hud_alpha>0.003);
-        if fading_hud {
+        if agent_details {
+            if self.result_active() {
+                // 「查看回复」：和详情共用展开面板，卡片宽度跟随面板。
+                let detail_width=agent_ui::CARD_W.min(panel.width());
+                let detail_origin=panel.min+Vec2::new((panel.width()-detail_width).max(0.0)/2.0,0.0);
+                let action=self.agent_cards.draw_result(&Card::new(ui,detail_origin,panel.intersect(ui.max_rect())));
+                // 结果层的「关闭」是明确的一次性收起：背后的完成卡要一起收掉，
+                // 否则用户会先退回「本轮已结束」卡、还得再点一次，白白多一步。
+                // Esc 与点卡片外仍只关这一层（既有不变量：回到完成卡，不交回请求）。
+                if action==Some(agent_ui::Action::Dismiss) { self.dismiss_completion_card(); }
+            }else if let Some(id)=self.agent_cards.active().map(|(id,_,_,_)|id.to_owned()) {
+                let detail_width=agent_ui::CARD_W.min(panel.width());
+                let detail_origin=panel.min+Vec2::new((panel.width()-detail_width).max(0.0)/2.0,0.0);
+                self.agent_cards.draw_details(&Card::new(ui,detail_origin,panel.intersect(ui.max_rect())),&id);
+            }
+        }else if fading_hud {
             let from=self.resident.target.width;let to=HUD_W+self.pet_space();
             let width_progress=if (to-from).abs()<1.0 {if banner{1.0}else{0.0}}else{((self.w.pos-from)/(to-from)).clamp(0.0,1.0)};
             let (opacity,header_opacity)=if banner {(self.hud_alpha*smoothstep(0.45,0.85,width_progress),1.0-smoothstep(0.05,0.40,width_progress))}
@@ -2095,12 +2220,29 @@ impl App {
             if let Some(a)=self.hud_notice.clone() {
                 let opacity=self.hud_alpha*smoothstep(0.45,0.95,self.notice_width.pos/44.0);
                 let c=c.faded(opacity);let c=if self.notice.is_none()||opacity<0.85 {c.ghost()}else{c};
-                if a.source!=crate::extras::AlertSource::Internal {
+                if let Some(provider)=a.agent_provider() {
+                    crate::extras::agent_icon(&c,18.0,15.0,22.0,provider);
+                    if env.cursor.is_some_and(|p|rect.contains(p)){self.agent_cards.hovering=true;}
+                }else if a.source!=crate::extras::AlertSource::Internal {
                     paint::bell(&c.scaled(18.0,15.0,0.85),18.0,15.0,theme::WHITE,paint::bell_swing(self.t-a.at));
                     c.circle(22.0,10.5,2.0,Color32::from_rgb(255,72,72));
                 }else{crate::extras::notice_badge(&c,18.0,15.0,&a);}
                 let button=crate::quota_ui::bar_tooltip(c.hit(0.0,0.0,36.0,BAR_H,"notice-badge"),format!("{}\n{}",a.title,a.body));
-                if button.clicked(){if let Some(kind)=a.health(){self.confirm_health_reminder(kind);}else{self.notice_details=!self.notice_details;}}
+                if button.clicked(){
+                    if let Some(kind)=a.health(){
+                        self.confirm_health_reminder(kind);
+                    }else if let crate::extras::AlertSource::AgentCard(_,id)=&a.source {
+                        if self.notice_details {
+                            self.agent_cards.close_detail(id);
+                            self.notice_details=false;
+                        }else{
+                            self.agent_cards.detail(id);
+                            self.notice_details=true;
+                        }
+                    }else{
+                        self.notice_details=!self.notice_details;
+                    }
+                }
             }else if self.t<self.notification_bell_until {
                 paint::bell(&c.scaled(20.0,14.0,1.2),20.0,14.0,theme::WHITE,paint::bell_swing(self.t-self.notification_bell_at));
                 c.circle(24.0,9.5,2.0,Color32::from_rgb(255,72,72));
@@ -2120,7 +2262,7 @@ impl App {
             }
             keep_colors.push((from,crate::skin_paint::shape_count(&ctx,layer)));
         }
-        let notice_details=self.notice_details_rect(cx,top);
+        let notice_details=(!agent_details).then(||self.notice_details_rect(cx,top)).flatten();
         if let Some(rect)=notice_details {
             let radius=if self.hud_notice.as_ref().is_some_and(|a|a.meeting.is_some()){14.0}else{10.0};
             let from=crate::skin_paint::shape_count(&ctx,layer);
@@ -2130,8 +2272,32 @@ impl App {
                 painter.rect_stroke(rect,radius,egui::Stroke::new(1.0_f32,self.glass_rim()),egui::StrokeKind::Inside);
             }
             keep_colors.push((from,crate::skin_paint::shape_count(&ctx,layer)));
-            self.draw_notice(&Card::new(ui,rect.min,rect.intersect(ui.max_rect())),rect,&self.hud_notice.clone().unwrap(),&mut cmds);
-            if ctx.input(|i|i.pointer.any_pressed()&&i.pointer.interact_pos().is_some_and(|p|!rect.contains(p)&&!notice_rect.is_some_and(|r|r.contains(p)))){self.notice_details=false;}
+            let detail_card=Card::new(ui,rect.min,rect.intersect(ui.max_rect()));
+            let detail_notice=self.hud_notice.clone().unwrap();
+            if let crate::extras::AlertSource::AgentCard(_,id)=&detail_notice.source {
+                if self.agent_cards.details_open(id) {
+                    self.agent_cards.draw_details(&detail_card,id);
+                } else {
+                    self.draw_notice(&detail_card,rect,&detail_notice,&mut cmds);
+                }
+            } else {
+                self.draw_notice(&detail_card,rect,&detail_notice,&mut cmds);
+            }
+            if ctx.input(|i|i.pointer.any_pressed()&&i.pointer.interact_pos().is_some_and(|p|!rect.contains(p)&&!notice_rect.is_some_and(|r|r.contains(p)))){
+                if let crate::extras::AlertSource::AgentCard(_,id)=&detail_notice.source {self.agent_cards.close_detail(id);}
+                self.notice_details=false;
+            }
+        }
+        if agent_details {
+            let outside=ctx.input(|i|i.pointer.any_pressed()&&i.pointer.interact_pos().is_some_and(|p|!panel.contains(p)));
+            if outside {
+                if self.result_active() {
+                    self.agent_cards.close_result();
+                } else if let Some(id)=self.agent_cards.active().map(|(id,_,_,_)|id.to_owned()) {
+                    self.agent_cards.close_detail(&id);
+                    self.notice_details=false;
+                }
+            }
         }
         let pet_alpha=self.pet_a*(1.0-smoothstep(0.0,0.3,pc));
         if pet_alpha>0.004 && !minimal_pill {
@@ -2142,21 +2308,35 @@ impl App {
         }
         let previous_scroll=self.content_scroll.take();
         let mut page_transition=false;
-        if reveal > 0.004 && !banner && !restoring_lyrics {
+        if reveal > 0.004 && !banner && !restoring_lyrics && !agent_details {
             let c = base.shifted(0.0, (1.0 - reveal) * -5.0).faded(reveal);
             let c = if reveal < 0.6 { c.ghost() } else { c };
             if self.calendar.draft.is_some(){self.draw_calendar_editor(&c);}else if self.task_dialog.is_some(){self.draw_task_editor(&c);}else{page_transition=self.panel_body(&c, env, &mut cmds);}
             if !self.toast_below {self.toast_layer(&c,106.0);}
         }
         // 岛下的确认提示使用独立裁剪区域，收起时跟随岛体下沿。
-        let floating_toast=if self.toast_below && self.toast.is_some() {
-            // 侧边停靠：提示出现在胶囊正下方，靠边时向内挪，保证完整显示。
-            let toast_origin=if side {
-                let center=if dock==model::Dock::Left {panel.center().x.max(win.left()+90.0)} else {panel.center().x.min(win.right()-90.0)};
-                Pos2::new(center-PW/2.0,panel.top())
-            } else {origin};
-            self.toast_layer(&Card::new(ui,toast_origin,win),h+8.0)
+        // 详情卡/提示卡占满岛体时，内容层的 toast 不会画（见上面的 toast_layer 调用条件），
+        // 跳转失败或「已在前台」的提示就会整条消失。改成画在岛体下方，保证一定有反馈。
+        // 侧边停靠：提示出现在胶囊正下方，靠边时向内挪，保证完整显示。
+        let toast_origin=if side {
+            let center=if dock==model::Dock::Left {panel.center().x.max(win.left()+90.0)} else {panel.center().x.min(win.right()-90.0)};
+            Pos2::new(center-PW/2.0,panel.top())
+        } else {origin};
+        // 岛体很高（详情卡接近窗口上限）时下方放不下提示：toast 压到面板底部，
+        // 跳转结常驻提示则放进面板内、底部按钮行的上方，绝不覆盖「仅允许这一次/拒绝/回客户端」。
+        let stacked_under=side || h+8.0+64.0<=WIN_H;
+        let toast_y=if stacked_under {h+8.0} else {(h-34.0).max(44.0)};
+        let note_y=stacked_under.then_some(h+38.0);
+        let floating_toast=if (self.toast_below || agent_details || banner) && self.toast.is_some() {
+            self.toast_layer(&Card::new(ui,toast_origin,win),toast_y)
         }else{None};
+        // 跳转结常常驻提示：toast 只有 2.4 秒，失败原因和「已在前台」必须一直看得到。
+        let jump_note=if (agent_details || banner) && self.jump_note.is_some() {
+            self.jump_note_layer(&Card::new(ui,toast_origin,win),note_y)
+        } else {
+            if !agent_details && !banner {self.jump_note=None;}
+            None
+        };
         if (self.adding||self.editing.is_some()) && reveal > 0.9 && self.page == 4 && self.page_e() > 0.25 {
             self.input_field(ui, origin, &mut cmds);
         }
@@ -2220,6 +2400,7 @@ impl App {
                 shapes.push(GlassShape::Round(rel(r),radius));
             }
             if let Some(r)=floating_toast {shapes.push(GlassShape::Round(rel(r),11.0));}
+            if let Some(r)=jump_note {shapes.push(GlassShape::Round(rel(r),11.0));}
             shapes.extend(tooltips.iter().map(|r|GlassShape::Round(rel(*r),6.0)));
             shapes
         });
@@ -2273,7 +2454,7 @@ impl App {
             });
         }
         FrameOut {
-            region: rel(floating_toast.into_iter().chain(self.shelf_menu_rect.map(|r|r.union(r + ctx.style().visuals.popup_shadow.margin()).expand(1.0 / ctx.pixels_per_point()))).fold(region,Rect::union).intersect(ui.max_rect())),
+            region: rel(floating_toast.into_iter().chain(jump_note).chain(self.shelf_menu_rect.map(|r|r.union(r + ctx.style().visuals.popup_shadow.margin()).expand(1.0 / ctx.pixels_per_point()))).fold(region,Rect::union).intersect(ui.max_rect())),
             glass: glass_region,
             hit: rel(next_hit),
             page_scroll_area:self.page_scroll_area.map(rel),
@@ -2340,7 +2521,53 @@ impl App {
     fn unread_slot(&self,height:f32)->f32 {
         if self.unread_count()>=3 {(height-4.0)/3.0} else {UNREAD_SLOT}
     }
-    fn unread_count(&self)->usize {self.pending_messengers.len()+self.health_badges().len()}
+    fn unread_count(&self)->usize {self.pending_messengers.len()+self.health_badges().len()+self.agent_badges().len()}
+    /// 岛体侧边的 Agent 常驻提醒。
+    ///
+    /// 只收「已完成待查看」这一类：审批/提问在队列里时本来就有常驻提示卡（duration=∞，
+    /// 掉不下来），不需要再叠一个角标；而完成通知的冒泡只停几秒，消失后用户就再也
+    /// 看不到「刚才那轮跑完了」，这才是需要像喝水/久坐一样常驻提醒的场景。
+    pub(crate) fn agent_badges(&self)->Vec<crate::agent_cards::Badge>{
+        if !self.settings.notifications || !self.settings.agent.completion {return Vec::new();}
+        let showing=self.notice.as_ref().map(|a|&a.source);
+        self.agent_cards.badges().into_iter().filter(|b|{
+            b.kind==crate::agent_cards::BadgeKind::Done
+                && b.provider.enabled(&self.settings)
+                // 完成卡自己还在显示时不重复挂角标。
+                && !matches!(showing,Some(crate::extras::AlertSource::AgentDone(p)) if *p==b.provider)
+        }).collect()
+    }
+    /// 点常驻角标：待审批/待回答直接展开详情卡；已完成则回原会话并清掉该提醒。
+    pub(crate) fn open_agent_badge(&mut self,badge:&crate::agent_cards::Badge){
+        match badge.kind {
+            crate::agent_cards::BadgeKind::Approval|crate::agent_cards::BadgeKind::Question=>{
+                self.agent_cards.detail(&badge.id);
+                self.open_notice_details();
+            }
+            crate::agent_cards::BadgeKind::Done=>{
+                let Some(target)=badge.jump.as_ref() else{
+                    self.say("没有可跳回的会话：请回到客户端查看本轮结果");
+                    return;
+                };
+                let outcome=crate::agent_jump::open(target);
+                let already_front=matches!(outcome,crate::agent_jump::JumpOutcome::AlreadyFront{..});
+                // 角标场景下多半没有卡片/提示行，结论必须走岛体下方的短提示，否则用户看到的就是「点了一下什么都没发生」。
+                self.say(outcome.message());
+                if already_front && self.settings.agent.content>0 && !self.last_done_body.is_empty()
+                    && self.last_done_body!=crate::agent_notice::Status::Finished.label()
+                {
+                    // 客户端本来就在最前台：再切窗口没有任何可见变化，改为在岛上打开结果层，
+                    // 让「点角标」至少能直接看到这一轮的回复内容。
+                    let provider=badge.provider;
+                    let body=self.last_done_body.clone();
+                    self.agent_cards.open_result(provider,body);
+                    self.open_agent_panel();
+                }
+                // 切不过去时保留角标：提醒还在，用户可以重试；切成功才清。
+                if outcome.ok() {self.agent_cards.done_seen();}
+            }
+        }
+    }
     /// 收起时叠放的来源图标，每个客户端各占一个。
     fn unread_sources(&self)->Vec<Messenger>{
         let mut sources=Vec::new();
@@ -2349,11 +2576,13 @@ impl App {
     }
     /// 收起时叠放区沿胶囊方向的长度。
     fn unread_stack_len(&self,horizontal:bool)->f32 {
-        let icons=(self.unread_sources().len()+self.health_badges().len()) as f32;
+        let icons=(self.unread_sources().len()+self.health_badges().len()+self.agent_badges().len()) as f32;
         32.0+unread_step(horizontal)*(icons-1.0)
     }
 
     fn messenger_badge_rect(&self,win:Rect,panel:Rect)->Option<Rect>{
+        // 审批/提问详情展开时只显示卡片内容：未读胶囊会把岛体形状拉成两截。
+        if self.agent_detail_active() {return None;}
         if self.unread_count()==0 || self.browser_minimal_active && !self.open {return None;}
         // 完整横幅已包含该来源图标。歌词模式和横幅收起后使用常驻入口。
         if !self.open && !self.compact_notices() && self.pending_messengers.len()==1 && self.health_badges().is_empty()
@@ -2429,6 +2658,18 @@ impl App {
             let button=crate::quota_ui::bar_tooltip(inner.hit(0.0,cy-slot/2.0,UNREAD_W,slot,kind.id().to_string()),format!("{} · 点击确认，重新计时",kind.label()));
             if button.clicked(){self.confirm_health_reminder(kind);}
         }
+        let badges=self.agent_badges();
+        for (i,badge) in badges.iter().enumerate() {
+            let cy=2.0+slot*((self.pending_messengers.len()+self.health_badges().len()+i) as f32+0.5)-self.messenger_scroll;
+            if cy< -slot || cy>height+slot {continue;}
+            crate::extras::agent_icon(&inner.scaled(x,cy,0.72),x,cy,22.0,badge.provider);
+            inner.circle(x+10.0,cy-9.0,2.6,Color32::from_rgb(255,59,48));
+            let tip=format!("{} · {} · 点击处理",badge.provider.label(),badge.kind.label());
+            let button=inner.hit(0.0,cy-slot/2.0,UNREAD_W,slot,"agent-badge").on_hover_text(tip.clone());
+            // UI 地图记录与命中区一致的矩形（胶囊里整条槽都能点）。
+            crate::ui_map::node("badge.agent", inner.rect(0.0,cy-slot/2.0,UNREAD_W,slot), &tip, true);
+            if button.clicked(){self.open_agent_badge(badge);}
+        }
         if max_scroll>0.0 {
             // 还有没露出的图标：上下边缘各一条淡淡的指示。
             let ink=paint::alpha(theme::WHITE,0.35);
@@ -2441,8 +2682,9 @@ impl App {
     fn draw_unread_stack(&mut self,c:&Card,horizontal:bool,cmds:&mut Vec<Cmd>){
         let sources=self.unread_sources();
         let health=self.health_badges();
+        let badges=self.agent_badges();
         let count=self.pending_messengers.len();
-        let icons=sources.len()+health.len();
+        let icons=sources.len()+health.len()+badges.len();
         let step=unread_step(horizontal);
         let at=|k:usize|if horizontal {(16.0+step*k as f32,14.0)}else{(16.0,14.0+step*k as f32)};
         for k in 0..sources.len() {
@@ -2451,6 +2693,7 @@ impl App {
             crate::extras::messenger_icon(&c.scaled(x,y,scale),x,y,sources[k]);
         }
         for (i,kind) in health.iter().enumerate(){let (x,y)=at(sources.len()+i);kind.icon(c,x,y,0.7);}
+        for (i,badge) in badges.iter().enumerate(){let (x,y)=at(sources.len()+health.len()+i);crate::extras::agent_icon(c,x,y,20.0,badge.provider);}
         // 每个来源图标右上角一个小红点，不显示数字。
         for k in 0..icons {let (x,y)=at(k);c.circle(x+8.0,y-7.0,2.6,Color32::from_rgb(255,59,48));}
         let length=self.unread_stack_len(horizontal);
@@ -2464,13 +2707,26 @@ impl App {
             let button=c.hit(0.0,0.0,w,h,"messenger-stack").on_hover_text(format!("{count} 条未读 · 展开挑选"));
             if button.clicked(){self.reveal_unread();}
         }
-        for (i,kind) in health.into_iter().enumerate() {
+        for (i,kind) in health.iter().enumerate() {
             let k=sources.len()+i;
             let (x,y)=at(k);
             let start=if k==0{0.0}else{(if horizontal{x}else{y})-step/2.0};
             let end=if k+1==icons{length}else{(if horizontal{x}else{y})+step/2.0};
             let button=if horizontal{c.hit(start,0.0,end-start,BAR_H,kind.id().to_string())}else{c.hit(0.0,start,32.0,end-start,kind.id().to_string())};
-            if crate::quota_ui::bar_tooltip(button,format!("{} · 点击确认，重新计时",kind.label())).clicked(){self.confirm_health_reminder(kind);}
+            if crate::quota_ui::bar_tooltip(button,format!("{} · 点击确认，重新计时",kind.label())).clicked(){self.confirm_health_reminder(*kind);}
+        }
+        // Agent 常驻角标：放在微信/喝水图标之后，红点表示还有没处理的事。
+        for (i,badge) in badges.iter().enumerate() {
+            let k=sources.len()+health.len()+i;
+            let (x,y)=if horizontal {(16.0+step*k as f32,14.0)}else{(16.0,14.0+step*k as f32)};
+            crate::extras::agent_icon(c,x,y,20.0,badge.provider);
+            c.circle(x+8.0,y-7.0,2.6,Color32::from_rgb(255,59,48));
+            let tip=format!("{} · {} · 点击处理",badge.provider.label(),badge.kind.label());
+            let button=if horizontal{c.hit(x-step/2.0,0.0,step,BAR_H,"agent-badge")}else{c.hit(0.0,y-step/2.0,32.0,step,"agent-badge")};
+            // UI 地图记录与命中区完全一致的矩形，E2E 直接点这个矩形中心就能触发。
+            let (hx,hy,hw,hh)=if horizontal {(x-step/2.0,0.0,step,BAR_H)}else{(0.0,y-step/2.0,32.0,step)};
+            crate::ui_map::node("badge.agent", c.rect(hx,hy,hw,hh), &tip, true);
+            if crate::quota_ui::bar_tooltip(button,tip).clicked(){self.open_agent_badge(badge);}
         }
     }
     /// 展开面板，让旁边的未读胶囊露出来。
@@ -2487,12 +2743,44 @@ impl App {
     }
     fn notice_details_rect(&self,cx:f32,top:f32)->Option<Rect>{
         let a=self.hud_notice.as_ref().filter(|_|self.notice_details&&self.notice.is_some())?;
+        if matches!(a.source,crate::extras::AlertSource::AgentCard(..)) {return None;}
         let badge=self.notice_rect(cx,top)?;let (width,height)=self.notice_size(a);
         let mut x=badge.left();
         // 岛体靠近屏幕右缘时，详情卡片向左展开，始终完整留在屏幕内。
         if let Some(screen)=self.screen {x=x.min(screen.right()-width-8.0).max(screen.left()+8.0);}
         Some(Rect::from_min_size(Pos2::new(x,badge.bottom()+6.0),Vec2::new(width,height)))
     }
+    pub(crate) fn open_notice_details(&mut self){
+        self.notice_details=true;
+        self.open_agent_panel();
+    }
+    /// 展开面板到 Agent 卡片需要的高度（详情、结果层共用）。
+    pub(crate) fn open_agent_panel(&mut self){
+        self.open=true;
+        self.forced_open_until=self.t+6.0;
+        self.w.tune(OPEN_W.0,OPEN_W.1);
+        self.h.tune(OPEN_H.0,OPEN_H.1);
+        self.w.target=PW;
+        self.h.target=self.expanded_height();
+    }
+    /// 结果层点「关闭」：连同背后的完成卡一起收起，一次到位。
+    ///
+    /// 只处理完成通知（`AgentDone`）——结果层只可能从它打开；其它通知原样保留。
+    /// 同时复位面板状态并上 `hover_lock`：否则鼠标还停在原按钮位置时，收起动画期间的命中区
+    /// 仍然是整块面板，`want` 会因为 `notice.is_none()` 重新把面板顶开（露出媒体页）。
+    /// `hover_lock` 与 Esc/收起详情走同一个机制：鼠标离开后自动解除。
+    fn dismiss_completion_card(&mut self){
+        let completion=|a:&Alert|matches!(a.source,crate::extras::AlertSource::AgentDone(_));
+        if self.notice.as_ref().is_some_and(completion){self.notice=None;}
+        if self.hud_notice.as_ref().is_some_and(completion){self.hud_notice=None;}
+        self.open=false;
+        self.notice_details=false;
+        self.forced_open_until=0.0;
+        self.result_was_active=false;
+        self.hover_lock=true;
+        self.hover_since=None;
+    }
+    pub(crate) fn notice_details_active(&self)->bool{self.notice_details}
 
     /// 当前皮肤的换色调色板（经典为 None）。
     pub(crate) fn skin_palette(&self)->Option<crate::skin_paint::Palette> {
@@ -2830,10 +3118,23 @@ impl App {
             }
         } else {
             self.hover_since = None;
-            if self.open {
+            if self.open && self.agent_panel_active() {
+                // 待处理审批/提问与结果查看是阻塞式卡片：不跟随鼠标离开自动收起，
+                // 由「收起」按钮、明确交回/关闭或点击卡片外部来处理。
+                self.leave_since = None;
+                self.w.tune(OPEN_W.0, OPEN_W.1);
+                self.h.tune(OPEN_H.0, OPEN_H.1);
+                self.w.target = PW;
+                self.h.target = self.expanded_height();
+            } else if self.open {
                 let since = *self.leave_since.get_or_insert(t);
                 if t - since >= LEAVE_DELAY {
+                    let was_agent_detail=self.agent_detail_active();
                     self.open = false;
+                    if was_agent_detail {
+                        if let Some(id)=self.agent_cards.active().map(|(id,_,_,_)|id.to_owned()){self.agent_cards.close_detail(&id);}
+                        self.notice_details=false;
+                    }
                     self.music_volume_open=false;
                     self.leave_since = None;
                     self.w.tune(CLOSE.0, CLOSE.1);
@@ -3187,10 +3488,36 @@ impl App {
         Some(tc.rect(PW/2.0-w/2.0,y,w,22.0))
     }
 
+    /// 跳转结常常驻提示行：按宽度换行（失败原因往往一句说不完），最长保留 60 秒，
+    /// 卡片关闭或下一次跳转时被替换。toast 只有 2.4 秒，而「为什么没切过去」需要一直看得到。
+    fn jump_note_layer(&mut self, c: &Card, below_y: Option<f32>) -> Option<Rect> {
+        let (message, at) = self.jump_note.clone()?;
+        if self.t - at > 60.0 {
+            self.jump_note = None;
+            return None;
+        }
+        let ink = Color32::from_rgb(255, 206, 180);
+        let galley = c.ui.painter().layout(message, crate::theme::font(size::BODY, W::Regular), ink, PW - 40.0);
+        let note_w = galley.size().x + 26.0;
+        let note_h = (galley.size().y + 8.0).max(22.0);
+        let x = PW / 2.0 - note_w / 2.0;
+        // 岛体下方放不下（卡片接近窗口上限）时放到面板内部：底部按钮行（BTN_H=30、FOOT_PAD=16）
+        // 的上方，宁可压住正文最后一行也不能挡住决定按钮。
+        let y = below_y.unwrap_or_else(|| (self.h.pos - 46.0 - note_h - 6.0).max(46.0));
+        c.fill(x, y, note_w, note_h, 11.0, Color32::from_rgb(58, 36, 32));
+        c.painter.galley(c.pos(x + 13.0, y + 4.0), galley, ink);
+        Some(c.rect(x, y, note_w, note_h))
+    }
+
     // ---------------------------------------------------------------
     // 每帧推进：番茄钟、饮水提醒、跨天
     // ---------------------------------------------------------------
     fn tick(&mut self, env: &Env, dt: f32, elapsed: f32) {
+        // 跳转结果必须每条都有反馈：成功也要说（尤其「客户端已在最前台」这种情况），
+        // 否则用户点「切换到客户端」后看不到任何变化，只能理解成按钮坏了。
+        if let Some(message)=crate::agent_jump::take_feedback(){self.jump_feedback(message);}
+        // 客户端协议（dsh://open）兜底有 1-2 秒延迟：宽限期到了再核对一次前台并给结论。
+        if let Some(verdict)=crate::agent_jump::poll_protocol(std::time::Instant::now()){self.jump_feedback(verdict);}
         if self.toast.as_ref().is_some_and(|(_,at)|self.t-at>2.4){self.toast=None;}
         // 跳转后先用本地目标位置显示；播放器回报追上了、换歌了或超时就交还真实位置。
         let seek_done=self.music_seek_ui.as_ref().is_some_and(|(target,title)|{

@@ -14,6 +14,11 @@ pub mod resources;
 pub mod anim;
 pub mod oled_shift;
 pub mod app;
+pub mod agent_notice;
+pub mod agent_cards;
+mod agent_ui;
+pub mod agent_jump;
+pub mod dsh_nav;
 pub mod messenger;
 pub mod child_process;
 mod settings_window;
@@ -67,6 +72,7 @@ pub mod smtc;
 pub mod music_volume;
 pub mod theme;
 pub mod settings_theme;
+mod ui_map;
 mod updates;
 #[cfg(windows)]
 pub use updates::record_install_size;
@@ -80,6 +86,8 @@ pub mod tray;
 
 #[cfg(test)]
 mod ui_tests;
+#[cfg(test)]
+mod ui_map_tests;
 #[cfg(test)]
 #[path = "bin/daozai-record/raster.rs"]
 mod preview_raster;

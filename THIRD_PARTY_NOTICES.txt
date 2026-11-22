@@ -3,6 +3,11 @@ assets/ai-icons/doubao.png 使用豆包官方头像标识，保留原始配色�
 产品官网：https://www.doubao.com/chat/
 官方素材：https://lf-flow-web-cdn.doubao.com/obj/flow-doubao/doubao/web/doubao_avatar_new.png
 
+AI 助手通知来源图标
+assets/ai-icons/deepseek-harness.png 来自 DeepSeek Harness Windows 客户端 0.2.2-rc.3 的 resources/icon.png。
+assets/ai-icons/codex-app.png 来自 OpenAI.Codex Windows 包 26.1111.2228.0 中的 webview/assets/codex-app-ga-logo.dfddfb85d7.png。
+图标仅用于识别消息来源；商标和作品权利属于各自权利人，不表示官方合作或授权背书。
+
 fly-island
 https://github.com/flyl1u/fly-island
 微信任务栏提醒与 QQ Windows 通知接入参考其实现。

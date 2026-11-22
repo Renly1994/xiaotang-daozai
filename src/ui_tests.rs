@@ -1191,6 +1191,10 @@ impl H {
     }
     fn frame(&mut self, events: Vec<egui::Event>) {
         self.t += 1.0 / 60.0;
+        // 与生产 main.rs 一致：每帧先让 agent_cards 收桥接事件并做状态收口，再跑一帧 UI。
+        // 否则「提交失败保留卡片」这类保护逻辑在测试里根本走不到，用例会假绿。
+        let finished=self.app.agent_cards.update(&self.app.settings,&self.ctx);
+        for (provider,text) in finished {self.app.agent_finished(provider,text);}
         let mut raw = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(crate::app::CANVAS_W, WIN_H))),
             time: Some(self.t),
@@ -1253,6 +1257,8 @@ impl H {
         self.click(point);
     }
     fn click_notice_badge(&mut self){if self.app.compact_notices(){self.click(Pos2::new(WIN_W/2.0+(self.app.current_width()-44.0)/2.0+26.0,15.0));}}
+    /// 当前帧里所有可见文字，便于断言卡片内容。
+    fn strings(&self)->Vec<String>{self.shapes.iter().filter_map(|s|if let egui::Shape::Text(t)=&s.shape{Some(t.galley.text().to_owned())}else{None}).collect()}
     fn wheel(&mut self,delta:f32) {
         self.frame(vec![egui::Event::MouseWheel{unit:egui::MouseWheelUnit::Point,delta:Vec2::new(0.0,delta),modifiers:Default::default()}]);
     }
@@ -6850,6 +6856,240 @@ fn compact_canvas_preserves_panel_and_notice_pixels(){
 }
 
 #[test]
+fn agent_notice_respects_each_source_and_master_without_windows_notification_access(){
+    use crate::agent_notice::{Notice, Provider::{Codex,Dsh}, Status::{Finished,Question}};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();h.frame(vec![]);
+    h.app.receive_agent_notice(Notice(Codex,Finished));
+    assert!(h.app.alerts.is_empty());
+    h.app.settings.codex_notifications=true;
+    h.app.settings.save();
+    let saved=crate::model::Settings::load();
+    assert!(saved.codex_notifications && !saved.dsh_notifications && !saved.read_notifications);
+    h.app.receive_agent_notice(Notice(Dsh,Question));
+    h.app.receive_agent_notice(Notice(Codex,Finished));
+    h.app.receive_agent_notice(Notice(Codex,Finished));
+    assert_eq!(h.app.alerts.len(),1);
+    h.app.tick_alerts();
+    assert_eq!(h.app.notice.as_ref().unwrap().body,Finished.label());
+    h.app.settings.codex_notifications=false;
+    h.app.settings.dsh_notifications=true;
+    h.app.receive_agent_notice(Notice(Dsh,Question));h.app.tick_alerts();
+    assert_eq!(h.app.notice.as_ref().unwrap().title,"DeepSeek Harness");
+    h.app.settings.notifications=false;h.app.tick_alerts();
+    h.app.receive_agent_notice(Notice(Dsh,Question));
+    assert!(h.app.notice.is_none() && h.app.alerts.is_empty() && h.app.history.is_empty());
+    assert!(!h.app.pending.iter().any(|cmd|matches!(cmd,crate::app::Cmd::Notify(..))));
+}
+
+#[test]
+fn agent_notice_interactive_queue_outlives_toasts_and_releases_on_disconnect(){
+    use crate::agent_notice::Provider::Dsh;
+    use crate::extras::AlertSource;
+    use serde_json::json;
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();h.frame(vec![]);h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.dwell=12;h.app.settings.agent.handoff=10;h.app.settings.agent.content=1;
+    h.app.settings.save();assert_eq!(crate::model::Settings::load().agent,h.app.settings.agent);
+    h.app.agent_finished(Dsh,"test completion".into());h.app.tick_alerts();
+    for id in ["first","second"]{h.app.agent_cards.receive(json!({"id":id,"kind":"approval","provider":"dsh",
+        "data":{"tool":"example","operation":"test only"}}),&h.app.settings);}
+    h.app.tick_alerts();h.app.t+=60.0;h.app.tick_alerts();
+    assert!(matches!(&h.app.notice.as_ref().unwrap().source,AlertSource::AgentCard(_,id) if id=="first"));
+    assert!(!h.app.compact_notices());assert_eq!(h.app.agent_cards.count(),2);
+    assert!(h.app.agent_cards.details_open("first"));
+    assert_eq!(h.app.agent_cards.countdown(1.,5,false),None);
+    h.app.agent_cards.receive(json!({"cancel":"first"}),&h.app.settings);h.app.tick_alerts();
+    assert!(matches!(&h.app.notice.as_ref().unwrap().source,AlertSource::AgentCard(_,id) if id=="second"));
+    assert!(h.app.agent_cards.details_open("second"));
+    assert_eq!(h.app.agent_cards.countdown(8.,5,false),None);
+    h.app.agent_cards.hand_back("second");h.app.tick_alerts();
+    assert_eq!(h.app.notice.as_ref().unwrap().body,"test completion");
+    h.app.t+=11.0;h.app.tick_alerts();assert!(h.app.notice.is_some());
+    h.app.t+=2.0;h.app.tick_alerts();assert!(h.app.notice.is_none());
+}
+
+#[test]
+fn agent_notice_card_controls_are_visible_and_clickable_in_lyric_mode(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.dsh_notifications=true;h.app.settings.island_lyrics=true;
+    h.app.agent_cards.receive(serde_json::json!({"id":"fixture","provider":"dsh","kind":"approval","data":{
+        "tool":"Read","operation":"{\"path\":\"example.txt\"}"}}),&h.app.settings);
+    let mut preview_raster=feature_raster();
+    if let Some(dir)=std::env::var_os("DAOZAI_AGENT_PREVIEW"){
+        let dir=std::path::PathBuf::from(dir);std::fs::create_dir_all(&dir).unwrap();
+        shoot_feature(&mut h,&mut preview_raster,&dir,"approval-card",65,None,"2026-11-19");
+    }
+    for _ in 0..65{h.frame(vec![]);}
+    assert!(!h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="查看并审批")),
+        "审批到达后不应再显示中间按钮");
+    if let Some(dir)=std::env::var_os("DAOZAI_AGENT_PREVIEW"){
+        let dir=std::path::PathBuf::from(dir);
+        shoot_feature(&mut h,&mut preview_raster,&dir,"approval-detail-card",45,None,"2026-11-19");
+    }
+    assert_eq!(h.app.agent_cards.countdown(h.t,5,false),None);
+    assert!(h.app.agent_cards.details_open("fixture"),"审批详情应在现有岛内详情层展开");
+    assert!(h.app.notice_details_active(),"审批详情标记应保持打开");
+    for label in ["拒绝","仅允许这一次","回客户端"] {
+        assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()==label)),
+            "岛内审批详情缺少按钮 {label}");
+    }
+    h.click_text("回客户端");h.frame(vec![]);assert_eq!(h.app.agent_cards.count(),0);
+}
+
+#[test]
+fn agent_detail_expansion_does_not_draw_the_unread_capsule_outside_the_panel(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let approval=serde_json::json!({"id":"cap","provider":"dsh","kind":"approval","data":{
+        "tool":"write","operation":"{\"file_path\":\"C:\\\\Temp\\\\x.txt\"}"}});
+    // 实验组：有未读来源，且展开审批详情。
+    let mut detail=H::new();
+    detail.app.settings.dsh_notifications=true;
+    detail.app.settings.wechat_notifications=true;
+    detail.app.pending_messengers.push(crate::messenger::Unread{
+        source:crate::messenger::Messenger::Wechat,pid:0,window:0});
+    detail.app.agent_cards.receive(approval.clone(),&detail.app.settings);
+    for _ in 0..65 {detail.frame(vec![]);}
+    assert!(detail.app.agent_detail_active(),"审批详情应展开，否则本用例前提不成立");
+    // 对照组：同样展开审批详情，但没有未读来源。
+    let mut clean=H::new();
+    clean.app.settings.dsh_notifications=true;
+    clean.app.settings.wechat_notifications=true;
+    clean.app.agent_cards.receive(approval,&clean.app.settings);
+    for _ in 0..65 {clean.frame(vec![]);}
+    assert!(clean.app.agent_detail_active(),"审批详情应展开，否则本用例前提不成立");
+    let detail_right=shape_right(&detail);
+    let clean_right=shape_right(&clean);
+    // 人工复核入口：设置 DAOZAI_AGENT_PREVIEW 后输出实际渲染图（断言前输出，便于对照修复前后）。
+    if let Some(dir)=std::env::var_os("DAOZAI_AGENT_PREVIEW"){
+        let dir=std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut raster=feature_raster();
+        shoot_feature(&mut detail,&mut raster,&dir,"agent-detail-with-unread",45,None,"2026-11-19");
+        let mut raster=feature_raster();
+        shoot_feature(&mut clean,&mut raster,&dir,"agent-detail-clean",45,None,"2026-11-19");
+    }
+    assert!((detail_right-clean_right).abs()<5.0,
+        "详情展开后不应再绘制未读胶囊：有未读 {detail_right} 应与无未读 {clean_right} 一致，实际多出 {}px",
+        detail_right-clean_right);
+}
+
+/// 当前帧所有绘制形状的最右边界，用于判断是否有内容画到面板之外。
+fn shape_right(h:&H)->f32{
+    h.shapes.iter().map(|s|s.shape.visual_bounding_rect().right()).fold(0.0_f32,f32::max)
+}
+
+#[test]
+fn agent_notice_question_is_answered_inside_the_island(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.dsh_notifications=true;h.app.settings.island_lyrics=true;
+    h.app.agent_cards.receive(serde_json::json!({"id":"question","provider":"dsh","kind":"question","data":{
+        "questions":[{"id":"q","question":"需要选择哪个方案？","options":[{"label":"方案 A"},{"label":"方案 B"}]}]}}),&h.app.settings);
+    for _ in 0..65 {h.frame(vec![]);}
+    for _ in 0..45 {h.frame(vec![]);}
+    let texts:Vec<String>=h.shapes.iter().filter_map(|s|if let egui::Shape::Text(t)=&s.shape{Some(t.galley.text().to_owned())}else{None}).collect();
+    for label in ["需要选择哪个方案？","方案 A","方案 B","检查答案","回客户端"] {
+        assert!(texts.iter().any(|text|text==label),
+            "岛内提问详情缺少内容 {label}；当前文字：{texts:?}");
+    }
+    // 最后一题不直接提交：先「检查答案」，在审阅页再「确认提交」。
+    h.click_text("方案 A");
+    // 作答后底部提示行消失，按钮会上移；先渲染一帧再按新坐标点击。
+    h.frame(vec![]);
+    h.click_text("检查答案");h.frame(vec![]);
+    let review:Vec<String>=h.shapes.iter().filter_map(|s|if let egui::Shape::Text(t)=&s.shape{Some(t.galley.text().to_owned())}else{None}).collect();
+    for label in ["确认提交","返回修改"] {
+        assert!(review.iter().any(|text|text==label),"审阅页缺少 {label}；当前文字：{review:?}");
+    }
+    h.click_text("确认提交");h.frame(vec![]);
+    // 测试环境没有桥接子进程，提交必然失败：请求必须保留并显示「结果未知」。
+    // 修复前这里会静默消失（draw_details 先取走请求，decide 又去队首找不到它），
+    // 宿主还在等答案；因此这条断言从 count()==0 改成「卡片留下 + 明说结果未知」。
+    assert_eq!(h.app.agent_cards.count(),1,"没有桥接时提交失败，请求必须保留");
+    let texts:Vec<String>=h.shapes.iter().filter_map(|s|if let egui::Shape::Text(t)=&s.shape{Some(t.galley.text().to_owned())}else{None}).collect();
+    assert!(texts.iter().any(|text|text.contains("提交结果未知")),"提交失败必须显示结果未知；当前文字：{texts:?}");
+}
+
+#[test]
+fn agent_notice_questions_page_one_at_a_time_supports_back_and_custom_input(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.dsh_notifications=true;h.app.settings.island_lyrics=true;
+    h.app.agent_cards.receive(serde_json::json!({"id":"multi-question","provider":"dsh","kind":"question","data":{
+        "questions":[
+            {"id":"q1","question":"第一轮：能正常显示吗？","options":[{"label":"能正常显示"},{"label":"显示异常"}]},
+            {"id":"q2","question":"第二轮：可以分别作答吗？","options":[{"label":"可以分别作答"},{"label":"只能答一个"}]}
+        ]}}),&h.app.settings);
+    for _ in 0..90 {h.frame(vec![]);}
+    assert!(h.app.agent_cards.details_open("multi-question"));
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="第一轮：能正常显示吗？")));
+    assert!(!h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="第二轮：可以分别作答吗？")));
+    h.click_text("自定义回答");h.frame(vec![egui::Event::Text("第一轮补充".into())]);
+    h.click_text("下一题");h.frame(vec![]);
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="第二轮：可以分别作答吗？")));
+    assert!(!h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="第一轮：能正常显示吗？")));
+    h.click_text("上一题");h.frame(vec![]);
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="第一轮：能正常显示吗？")));
+}
+
+
+#[test]
+fn banner_summary_follows_the_current_question(){
+    // 回归：多题提问答到第 3 题再收起，提示卡摘要仍是第 1 题题干，用户会以为进度被重置。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.dsh_notifications=true;h.app.settings.agent.interactive=true;
+    let settings=h.app.settings.clone();
+    h.app.agent_cards.receive(serde_json::json!({"id":"multi-summary","provider":"dsh","kind":"question","data":{
+        "questions":[
+            {"id":"s1","question":"第一题：先跑冒烟还是完整回归？","options":[{"label":"冒烟测试"},{"label":"完整回归"}]},
+            {"id":"s2","question":"第二题：要不要一起更新文档？","options":[{"label":"要"},{"label":"不要"}]}
+        ]}}),&settings);
+    for _ in 0..90 {h.frame(vec![]);}
+    assert!(h.app.agent_cards.details_open("multi-summary"));
+    h.click_text("冒烟测试");h.frame(vec![]);
+    h.click_text("下一题");h.frame(vec![]);
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t.contains("第二题")),"应进入第 2 题：{texts:?}");
+    // 收起详情 → 待处理提示卡的摘要必须是当前这一题（第 2 题），而不是第 1 题。
+    let left=WIN_W/2.0-crate::agent_ui::CARD_W/2.0;
+    h.click(Pos2::new(left+crate::agent_ui::CARD_W-18.0-11.0,13.0+5.0+11.0));
+    for _ in 0..40 {h.frame(vec![]);}
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t.contains("第二题")),"收起后提示卡要跟着显示当前题：{texts:?}");
+    assert!(!texts.iter().any(|t|t.contains("第一题")),"收起后不该退回第 1 题：{texts:?}");
+}
+
+#[test]
+fn escape_collapses_an_open_agent_card_without_handing_it_back(){
+    // 回归：Esc 对 Agent 卡片完全无效（只把岛体收起来，卡片还挂在展开态）。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.dsh_notifications=true;h.app.settings.agent.interactive=true;
+    let settings=h.app.settings.clone();
+    h.app.agent_cards.receive(serde_json::json!({"id":"esc-approval","provider":"dsh","kind":"approval",
+        "data":{"tool":"bash","reason":"确认后执行","cwd":"C:\\work","operation":"{\"cmd\":\"ls\"}"}}),&settings);
+    for _ in 0..40 {h.frame(vec![]);}
+    assert!(h.app.agent_detail_active(),"审批卡到达应自动展开");
+    let before=h.app.agent_cards.count();
+    h.frame(vec![egui::Event::Key{key:egui::Key::Escape,physical_key:None,pressed:true,repeat:false,modifiers:Default::default()}]);
+    for _ in 0..40 {h.frame(vec![]);}
+    assert!(!h.app.agent_detail_active(),"Esc 应收起审批详情");
+    assert_eq!(h.app.agent_cards.count(),before,"Esc 只收起详情，不能把请求交回/丢掉");
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t=="查看并审批"),"应收起到待处理提示卡：{texts:?}");
+    // 结果层同理：Esc 关层且回到完成卡，不留空岛。
+    h.app.settings.agent.content=2;h.app.settings.agent.expanded=true;
+    h.app.agent_cards.close_detail("esc-approval");
+    h.app.agent_cards.hand_back("esc-approval");
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,"## 完成\n- 第一条正文".into());
+    for _ in 0..60 {h.frame(vec![]);}
+    h.click_text("查看回复");for _ in 0..45 {h.frame(vec![]);}
+    assert!(h.app.result_active(),"点查看回复应打开结果层");
+    h.frame(vec![egui::Event::Key{key:egui::Key::Escape,physical_key:None,pressed:true,repeat:false,modifiers:Default::default()}]);
+    for _ in 0..40 {h.frame(vec![]);}
+    assert!(!h.app.result_active(),"Esc 应关闭结果层");
+    assert!(!h.app.open,"Esc 关闭结果层后岛体应收起，不能留空岛");
+}
+
+#[test]
 fn external_notice_respects_permissions_masks_preview_and_never_reemits(){
  let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.frame(vec![]);
  h.app.receive_notification("系统音量".into(),"external.test".into(),"验证码 123456".into());assert!(h.app.alerts.is_empty());
@@ -9204,4 +9444,860 @@ fn every_module_settings_tab_maps_to_its_page(){
 /// 设置页的 AI 额度账号默认收起成一行；需要检查明细的测试先把所有账号展开。
 pub(crate) fn open_quota_details(h:&H){
     for account in &h.app.quota.config.accounts {h.ctx.data_mut(|d|d.insert_temp(egui::Id::new(("quota-account-open",account.id.clone())),true));}
+}
+
+// ---------------------------------------------------------------
+// Agent 卡片画面导出（人工验收用，按需运行）
+// ---------------------------------------------------------------
+/// 把当前帧导出成 PNG（Agent 卡片用：更宽的裁切，覆盖 419 宽面板 + 阴影）。
+fn shoot_agent(h:&mut H,dest:&std::path::Path,name:&str,frames:usize){
+    let ppp=2.0;let (w,hgt)=(crate::app::CANVAS_W,WIN_H);
+    let mut raster=crate::preview_raster::Raster::new((w*ppp) as usize,(hgt*ppp) as usize);
+    for f in 0..frames {
+        h.t+=1.0/60.0;
+        let env=Env{t:h.t,clock:"09:41:00".into(),today:"2026-11-20".into(),date:"11月20日 周五".into(),bt_ready:true,..Default::default()};
+        let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(w,hgt))),time:Some(h.t),focused:true,
+            viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(ppp),..Default::default()})).collect(),..Default::default()};
+        let app=&mut h.app;
+        let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{let win=Rect::from_min_size(ui.max_rect().min,Vec2::new(WIN_W,hgt));app.frame(ui,win,&env);});});
+        raster.update_textures(&output.textures_delta);
+        let primitives=h.ctx.tessellate(output.shapes,output.pixels_per_point);
+        if f+1==frames {
+            raster.buf.fill([0.14,0.16,0.22,1.0]);
+            raster.draw(&primitives,output.pixels_per_point);
+            let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+            let image=image::RgbaImage::from_raw((w*ppp) as u32,(hgt*ppp) as u32,rgba).unwrap();
+            let crop_h=(h.app.expanded_height()*ppp+28.0).max(250.0).min(hgt*ppp) as u32;
+            let crop_w=1160u32.min((w*ppp) as u32-160);
+            image::imageops::crop_imm(&image,160,0,crop_w,crop_h).to_image().save(dest.join(format!("{name}.png"))).unwrap();
+        }
+        raster.free_textures(&output.textures_delta);
+    }
+}
+
+#[test]
+#[ignore="按需导出 Agent 审批/提问/完成通知的实际画面"]
+fn agent_cards_gallery(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_AGENT_PREVIEW").expect("需指定 DAOZAI_AGENT_PREVIEW 目录"));
+    std::fs::create_dir_all(&dest).unwrap();
+    let approval=|h:&mut H,id:&str,data:serde_json::Value|{
+        h.app.agent_cards.receive(serde_json::json!({"id":id,"provider":"dsh","kind":"approval","data":data}),&h.app.settings);
+    };
+    // 1. 普通审批
+    let mut h=H::new();h.app.settings.dsh_notifications=true;
+    approval(&mut h,"a1",serde_json::json!({"tool":"write","reason":"应用新的超时与重试策略，发布前需要确认写入生产配置。",
+        "cwd":"C:\\work\\api-gateway","operation":"{\n  \"file_path\": \"config/gateway.yaml\",\n  \"content\": \"upstream.timeout: 30s -> 12s\\nretry: 2\\nroutes: 6\"\n}"}));
+    shoot_agent(&mut h,&dest,"approval",70);
+    // 2. 超长操作 + 长理由（验证滚动）
+    let mut h=H::new();h.app.settings.dsh_notifications=true;
+    let long_operation=format!("{{\"command\":\"{}\"}}","--flag value ".repeat(60));
+    approval(&mut h,"a2",serde_json::json!({"tool":"bash","reason":"需要跑完整回归。".to_owned()+&"这是一段很长的申请理由，用来验证换行与滚动是否正确。".repeat(8),
+        "cwd":"D:\\project-with-a-long-name\\src\\components","operation":long_operation}));
+    shoot_agent(&mut h,&dest,"approval-long",70);
+    // 3. 原生授权范围
+    let mut h=H::new();h.app.settings.dsh_notifications=true;
+    approval(&mut h,"a3",serde_json::json!({"tool":"Allow network access?","reason":"For this session","nativeScope":true,"sessionId":"s-1"}));
+    shoot_agent(&mut h,&dest,"approval-native",70);
+    // 4. 队列
+    let mut h=H::new();h.app.settings.dsh_notifications=true;
+    for i in 0..3{approval(&mut h,&format!("q{i}"),serde_json::json!({"tool":"read","operation":"{\"path\":\"src/main.rs\"}","cwd":"C:\\work"}));}
+    shoot_agent(&mut h,&dest,"approval-queue",70);
+    // 5. 单选提问（带选项描述）
+    let mut h=H::new();h.app.settings.dsh_notifications=true;
+    h.app.agent_cards.receive(serde_json::json!({"id":"q1","provider":"dsh","kind":"question","data":{"questions":[
+        {"id":"choice","question":"发布前用哪种验证策略？","detail":"选择后本轮会按该策略继续执行，可在下一步再调整。",
+         "options":[{"label":"仅跑冒烟测试","description":"约 2 分钟，覆盖登录与支付主链路"},{"label":"跑完整回归","description":"约 18 分钟，覆盖 1317 个用例"},{"label":"先不验证","description":"直接进入发布确认"}]}
+    ]}}),&h.app.settings);
+    shoot_agent(&mut h,&dest,"question-single",80);
+    // 6. 多选提问
+    let mut h=H::new();h.app.settings.dsh_notifications=true;
+    h.app.agent_cards.receive(serde_json::json!({"id":"q2","provider":"dsh","kind":"question","data":{"questions":[
+        {"id":"multi","question":"这轮要一起处理哪些项？","multi":true,
+         "options":[{"label":"更新依赖","description":"升级到最新补丁版本"},{"label":"补测试","description":"为新增分支加用例"},{"label":"改文档","description":"更新 AGENT-NOTICES.md"},{"label":"发版说明","description":"写 CHANGELOG 条目"}]}
+    ]}}),&h.app.settings);
+    shoot_agent(&mut h,&dest,"question-multi",80);
+    // 7. 多轮提问
+    let mut h=H::new();h.app.settings.dsh_notifications=true;
+    h.app.agent_cards.receive(serde_json::json!({"id":"q3","provider":"dsh","kind":"question","data":{"questions":[
+        {"id":"r1","question":"第一轮：这次改动影响哪些平台？","options":[{"label":"仅 Windows"},{"label":"Windows 与 macOS"}]},
+        {"id":"r2","question":"第二轮：需要同时更新接入文档吗？","detail":"文档改动会一并提交到同一分支。","options":[{"label":"需要"},{"label":"不需要"}]}
+    ]}}),&h.app.settings);
+    shoot_agent(&mut h,&dest,"question-rounds",90);
+    // 8. 多选项（验证滚动）
+    let mut h=H::new();h.app.settings.dsh_notifications=true;
+    let options:Vec<_>=(1..=9).map(|i|serde_json::json!({"label":format!("候选方案 {i}"),"description":format!("这是第 {i} 个方案的一句话说明")})).collect();
+    h.app.agent_cards.receive(serde_json::json!({"id":"q4","provider":"dsh","kind":"question","data":{"questions":[
+        {"id":"many","question":"从下列方案中选一个最合适的：","options":options}
+    ]}}),&h.app.settings);
+    shoot_agent(&mut h,&dest,"question-many",80);
+    // 9. 完成通知轻提示 / 展开卡
+    let mut h=H::new();h.app.settings.dsh_notifications=true;
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,"已完成网关配置更新并通过回归测试。".into());
+    shoot_agent(&mut h,&dest,"done-compact",60);
+    let mut h=H::new();h.app.settings.dsh_notifications=true;h.app.settings.agent.expanded=true;h.app.settings.agent.content=2;
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,"## 本轮完成\n- 更新网关超时与重试\n- 跑了 12 个回归用例\n\n```bash\ncargo test --lib\n```\n全部通过。".into());
+    shoot_agent(&mut h,&dest,"done-expanded",60);
+    // 9b. 完成内容=仅状态（用户真实配置）：卡片带轻提示，点开是本机说明层而不是空白。
+    let mut h=H::new();h.app.settings.dsh_notifications=true;h.app.settings.agent.expanded=true;h.app.settings.agent.content=0;
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,String::new());
+    for _ in 0..60{h.frame(vec![]);}
+    shoot_agent(&mut h,&dest,"done-expanded-no-body",60);
+    h.click_text("查看回复");
+    for _ in 0..45{h.frame(vec![]);}
+    shoot_agent(&mut h,&dest,"done-result-no-body",60);
+    // 10. 详情卡「收起」后的待处理提示卡
+    let mut h=H::new();h.app.settings.dsh_notifications=true;
+    approval(&mut h,"b1",serde_json::json!({"tool":"bash","operation":"{\"cmd\":\"npm run build\"}","cwd":"C:\\work\\web"}));
+    for _ in 0..40{h.frame(vec![]);}
+    let left=WIN_W/2.0-crate::agent_ui::CARD_W/2.0;
+    h.click(Pos2::new(left+crate::agent_ui::CARD_W-18.0-11.0,13.0+5.0+11.0));
+    shoot_agent(&mut h,&dest,"approval-banner",40);
+    // 11. 提交失败/结果未知（无桥接时点「仅允许这一次」）
+    let mut h=H::new();h.app.settings.dsh_notifications=true;
+    approval(&mut h,"b2",serde_json::json!({"tool":"write","operation":"{\"file_path\":\"a.txt\"}","cwd":"C:\\work"}));
+    for _ in 0..40{h.frame(vec![]);}
+    h.click_text("仅允许这一次");
+    shoot_agent(&mut h,&dest,"approval-uncertain",40);
+    // 12. 结果查看
+    let mut h=H::new();h.app.settings.dsh_notifications=true;h.app.settings.agent.content=2;h.frame(vec![]);
+    h.app.agent_cards.open_result(crate::agent_notice::Provider::Dsh,"## 本轮完成\n- 更新网关超时与重试\n- 跑了 12 个回归用例\n\n```bash\ncargo test --lib\n```\n\n全部通过。".into());
+    h.app.open_agent_panel();
+    shoot_agent(&mut h,&dest,"result",70);
+}
+
+#[test]
+fn agent_completion_result_opens_scrollable_layer_and_closes_with_the_panel(){
+    // 修复前的「查看」是死按钮：写入 result 却没有任何绘制代码，且会把卡片永久钉住。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=2;
+    h.app.settings.agent.expanded=true;
+    h.app.settings.agent.dwell=15;
+    let body=format!("## 本轮完成\n- 更新连接池上限\n- 回归 42 个用例\n\n```bash\ncargo test\n```\n{}","补充说明。".repeat(120));
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,body);
+    for _ in 0..60{h.frame(vec![]);}
+    assert!(h.app.notice.is_some(),"完成通知应当出现在岛上");
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t=="查看回复"),"完成卡必须有可见的「查看回复」按钮");
+    h.click_text("查看回复");
+    for _ in 0..45{h.frame(vec![]);}
+    assert!(h.app.result_active(),"点查看回复应打开结果层");
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t=="本轮回复"),"结果层要有标题：{texts:?}");
+    assert!(texts.iter().any(|t|t=="复制内容"),"结果层要有复制按钮：{texts:?}");
+    assert!(texts.iter().any(|t|t=="关闭"),"结果层要有关闭按钮");
+    // 关闭结果层必须同时收起面板，不能留下一个空白岛。
+    h.click_text("关闭");
+    for _ in 0..40{h.frame(vec![]);}
+    assert!(!h.app.result_active(),"关闭后结果层应消失");
+    assert!(!h.app.open,"关闭结果层后岛体应收起");
+}
+
+#[test]
+fn done_without_body_still_opens_an_explanatory_result_layer(){
+    // 回归：用户配置「展开结果卡 + 完成内容=仅状态」时，展开卡上的「查看回复」曾经是死按钮
+    // （extras::draw_notice 要求 content>0 才 open_result，否则整段静默）。
+    // 现在：卡上先给轻提示；点开是本机说明层（解释原因 + 下一步），不是空白也不是假正文。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=0;
+    h.app.settings.agent.expanded=true;
+    h.app.settings.agent.dwell=15;
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,"这段正文在 content=0 时不会进入岛上".into());
+    for _ in 0..60{h.frame(vec![]);}
+    assert!(h.app.notice.is_some(),"完成通知应当出现在岛上");
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t=="查看回复"),"完成卡必须有可见的「查看回复」按钮：{texts:?}");
+    assert!(texts.iter().any(|t|t.contains("未接收回复正文")),"点击之前就要在摘要行给出轻提示：{texts:?}");
+    h.click_text("查看回复");
+    for _ in 0..45{h.frame(vec![]);}
+    assert!(h.app.result_active(),"content=0 点「查看回复」也必须打开结果层，不能是死按钮");
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t==crate::agent_cards::NO_BODY_RESULT_TITLE),"说明层标题要说明没有正文：{texts:?}");
+    assert!(texts.iter().any(|t|t.contains("完成内容")),"说明层要解释原因并给出下一步：{texts:?}");
+    assert!(texts.iter().any(|t|t=="关闭"),"说明层必须能关闭：{texts:?}");
+    assert!(!texts.iter().any(|t|t=="复制内容"),"说明层没有正文，不该出现「复制内容」：{texts:?}");
+    assert!(!texts.iter().any(|t|t.contains("这段正文")),"content=0 不得显示未接收的正文：{texts:?}");
+    // 关闭后必须真的收起，不能留一个空岛。
+    h.click_text("关闭");
+    for _ in 0..40{h.frame(vec![]);}
+    assert!(!h.app.result_active(),"关闭后结果层应消失");
+    assert!(!h.app.open,"关闭说明层后岛体应收起");
+}
+
+#[test]
+fn done_with_body_keeps_the_full_reply_in_the_result_layer(){
+    // content=2 的既有行为不能被「无正文说明层」带偏：标题、正文、复制按钮都要在。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=2;
+    h.app.settings.agent.expanded=true;
+    h.app.settings.agent.dwell=15;
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,"## 本轮完成\n- 更新连接池上限到 64\n\n最后一行正文。".into());
+    for _ in 0..60{h.frame(vec![]);}
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t.contains("更新连接池上限")),"完成卡应有摘要：{texts:?}");
+    assert!(!texts.iter().any(|t|t.contains("未接收回复正文")),"有正文时不该出现无正文提示：{texts:?}");
+    h.click_text("查看回复");
+    for _ in 0..45{h.frame(vec![]);}
+    assert!(h.app.result_active(),"有正文时应打开结果层");
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t=="本轮回复"),"有正文的结果层标题保持「本轮回复」：{texts:?}");
+    assert!(texts.iter().any(|t|t.contains("更新连接池上限")),"结果层必须显示正文条目：{texts:?}");
+    assert!(texts.iter().any(|t|t=="最后一行正文。"),"结果层最后一段正文要完整：{texts:?}");
+    assert!(texts.iter().any(|t|t=="复制内容"),"有正文时保留「复制内容」：{texts:?}");
+    h.click_text("关闭");
+    for _ in 0..40{h.frame(vec![]);}
+    assert!(!h.app.result_active(),"关闭后结果层应消失");
+    assert!(!h.app.open,"关闭结果层后岛体应收起");
+}
+
+// ---------------- 结果层「一次收起」与受限 markdown 覆盖 ----------------
+
+/// 点结果层底部「关闭」：结果层、完成卡、展开面板必须同时消失（不能还要再点一次）。
+fn dismiss_result_layer_in_one_click(content: u8, body: &str) {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = H::new();
+    h.app.settings.dsh_notifications = true;
+    h.app.settings.agent.content = content;
+    h.app.settings.agent.expanded = true;
+    h.app.settings.agent.dwell = 15;
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh, body.to_owned());
+    for _ in 0..60 { h.frame(vec![]); }
+    assert!(h.app.notice.is_some(), "完成通知应当出现在岛上");
+    h.click_text("查看回复");
+    for _ in 0..45 { h.frame(vec![]); }
+    assert!(h.app.result_active(), "点「查看回复」应打开结果层");
+    assert!(h.app.agent_panel_active(), "结果层占用展开面板");
+    h.click_text("关闭");
+    for _ in 0..40 { h.frame(vec![]); }
+    assert!(!h.app.result_active(), "关闭后结果层应消失");
+    assert!(!h.app.agent_cards.result_open(), "结果层状态必须真的清掉");
+    assert!(!h.app.agent_panel_active(), "结果层关掉后不应继续占用面板");
+    assert!(!h.app.open, "关闭后岛体应收起，不能留空面板");
+    // 用户实测的毛病：关闭结果层后回到「本轮已结束」完成卡，还得再点一次「关闭」。
+    assert!(h.app.notice.is_none(), "背后的完成卡必须一起收起，否则用户还要再点一次");
+    assert!(h.app.hud_notice.is_none(), "收起态的完成卡浮层也要一起收掉");
+    let texts = h.strings();
+    assert!(!texts.iter().any(|t| t == "查看回复"), "不能退回「本轮已结束」完成卡：{texts:?}");
+    assert!(!texts.iter().any(|t| t == "本轮已结束"), "完成卡标题不该再出现：{texts:?}");
+}
+
+#[test]
+fn closing_the_no_body_result_layer_collapses_everything_in_one_click() {
+    // content=0（用户真实配置）时点开的是本机说明层，它同样要一次收起。
+    dismiss_result_layer_in_one_click(0, "这段正文在 content=0 时不会进入岛上");
+}
+
+#[test]
+fn closing_the_body_result_layer_collapses_everything_in_one_click() {
+    dismiss_result_layer_in_one_click(2, "## 本轮完成\n- 更新连接池上限\n\n最后一行正文。");
+}
+
+#[test]
+fn escape_still_only_closes_the_result_layer_and_keeps_the_completion_card() {
+    // 与「关闭」不同：Esc / 点卡片外只是离开阅读层，还要能回到完成卡上继续操作。
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = H::new();
+    h.app.settings.dsh_notifications = true;
+    h.app.settings.agent.content = 2;
+    h.app.settings.agent.expanded = true;
+    h.app.settings.agent.dwell = 15;
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh, "## 完成\n- 第一条".into());
+    for _ in 0..60 { h.frame(vec![]); }
+    h.click_text("查看回复");
+    for _ in 0..45 { h.frame(vec![]); }
+    assert!(h.app.result_active(), "点「查看回复」应打开结果层");
+    h.frame(vec![egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]);
+    for _ in 0..40 { h.frame(vec![]); }
+    assert!(!h.app.result_active(), "Esc 应关闭结果层");
+    assert!(!h.app.open, "Esc 关闭结果层后岛体应收起");
+    assert!(h.app.notice.is_some(), "Esc 只关阅读层，完成卡要留着（与「关闭」区分）");
+    let texts = h.strings();
+    assert!(texts.iter().any(|t| t == "查看回复"), "Esc 后应回到完成卡：{texts:?}");
+}
+
+#[test]
+fn result_layer_renders_inline_code_bold_ordered_lists_tables_and_links() {
+    // 审计结论回归：这些 markdown 以前全部原样露出（反引号、星号、竖线、`1.` 混进正文）。
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = H::new();
+    h.app.settings.dsh_notifications = true;
+    h.app.settings.agent.content = 2;
+    h.app.settings.agent.expanded = true;
+    h.app.settings.agent.dwell = 15;
+    let body = "## 本轮完成\n\n用了 `cargo test` 验证，**全部通过**。详见 [接入文档](https://example.com/docs)。\n\n1. 先改配置\n2. 再跑回归\n\n| 项目 | 结果 |\n| --- | --- |\n| 单元测试 | 通过 |\n";
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh, body.to_owned());
+    for _ in 0..60 { h.frame(vec![]); }
+    h.click_text("查看回复");
+    for _ in 0..45 { h.frame(vec![]); }
+    assert!(h.app.result_active(), "点「查看回复」应打开结果层");
+    let texts = h.strings();
+    // 1) 行内 code / 粗体：标记被吃掉，只剩可见文字。
+    assert!(texts.iter().any(|t| t == "用了 cargo test 验证，全部通过。详见 接入文档 (https://example.com/docs)。"),
+        "行内标记应渲染而不是原样显示：{texts:?}");
+    assert!(!texts.iter().any(|t| t.contains("**") || t.contains('`') || t.contains("](")),
+        "结果层不应出现原始行内标记：{texts:?}");
+    // 2) 真的换了字体：行内代码等宽、粗体半粗。
+    let sections: Vec<(String, egui::FontFamily)> = h.shapes.iter().filter_map(|s| match &s.shape {
+        egui::Shape::Text(t) => Some(t.galley.job.sections.iter().map(|sec| (
+            t.galley.job.text.get(sec.byte_range.clone()).unwrap_or("").to_owned(),
+            sec.format.font_id.family.clone(),
+        )).collect::<Vec<_>>()),
+        _ => None,
+    }).flatten().collect();
+    let mono = egui::FontFamily::Name("mono-regular".into());
+    let semibold = egui::FontFamily::Name("semibold".into());
+    assert!(sections.iter().any(|(text, family)| text == "cargo test" && *family == mono),
+        "行内代码必须用等宽字体：{sections:?}");
+    assert!(sections.iter().any(|(text, family)| text == "全部通过" && *family == semibold),
+        "**粗体** 必须换成粗体字重：{sections:?}");
+    // 3) 有序列表：序号单独成列，正文不带 "1. " 前缀。
+    assert!(texts.iter().any(|t| t == "1."), "有序列表要画出序号：{texts:?}");
+    assert!(texts.iter().any(|t| t == "2."), "第二条也要有序号：{texts:?}");
+    assert!(texts.iter().any(|t| t == "先改配置"), "有序列表正文不应带序号前缀：{texts:?}");
+    // 4) 表格：单元格拆开渲染，竖线和分隔行都不再原样出现。
+    assert!(texts.iter().any(|t| t == "项目"), "表格表头应分列渲染：{texts:?}");
+    assert!(texts.iter().any(|t| t == "单元测试"), "表格数据行应分列渲染：{texts:?}");
+    assert!(!texts.iter().any(|t| t.contains('|')), "表格竖线不应原样露出：{texts:?}");
+    assert!(!texts.iter().any(|t| t.contains("---")), "表格分隔行不应原样露出：{texts:?}");
+}
+
+#[test]
+fn result_layer_markdown_edge_cases_never_panic_or_leak_markers() {
+    // 落单标记、超长正文（桥接上限 32000 字符）都不能 panic，也不能把标记原样漏出来。
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = H::new();
+    h.app.settings.dsh_notifications = true;
+    h.app.settings.agent.content = 2;
+    h.app.settings.agent.expanded = true;
+    h.app.settings.agent.dwell = 15;
+    let mut body = String::from("落单的 ** 与 ` 和 [半截](链接不能成对\n\n");
+    body.push_str(&"普通正文行，用来把结果层撑到需要滚动。\n".repeat(1200));
+    body.push_str("\n结尾：不崩就是对的。");
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh, body);
+    for _ in 0..60 { h.frame(vec![]); }
+    h.click_text("查看回复");
+    for _ in 0..45 { h.frame(vec![]); }
+    assert!(h.app.result_active(), "超长正文也要能打开结果层");
+    let texts = h.strings();
+    assert!(texts.iter().any(|t| t.contains("落单的")), "落单标记应原样保留而不是吞掉文字：{texts:?}");
+}
+
+#[test]
+fn turning_completion_content_off_closes_an_open_reply_layer(){
+    // 隐私边界：已经打开的正文层在「完成内容」被改成仅状态后必须立刻关闭；
+    // 反过来，本机说明层不含正文，改成 0 后仍然保留（否则点了就消失，又成死点击）。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=2;
+    h.app.settings.agent.expanded=true;
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,"敏感正文".into());
+    for _ in 0..60{h.frame(vec![]);}
+    h.click_text("查看回复");
+    for _ in 0..45{h.frame(vec![]);}
+    assert!(h.app.result_active(),"有正文时应打开结果层");
+    h.app.settings.agent.content=0;
+    for _ in 0..10{h.frame(vec![]);}
+    assert!(!h.app.result_active(),"content 改成仅状态后正文层必须关闭");
+    assert!(!h.app.agent_cards.result_open());
+    assert!(!h.app.open,"正文层关闭后岛体应收起");
+}
+
+#[test]
+fn allowing_without_a_bridge_keeps_the_card_and_reports_unknown(){
+    // 回归：draw_details 先把请求从队列取走，再走提交；旧实现失败分支去队首找它，
+    // 永远找不到 → 既不标记「结果未知」也不写 error，卡片直接消失，而宿主还在等回复。
+    // 这里走真实 UI 路径：没有桥接子进程时点「仅允许这一次」，卡片必须留下并说明结果未知。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.interactive=true;
+    let settings=h.app.settings.clone();
+    h.app.agent_cards.receive(serde_json::json!({"id":"no-bridge","provider":"dsh","kind":"approval",
+        "data":{"tool":"bash","operation":"{\"cmd\":\"git status\"}","cwd":"C:\\work"}}),&settings);
+    for _ in 0..40{h.frame(vec![]);}
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t=="仅允许这一次"),"审批卡应自动展开：{texts:?}");
+    h.click_text("仅允许这一次");
+    for _ in 0..40{h.frame(vec![]);}
+    assert_eq!(h.app.agent_cards.count(),1,"提交失败时请求不能消失，宿主还在等回复");
+    assert!(h.app.agent_detail_active(),"结果未知时详情卡要继续显示");
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t.contains("提交结果未知")),"必须明确告知结果未知：{texts:?}");
+    assert!(texts.iter().any(|t|t.contains("提交失败")),"错误行要写清失败原因与下一步：{texts:?}");
+}
+
+#[test]
+fn result_layer_keeps_its_scroll_between_frames(){
+    // 回归（D03）：draw_result 的滚动偏移以前只存局部变量，Cards::result_scroll 从不写回，
+    // 长回复每帧都跳回顶部，滚轮等于没用。现在偏移要跨帧保持。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=2;
+    h.app.settings.agent.expanded=true;
+    h.app.settings.agent.dwell=15;
+    let body=(1..=40).map(|i|format!("第 {i} 段正文，用来把结果层撑到需要滚动的位置。")).collect::<Vec<_>>().join("\n\n")
+        + "\n\n最后一段标记：滚动之后应当能看到。";
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,body);
+    for _ in 0..60{h.frame(vec![]);}
+    h.click_text("查看回复");
+    for _ in 0..45{h.frame(vec![]);}
+    assert!(h.app.result_active(),"结果层应打开");
+    let marker=|h:&H|h.shapes.iter().any(|s|match &s.shape{
+        egui::Shape::Text(t)=>t.galley.text().contains("最后一段标记")&&s.clip_rect.contains(t.visual_bounding_rect().center()),
+        _=>false});
+    assert!(!marker(&h),"长回复的最后一段一开始应在视口外");
+    // 滚轮只在指针位于正文区时生效：拿一个视口内可见的段落下手。
+    let anchor=h.shapes.iter().find_map(|s|match &s.shape{
+        egui::Shape::Text(t) if t.galley.text().starts_with("第 3 段")=>Some(t.visual_bounding_rect().center()),
+        _=>None}).expect("结果层应显示前几段正文");
+    for _ in 0..20{h.hover(anchor,0.02);h.wheel(-40.0);}
+    assert!(marker(&h),"向上滚动后最后一段应可见");
+    // 关键：不再滚动的下一帧不能回到顶部（修复前每帧从 0 重新开始）。
+    for _ in 0..3{h.frame(vec![]);}
+    assert!(marker(&h),"滚动位置必须跨帧保持，否则滚轮没有意义");
+}
+
+#[test]
+fn collapsing_a_card_falls_back_to_the_pending_banner_immediately(){
+    // 回归：点「收起」后如果只把 details 置 false，面板会等 forced_open 到期才收，
+    // 中间露出一个没有内容的空面板（真机上是媒体页）。这里要求立刻回到待处理提示卡。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.interactive=true;
+    let settings=h.app.settings.clone();
+    h.app.agent_cards.receive(serde_json::json!({"id":"collapse-me","provider":"dsh","kind":"approval",
+        "data":{"tool":"bash","reason":"确认后执行","cwd":"C:\\work","operation":"{\"cmd\":\"ls\"}"}}),&settings);
+    for _ in 0..40 {h.frame(vec![]);}
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t=="仅允许这一次"),"审批卡应自动展开：{texts:?}");
+    let left=WIN_W/2.0-crate::agent_ui::CARD_W/2.0;
+    h.click(Pos2::new(left+crate::agent_ui::CARD_W-18.0-11.0,13.0+5.0+11.0));
+    for _ in 0..40 {h.frame(vec![]);}
+    assert!(!h.app.agent_detail_active(),"收起后详情应关闭");
+    assert!(!h.app.open,"收起后岛体应回到收起态");
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t=="查看并审批"),"应回到待处理提示卡：{texts:?}");
+}
+
+
+
+#[test]
+fn jump_note_is_actually_drawn_under_the_banner_and_inside_the_panel(){
+    // 跳转反馈只有「写在状态里」不够：卡片态下 toast 原本不绘制，必须确认提示行真的进了画面，
+    // 且在很高的详情卡上不压住底部按钮行。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.interactive=true;
+    let settings=h.app.settings.clone();
+    h.app.agent_cards.receive(serde_json::json!({"id":"note-me","provider":"dsh","kind":"approval",
+        "data":{"tool":"bash","reason":"确认后执行","cwd":"C:\\work","operation":"{\"cmd\":\"ls\"}"}}),&settings);
+    for _ in 0..40 {h.frame(vec![]);}
+    let left=WIN_W/2.0-crate::agent_ui::CARD_W/2.0;
+    // 收起详情 → 提示卡（banner）态
+    h.click(Pos2::new(left+crate::agent_ui::CARD_W-18.0-11.0,13.0+5.0+11.0));
+    for _ in 0..40 {h.frame(vec![]);}
+    h.app.jump_feedback("已切到 DeepSeek Harness");
+    for _ in 0..6 {h.frame(vec![]);}
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t=="已切到 DeepSeek Harness"),"提示卡态必须把跳转结论画出来：{texts:?}");
+    // 详情卡态（高度可能逼近窗口上限）也要画，并且不能落在底部按钮行上。
+    h.click_text("查看并审批");
+    for _ in 0..40 {h.frame(vec![]);}
+    h.app.jump_feedback("已切到 DeepSeek Harness");
+    for _ in 0..6 {h.frame(vec![]);}
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t=="已切到 DeepSeek Harness"),"详情卡态也必须显示跳转结论：{texts:?}");
+    let note=h.shapes.iter().find_map(|s|match &s.shape{
+        egui::Shape::Text(t) if t.galley.text()=="已切到 DeepSeek Harness"=>Some(t.visual_bounding_rect()),
+        _=>None}).expect("提示行应有可见文字矩形");
+    let footer=h.shapes.iter().find_map(|s|match &s.shape{
+        egui::Shape::Text(t) if t.galley.text()=="仅允许这一次"=>Some(t.visual_bounding_rect()),
+        _=>None}).expect("审批卡应有允许按钮文字");
+    // 提示行要么排在卡片下方（常见），要么在卡片内底部按钮之上；绝不能与操作按钮重叠。
+    assert!(!note.intersects(footer),"提示行不能压住底部按钮行：note={note:?} footer={footer:?}");
+    let panel_bottom=h.app.agent_cards.detail_size("note-me").1;
+    assert!(note.min.y>=footer.max.y || note.max.y<=panel_bottom+2.0,"提示行必须落在卡片外下方或卡片内：note={note:?}");
+}
+
+#[test]
+fn banner_jump_chip_always_reports_a_result(){
+    // 回归：收起态提示卡上的「切换到客户端」以前在 extras.rs 里是空分支，点了完全没反应。
+    // 现在必须走真实跳转，并把结论（已在前台/已切到/没找到/失败原因）常驻显示。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    // 测试期拦截真实 Win32 跳转：cargo test 不能抢用户正在用的前台窗口。
+    crate::agent_jump::intercept(true);
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.interactive=true;
+    let settings=h.app.settings.clone();
+    h.app.agent_cards.receive(serde_json::json!({"id":"jump-me","provider":"dsh","kind":"approval",
+        "data":{"tool":"bash","reason":"确认后执行","cwd":"C:\\work","operation":"{\"cmd\":\"ls\"}"}}),&settings);
+    for _ in 0..40 {h.frame(vec![]);}
+    // 收起详情，回到带跳转 chip 的待处理提示卡。
+    let left=WIN_W/2.0-crate::agent_ui::CARD_W/2.0;
+    h.click(Pos2::new(left+crate::agent_ui::CARD_W-18.0-11.0,13.0+5.0+11.0));
+    for _ in 0..40 {h.frame(vec![]);}
+    let texts=h.strings();
+    assert!(texts.iter().any(|t|t=="查看并审批"),"收起后应回到提示卡：{texts:?}");
+    assert!(h.app.jump_note_text().is_none(),"还没点跳转就不该有结论");
+    h.click_text("切换到客户端");
+    for _ in 0..10 {h.frame(vec![]);}
+    let note=h.app.jump_note_text().unwrap_or_else(||panic!("收起态提示卡的跳转必须产生可见结论，不能是空实现"));
+    assert!(note.contains("DeepSeek Harness"),"跳转结论要说明目标客户端：{note}");
+    crate::agent_jump::intercept(false);
+}
+
+#[test]
+fn done_card_reply_text_jumps_back_to_the_client(){
+    // 需求：完成卡上的回复正文区域本身就是「回到原会话」的入口，不用再去找按钮。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    // 测试期拦截真实 Win32 跳转：cargo test 不能抢用户正在用的前台窗口。
+    crate::agent_jump::intercept(true);
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=2;
+    h.app.settings.agent.expanded=true;
+    h.app.settings.agent.dwell=15;
+    let settings=h.app.settings.clone();
+    let finished=h.app.agent_cards.receive(serde_json::json!({
+        "id":"done-jump","provider":"dsh","kind":"finished",
+        "data":{"text":"## 本轮完成\n- 这一块是回复正文，点它应该回到原会话","sessionId":"sess-1","cwd":"C:\\work"}
+    }),&settings).expect("完成事件应转成通知");
+    h.app.agent_finished(finished.0,finished.1);
+    let _=crate::agent_jump::take_feedback();
+    assert!(h.app.agent_cards.finished_jump().is_some(),"完成事件应解析出可跳转的会话目标");
+    for _ in 0..60 {h.frame(vec![]);}
+    assert!(h.app.notice.is_some(),"应先弹出完成卡");
+    assert!(h.app.jump_note_text().is_none(),"还没点就不该有跳转结论");
+    let reply=h.strings().into_iter().find(|t|t.contains("回复正文")).expect("完成卡应显示回复摘要");
+    h.click_text(&reply);
+    for _ in 0..10 {h.frame(vec![]);}
+    let note=h.app.jump_note_text().unwrap_or_else(||panic!("点回复正文必须产生跳转结论，不能是死区域"));
+    assert!(note.contains("DeepSeek Harness")||note.contains("客户端"),"跳转结论要说明目标：{note}");
+    crate::agent_jump::intercept(false);
+}
+
+#[test]
+fn done_card_status_only_hint_is_not_a_jump_target(){
+    // 没有正文时那一行是「仅状态 · 未接收回复正文」的说明，不能伪装成可跳转的回复。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    crate::agent_jump::intercept(true);
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=0;
+    h.app.settings.agent.expanded=true;
+    let settings=h.app.settings.clone();
+    let finished=h.app.agent_cards.receive(serde_json::json!({
+        "id":"done-no-body","provider":"dsh","kind":"finished",
+        "data":{"text":"","sessionId":"sess-2","cwd":"C:\\work"}
+    }),&settings).expect("完成事件应转成通知");
+    h.app.agent_finished(finished.0,finished.1);
+    for _ in 0..60 {h.frame(vec![]);}
+    assert!(h.app.jump_note_text().is_none(),"还没点就不该有跳转结论");
+    h.click_text("仅状态 · 未接收回复正文");
+    for _ in 0..10 {h.frame(vec![]);}
+    assert!(h.app.jump_note_text().is_none(),"仅状态说明行不该触发跳转");
+    crate::agent_jump::intercept(false);
+}
+
+#[test]
+fn result_layer_reply_body_jumps_back_to_the_client(){
+    // 需求：结果层就是「本轮回复」的完整正文，点正文本身要能回到原会话。
+    // 回归：之前只给完成卡摘要挂了跳转，结果层（用户真正读正文的地方）点正文完全没反应。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    crate::agent_jump::intercept(true);
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=2;
+    h.app.settings.agent.expanded=true;
+    h.app.settings.agent.dwell=15;
+    let settings=h.app.settings.clone();
+    let finished=h.app.agent_cards.receive(serde_json::json!({
+        "id":"result-jump","provider":"dsh","kind":"finished",
+        "data":{"text":"## 本轮完成\n\n这一块是回复正文，点它应该回到原会话。","sessionId":"sess-result","cwd":"C:\\work"}
+    }),&settings).expect("完成事件应转成通知");
+    h.app.agent_finished(finished.0,finished.1);
+    for _ in 0..60 {h.frame(vec![]);}
+    h.click_text("查看回复");
+    for _ in 0..45 {h.frame(vec![]);}
+    assert!(h.app.result_active(),"点查看回复应打开结果层");
+    assert!(h.strings().iter().any(|t|t=="点正文回到会话 · 只读不落盘"),"结果层要有「正文可点」的线索：{:?}",h.strings());
+    let _=crate::agent_jump::take_feedback();
+    assert!(h.app.jump_note_text().is_none(),"还没点正文就不该有跳转结论");
+    h.click_text("这一块是回复正文，点它应该回到原会话。");
+    for _ in 0..10 {h.frame(vec![]);}
+    let note=h.app.jump_note_text().unwrap_or_else(||panic!("点结果层正文必须产生跳转结论，不能是死区域"));
+    assert!(note.contains("会话"),"跳转结论要说明目标：{note}");
+    crate::agent_jump::intercept(false);
+}
+
+#[test]
+fn result_layer_copy_button_is_not_swallowed_by_the_body_jump(){
+    // 正文很短时正文视口有 60 的下限，可能贴到按钮顶边：点「复制内容」不能被正文跳转吃掉。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    crate::agent_jump::intercept(true);
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=2;
+    h.app.settings.agent.expanded=true;
+    h.app.settings.agent.dwell=15;
+    let settings=h.app.settings.clone();
+    let finished=h.app.agent_cards.receive(serde_json::json!({
+        "id":"result-copy","provider":"dsh","kind":"finished",
+        "data":{"text":"短正文。","sessionId":"sess-copy","cwd":"C:\\work"}
+    }),&settings).expect("完成事件应转成通知");
+    h.app.agent_finished(finished.0,finished.1);
+    for _ in 0..60 {h.frame(vec![]);}
+    h.click_text("查看回复");
+    for _ in 0..45 {h.frame(vec![]);}
+    assert!(h.app.result_active());
+    let _=crate::agent_jump::take_feedback();
+    h.click_text("复制内容");
+    for _ in 0..8 {h.frame(vec![]);}
+    assert!(h.app.jump_note_text().is_none(),"点「复制内容」不能误触正文跳转");
+    crate::agent_jump::intercept(false);
+}
+
+#[test]
+fn result_layer_explanatory_text_is_not_a_jump_target(){
+    // 没有正文时结果层显示的是岛仔本机生成的解释，不是回复：点它不能触发跳转。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    crate::agent_jump::intercept(true);
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=0;
+    h.app.settings.agent.expanded=true;
+    h.app.settings.agent.dwell=15;
+    let settings=h.app.settings.clone();
+    let finished=h.app.agent_cards.receive(serde_json::json!({
+        "id":"result-hint","provider":"dsh","kind":"finished",
+        "data":{"text":"","sessionId":"sess-hint","cwd":"C:\\work"}
+    }),&settings).expect("完成事件应转成通知");
+    h.app.agent_finished(finished.0,finished.1);
+    for _ in 0..60 {h.frame(vec![]);}
+    h.click_text("查看回复");
+    for _ in 0..45 {h.frame(vec![]);}
+    assert!(h.app.result_active(),"content=0 也应打开说明层");
+    let _=crate::agent_jump::take_feedback();
+    let line=h.strings().into_iter().find(|t|t.contains("完成内容")&&t.contains("宿主")).expect("说明层应有解释文字");
+    h.click_text(&line);
+    for _ in 0..10 {h.frame(vec![]);}
+    assert!(h.app.jump_note_text().is_none(),"说明层的解释文字不该触发跳转");
+    crate::agent_jump::intercept(false);
+}
+
+#[test]
+fn agent_badge_stays_after_completion_bubble_and_clears_when_opened(){
+    // 需求：完成通知冒泡消失后，岛体侧边要像喝水/久坐一样常驻一个 Agent 角标；
+    // 点它本身（或点「查看回复」）后角标才消失。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    crate::agent_jump::intercept(true);
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=2;
+    h.app.settings.agent.expanded=true;
+    h.app.settings.agent.dwell=2;
+    let settings=h.app.settings.clone();
+    let finished=h.app.agent_cards.receive(serde_json::json!({
+        "id":"badge-done","provider":"dsh","kind":"finished",
+        "data":{"text":"## 完成\n- 常驻角标验证","sessionId":"sess-badge","cwd":"C:\\work"}
+    }),&settings).expect("完成事件应转成通知");
+    h.app.agent_finished(finished.0,finished.1);
+    // 先让冒泡自然过期（dwell=2s），期间不点任何东西。
+    for _ in 0..200 {h.frame(vec![]);}
+    assert!(h.app.notice.is_none(),"完成卡冒泡应按时消失");
+    let badges=h.app.agent_badges();
+    assert_eq!(badges.len(),1,"冒泡消失后必须留下常驻角标");
+    assert_eq!(badges[0].kind,crate::agent_cards::BadgeKind::Done);
+    // 点角标：跳到原会话并清掉这条提醒。
+    let badge=badges[0].clone();
+    h.app.open_agent_badge(&badge);
+    assert!(h.app.agent_badges().is_empty(),"点过角标后提醒应消失");
+    assert!(h.app.toast_text().is_some(),"跳转必须给出可见结论（角标场景用岛体下方短提示）");
+    // 客户端本来就在最前台时切窗口没有可见变化：必须退化成在岛上打开结果层，
+    // 否则用户点角标看到的就是「什么都没发生」。
+    assert!(h.app.result_active(),"已在前台时点角标应直接在岛上打开本轮回复");
+    for _ in 0..40 {h.frame(vec![]);}
+    assert!(h.strings().iter().any(|t|t.contains("本轮回复")),"结果层要能直接看到正文");
+    crate::agent_jump::intercept(false);
+}
+
+#[test]
+fn pending_approval_keeps_a_blocking_card_instead_of_a_badge(){
+    // 待审批走的是常驻提示卡（duration=∞），不会被别的通知顶掉，所以不需要再叠角标；
+    // 这里锁定这个分工：请求在队列里 → 卡片在、角标不重复占位。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.interactive=true;
+    let settings=h.app.settings.clone();
+    h.app.agent_cards.receive(serde_json::json!({"id":"badge-approval","provider":"dsh","kind":"approval",
+        "data":{"tool":"bash","cwd":"C:\\work","operation":"{\"cmd\":\"ls\"}"}}),&settings);
+    for _ in 0..20 {h.frame(vec![]);}
+    assert_eq!(h.app.agent_cards.badges().len(),1,"底层应登记这条待办");
+    assert!(h.app.agent_badges().is_empty(),"卡片正在显示时不该再叠角标");
+    // 切页不能把待审批卡片带走（之前点岛体切页会把提示卡一起清掉，用户以为没事了）。
+    h.app.show_page(1);
+    for _ in 0..10 {h.frame(vec![]);}
+    assert!(h.app.notice.is_some(),"切页后待审批卡片必须还在");
+    assert_eq!(h.app.agent_cards.count(),1);
+    h.app.agent_cards.hand_back("badge-approval");
+    assert!(h.app.agent_badges().is_empty());
+}
+
+#[test]
+fn result_layer_scroll_persists_and_never_flips_the_island_page(){
+    // 回归：结果层滚动偏移以前只存在局部变量里，每帧从 0 重新开始（长回复滚不动）；
+    // 同时滚轮会被「滚轮翻页」逻辑吞掉，滚一下就翻到下一张岛页。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=2;
+    h.app.settings.agent.expanded=true;
+    h.app.settings.agent.dwell=15;
+    let body=(1..=120).map(|i|format!("第 {i} 行正文，用来撑出结果层滚动条。")).collect::<Vec<_>>().join("\n");
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,body);
+    for _ in 0..60 {h.frame(vec![]);}
+    h.click_text("查看回复");
+    for _ in 0..45 {h.frame(vec![]);}
+    assert!(h.app.result_active(),"点查看回复应打开结果层");
+    assert_eq!(h.app.agent_cards.result_scroll(),0.0,"刚打开时应停在顶部");
+    let page=h.app.page();
+    let p=Pos2::new(WIN_W/2.0,220.0);
+    h.cursor=Some(p);
+    h.frame(vec![egui::Event::PointerMoved(p)]);
+    for _ in 0..6 {h.wheel(-40.0);}
+    let scrolled=h.app.agent_cards.result_scroll();
+    assert!(scrolled>0.0,"滚轮必须真的滚动结果层：偏移 {scrolled}");
+    assert_eq!(h.app.page(),page,"结果层打开时滚轮不能翻岛页");
+    for _ in 0..5 {h.frame(vec![]);}
+    assert!((h.app.agent_cards.result_scroll()-scrolled).abs()<0.5,
+        "滚动偏移必须写回状态，不能每帧回到顶部：{} -> {}",scrolled,h.app.agent_cards.result_scroll());
+}
+
+/// 逐帧导出卡片出现过程：用来检查展开动画期间内容是否溢出岛体（一次性排查用，默认忽略）。
+#[test]
+#[ignore]
+fn agent_done_expansion_frames(){
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_AGENT_PREVIEW").expect("DAOZAI_AGENT_PREVIEW"));
+    let dest=dest.join("anim");std::fs::create_dir_all(&dest).unwrap();
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=2;
+    h.app.settings.agent.expanded=true;
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,"## 本轮完成\n- 更新网关超时与重试\n- 跑了 12 个回归用例\n\n```bash\ncargo test --lib\n```\n\n全部通过。".into());
+    let ppp=2.0;let (w,hgt)=(crate::app::CANVAS_W,WIN_H);
+    let mut raster=crate::preview_raster::Raster::new((w*ppp) as usize,(hgt*ppp) as usize);
+    for f in 0..18 {
+        h.t+=1.0/60.0;
+        let env=Env{t:h.t,clock:"09:41:00".into(),today:"2026-11-20".into(),date:"11月20日 周五".into(),bt_ready:true,..Default::default()};
+        let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(w,hgt))),time:Some(h.t),focused:true,
+            viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(ppp),..Default::default()})).collect(),..Default::default()};
+        let app=&mut h.app;
+        let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{let win=Rect::from_min_size(ui.max_rect().min,Vec2::new(WIN_W,hgt));app.frame(ui,win,&env);});});
+        raster.update_textures(&output.textures_delta);
+        let primitives=h.ctx.tessellate(output.shapes,output.pixels_per_point);
+        raster.buf.fill([0.14,0.16,0.22,1.0]);
+        raster.draw(&primitives,output.pixels_per_point);
+        let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+        let image=image::RgbaImage::from_raw((w*ppp) as u32,(hgt*ppp) as u32,rgba).unwrap();
+        let crop_h=(h.app.expanded_height()*ppp+40.0).max(260.0).min(hgt*ppp) as u32;
+        let crop_w=1160u32.min((w*ppp) as u32-160);
+        let crop=image::imageops::crop_imm(&image,160,0,crop_w,crop_h).to_image();
+        crop.save(dest.join(format!("done-{f:02}.png"))).unwrap();
+    }
+}
+
+#[test]
+fn completion_panel_height_tracks_the_measured_card(){
+    // 回归：完成卡正文两行时固定 112 高度会让文字压到按钮上，必须用实测高度。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=2;
+    h.app.settings.agent.expanded=true;
+    let body="第一行很长的完成摘要，需要换行才放得下，所以这里故意写得很长很长。".repeat(3);
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,body.clone());
+    for _ in 0..60 {h.frame(vec![]);}
+    let (_,card_h)=h.app.agent_cards.done_size(crate::agent_notice::Provider::Dsh,&body,!h.app.settings.agent.expanded);
+    assert!(card_h>112.0,"长正文的完成卡应该比旧常量高：{card_h}");
+    let (_,panel_h)=h.app.base_size();
+    assert!(panel_h+0.6>=card_h,"面板高度必须容纳完成卡：{panel_h} vs {card_h}");
+}
+
+/// 导出结果层 markdown 的实际画面（含「关闭」后的收起态）：人工复核用，默认忽略。
+/// 运行：`DAOZAI_AGENT_PREVIEW=<目录> cargo test --lib result_layer_markdown_preview -- --ignored`。
+#[test]
+#[ignore]
+fn result_layer_markdown_preview(){
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_AGENT_PREVIEW").expect("DAOZAI_AGENT_PREVIEW"));
+    std::fs::create_dir_all(&dest).unwrap();
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=2;
+    h.app.settings.agent.expanded=true;
+    h.app.settings.agent.dwell=15;
+    let body="## 本轮完成\n\n用了 `cargo test` 验证，**全部通过**。详见 [接入文档](https://example.com/docs)。\n\n1. 先改 `gateway.yaml` 的超时\n2. 再跑 12 个回归用例\n3. 最后确认发布窗口\n\n- 无序条目一\n  - 二级缩进条目\n- 无序条目二\n\n> 引用：发布前请确认变更单。\n\n| 项目 | 结果 | 备注 |\n| --- | --- | --- |\n| 单元测试 | 通过 | 12 个用例 |\n| 冒烟测试 | 通过 | 登录、支付 |\n\n---\n\n```bash\ncargo test --lib ui_tests -- --test-threads=1\n```\n\n以上全部通过。";
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,body.to_owned());
+    for _ in 0..60 {h.frame(vec![]);}
+    h.click_text("查看回复");
+    for _ in 0..45 {h.frame(vec![]);}
+    assert!(h.app.result_active(),"结果层应打开");
+    let ppp=2.0;let (w,hgt)=(crate::app::CANVAS_W,WIN_H);
+    let mut raster=crate::preview_raster::Raster::new((w*ppp) as usize,(hgt*ppp) as usize);
+    let mut shoot=|h:&mut H,name:&str|{
+        let env=Env{t:h.t,clock:"09:41:00".into(),today:"2026-11-20".into(),date:"11月20日 周五".into(),bt_ready:true,..Default::default()};
+        let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(w,hgt))),time:Some(h.t),focused:true,
+            viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(ppp),..Default::default()})).collect(),..Default::default()};
+        let app=&mut h.app;
+        let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{let win=Rect::from_min_size(ui.max_rect().min,Vec2::new(WIN_W,hgt));app.frame(ui,win,&env);});});
+        raster.update_textures(&output.textures_delta);
+        let primitives=h.ctx.tessellate(output.shapes,output.pixels_per_point);
+        raster.buf.fill([0.14,0.16,0.22,1.0]);
+        raster.draw(&primitives,output.pixels_per_point);
+        let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+        let image=image::RgbaImage::from_raw((w*ppp) as u32,(hgt*ppp) as u32,rgba).unwrap();
+        let crop_h=(h.app.expanded_height()*ppp+40.0).max(260.0).min(hgt*ppp) as u32;
+        let crop_w=1160u32.min((w*ppp) as u32-160);
+        let crop=image::imageops::crop_imm(&image,160,0,crop_w,crop_h).to_image();
+        crop.save(dest.join(format!("{name}.png"))).unwrap();
+    };
+    shoot(&mut h,"result-markdown-top");
+    // 滚到底：确认代码块与结尾段落没有压住底部按钮。
+    let p=Pos2::new(WIN_W/2.0,220.0);
+    h.cursor=Some(p);
+    h.frame(vec![egui::Event::PointerMoved(p)]);
+    for _ in 0..40 {h.wheel(-40.0);}
+    shoot(&mut h,"result-markdown-bottom");
+    // 点「关闭」：必须一次收起，画面上不再有完成卡。
+    h.cursor=None;
+    h.frame(vec![]);
+    let close=h.shapes.iter().find_map(|s|match &s.shape{
+        egui::Shape::Text(t) if t.galley.text()=="关闭"=>Some(t.visual_bounding_rect().center()),_=>None}).expect("结果层应有「关闭」");
+    h.click(close);
+    for _ in 0..40 {h.frame(vec![]);}
+    assert!(!h.app.open && h.app.notice.is_none(),"「关闭」必须一次收起（画面上不能再留完成卡）");
+    shoot(&mut h,"result-markdown-closed");
+    // 用户真实配置（展开结果卡 + 完成内容=仅状态）时会打开本机说明层，它同样要能读、能一次收起。
+    let mut h=H::new();
+    h.app.settings.dsh_notifications=true;
+    h.app.settings.agent.content=0;
+    h.app.settings.agent.expanded=true;
+    h.app.settings.agent.dwell=15;
+    h.app.agent_finished(crate::agent_notice::Provider::Dsh,String::new());
+    for _ in 0..60 {h.frame(vec![]);}
+    h.click_text("查看回复");
+    for _ in 0..45 {h.frame(vec![]);}
+    assert!(h.app.result_active(),"content=0 点「查看回复」应打开说明层");
+    shoot(&mut h,"result-no-body");
 }
