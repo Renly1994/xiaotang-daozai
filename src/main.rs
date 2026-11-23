@@ -716,6 +716,13 @@ impl eframe::App for Shell {
                         }
                     }
                 }
+                Cmd::DismissUnread(unread)=>{
+                    if self.app.pending_messengers.contains(&unread){
+                        #[cfg(windows)] messenger::windows::trace(format!("手动关闭{}提醒 账号 {}",unread.source.name(),unread.pid));
+                        self.app.discard_unread(unread);
+                        ctx.request_repaint();
+                    }
+                }
                 Cmd::RestartApp=>{
                     // 先拉起新进程（它会等本进程退出），再像托盘「退出」一样摘图标后结束。
                     if diagnostics::spawn_replacement(){
