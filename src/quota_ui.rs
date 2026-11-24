@@ -21,6 +21,7 @@ pub(crate) struct State {
     pub api_connecting:Option<quota::api::Connect>,pub api_key:String,
     pub detail_account:Option<String>,
     pub kiro_connecting:Option<quota::kiro::Connect>,
+    pub magpie_connecting:Option<quota::magpie::Connect>,
     pub stale:HashMap<String,String>,
     pub gemini_connecting:Option<quota::gemini::Connect>,pub gemini_email:String,pub gemini_cookie:String,
     pub doubao_connecting:Option<quota::doubao::Connect>,pub doubao_cookie:String,
@@ -67,6 +68,16 @@ impl State {
         let mut next=self.config.clone();let id=quota::kiro::apply_connection(&mut next,target,&connected)?;
         next.save_checked()?;self.config=next;
         self.stale.remove(&id);self.busy.remove(&id);self.rows.insert(id,Ok(connected.snapshot));self.save_snapshots();self.connect_target=None;Ok(())
+    }
+    fn connect_magpie(&mut self,target:Option<&Account>,connected:quota::magpie::Connected)->Result<String,String>{
+        let count=connected.len();
+        let mut next=self.config.clone();let applied=quota::magpie::apply_connection(&mut next,target,&connected)?;
+        next.save_checked()?;self.config=next;
+        for (id,result) in applied.rows{self.stale.remove(&id);self.busy.remove(&id);self.rows.insert(id,result);}
+        self.save_snapshots();self.connect_target=None;
+        let mut message=format!("Magpie 已连接 · 本次探测到 {count} 个条目");
+        if !applied.notes.is_empty(){message.push_str("；");message.push_str(&applied.notes.join("；"));}
+        Ok(message)
     }
     pub fn receive(&mut self,mut event:quota::Event){
         self.busy.remove(&event.id);
@@ -256,6 +267,8 @@ fn claude_disclaimer(ui:&mut egui::Ui){
 impl App {
     pub(crate) fn quota_close_connection(&mut self){
         if let Some(connect)=&mut self.quota.kiro_connecting{connect.cancel();}
+        if let Some(connect)=&mut self.quota.magpie_connecting{connect.cancel();}
+        self.quota.magpie_connecting=None;
         self.quota.connect_open=false;self.quota.connect_target=None;
         self.quota.api_connecting=None;self.quota.api_key.clear();
         self.quota.relay_user_token=false;self.quota.relay_user_id.clear();
@@ -293,6 +306,13 @@ impl App {
             let connect=self.quota.kiro_connecting.take().unwrap();
             if !connect.cancelled(){
                 self.quota.note=match result.and_then(|connected|self.quota.connect_kiro(connect.target.as_ref(),connected)){Ok(())=>{self.pending.push(Cmd::QuotaConnected);"Kiro 已连接，用户身份已核验".into()},Err(error)=>error};
+            }
+        }
+        if !self.settings_open||!self.quota.connect_open{if let Some(connect)=&mut self.quota.magpie_connecting{connect.cancel();}}
+        if let Some(result)=self.quota.magpie_connecting.as_ref().and_then(|connect|connect.poll()){
+            let connect=self.quota.magpie_connecting.take().unwrap();
+            if !connect.cancelled(){
+                self.quota.note=match result.and_then(|connected|self.quota.connect_magpie(connect.target.as_ref(),connected)){Ok(message)=>{self.pending.push(Cmd::QuotaConnected);message},Err(error)=>error};
             }
         }
         if let Some(result)=self.quota.workbuddy_connecting.as_ref().and_then(|c|c.poll()){
@@ -349,6 +369,11 @@ impl App {
         if self.quota.connect_target.is_some()&&target.is_none(){self.quota.note="原账号已移除，请重新添加".into();return;}
         self.quota.note.clear();self.quota.kiro_connecting=Some(quota::kiro::Connect::start(path,self.quota.alias.clone(),target));
     }
+    fn quota_start_magpie(&mut self){
+        if self.quota.magpie_connecting.is_some(){return;}
+        let target=self.quota.connect_target.as_ref().and_then(|id|self.quota.config.accounts.iter().find(|a|&a.id==id)).cloned();
+        self.quota.note.clear();self.quota.magpie_connecting=Some(quota::magpie::Connect::start(target));
+    }
     pub fn quota_config(&self)->&Config{&self.quota.config}
     pub fn quota_initialize(&mut self){if !crate::model::config_dir().join("ai-quota.json").exists(){self.quota.config.discover();self.quota.config.save();}}
     pub fn quota_pending(&mut self,accounts:&[Account]){self.quota.busy.extend(accounts.iter().map(|a|a.id.clone()));}
@@ -363,7 +388,7 @@ impl App {
         self.quota_bar_indices().iter().enumerate().filter_map(|(position,index)|{
             let account=&self.quota.config.accounts[*index];
             let extra=if let Some(text)=self.quota.tail_text(&account.id){ctx.fonts(|fonts|fonts.layout_no_wrap(text,theme::font(theme::size::PILL_CLOCK,W::Bold),theme::WHITE).size().x).ceil()+6.0}
-                else if account.provider.balance()&&self.quota.balance_loading(&account.id){22.0}
+                else if (account.provider.balance()||quota::magpie::balance_account(account))&&self.quota.balance_loading(&account.id){22.0}
                 else{return None;};
             Some((position,extra))
         }).collect()
@@ -375,7 +400,7 @@ impl App {
             let faded=c.faded(alpha);let faded=if alpha<0.8{faded.ghost()}else{faded};let c=&faded;
             let a=&self.quota.config.accounts[*i];let x=cx+layout.x[crate::bar_layout::quota_slot(position)].unwrap();
             let snapshot=self.quota.rows.get(&a.id).and_then(|r|r.as_ref().ok());
-            if a.provider.balance(){
+            if a.provider.balance()||quota::magpie::balance_account(a){
                 let wide=true;let extra=if wide{layout.widths[crate::bar_layout::quota_slot(position)]-27.0}else{0.0};let icon_x=x-extra/2.0;
                 if a.provider!=Provider::DeepSeek{logo(c,a.provider,icon_x,15.0,22.0);}else{deepseek_badge(c,self.settings.skin,icon_x,15.0,24.0);}
                 let loading=self.quota.balance_loading(&a.id);let stale=self.quota.stale.contains_key(&a.id);
@@ -433,7 +458,7 @@ impl App {
                     else if a.provider==Provider::Claude{format!("本地记录 · {time}")}
                     else if let Some(wallet)=&s.wallet{let b=wallet.primary();if wallet.balances.len()>1{let other=wallet.balances.iter().find(|other|other.currency!=b.currency).unwrap();format!("另有 {} {} · {time}",other.currency,other.full(other.total))}else{format!("{} · {time} 更新",b.currency)}}
                     else{format!("{time} 更新")};
-                let x=if a.provider.balance(){125.0}else{157.0};let width=357.0-x;let y=154.0;
+                let x=if a.provider.balance()||quota::magpie::balance_account(a){125.0}else{157.0};let width=357.0-x;let y=154.0;
                 c.centered_text(x,y,&c.fit(&status,10.0,W::Regular,width),10.0,W::Regular,if stale.is_some()&&!busy{Color32::from_rgb(255,166,77)}else{theme::DIM},H::Left);
                 let tooltip=match stale{
                     Some(reason) if !busy=>format!("上次记录 · {time}\n{reason}"),
@@ -467,7 +492,7 @@ impl App {
             }else{let text=if self.quota.busy.contains(&a.id){"正在更新余额…"}else{result.and_then(|r|r.as_ref().err()).map(String::as_str).unwrap_or("等待更新余额")};for (i,line) in c.wrap(text,11.0,W::Regular,226.0,3).iter().enumerate(){c.text(125.0,92.0+i as f32*17.0,line,11.0,W::Regular,theme::GRAY,H::Left);}}
             return;
         }
-        if a.provider.relay(){
+        if a.provider.relay()||quota::magpie::balance_account(a){
             logo(c,a.provider,85.0,105.0,44.0);
             if let Some(q)=snapshot.and_then(|s|s.relay.as_ref()){
                 if let Some(amount)=q.primary(){
@@ -553,7 +578,7 @@ impl App {
         }else{let message=if self.quota.busy.contains(&a.id){"正在更新额度…"}else{result.and_then(|r|r.as_ref().err()).map(String::as_str).unwrap_or("等待更新额度")};for(i,line)in c.wrap(message,11.0,W::Regular,197.0,2).iter().enumerate(){c.text(157.0,103.0+i as f32*17.0,line,11.0,W::Regular,theme::GRAY,H::Left);}}
     }
     fn quota_open_connection(&mut self,id:Option<String>){
-        if self.quota.kiro_connecting.is_some()||self.quota.api_connecting.is_some()||self.quota.workbuddy_connecting.is_some()||self.quota.deepseek_connecting.is_some()||self.quota.gemini_connecting.is_some()||self.quota.doubao_connecting.is_some()||self.quota.login.is_some(){self.quota.connect_open=true;return;}
+        if self.quota.kiro_connecting.is_some()||self.quota.magpie_connecting.is_some()||self.quota.api_connecting.is_some()||self.quota.workbuddy_connecting.is_some()||self.quota.deepseek_connecting.is_some()||self.quota.gemini_connecting.is_some()||self.quota.doubao_connecting.is_some()||self.quota.login.is_some(){self.quota.connect_open=true;return;}
         self.quota.note.clear();self.quota.api_key.clear();self.quota.deepseek_key.clear();self.quota.gemini_cookie.clear();self.quota.doubao_cookie.clear();self.quota.source.clear();self.quota.alias.clear();
         self.quota.gemini_email.clear();
         self.quota.relay_manual=id.is_some();
@@ -627,7 +652,7 @@ impl App {
                         });
                     });
                     if let Some(s)=snapshot{
-                        if a.provider.api_key()||a.provider==Provider::Doubao{ui.label(snapshot_details(s));}else if let Some(credits)=&s.credits{ui.horizontal_wrapped(|ui|{ui.label(egui::RichText::new("可用积分").size(11.0).color(ui.visuals().weak_text_color()));ui.label(egui::RichText::new(credits.full()).size(20.0).strong());ui.label(egui::RichText::new(credits.packages.iter().map(|(label,n)|format!("{label} {n}")).collect::<Vec<_>>().join(" · ")).size(11.0).color(ui.visuals().weak_text_color()));});}else if let Some(wallet)=&s.wallet{
+                        if a.provider.api_key()||a.provider==Provider::Doubao||a.provider==Provider::Magpie{ui.label(snapshot_details(s));}else if let Some(credits)=&s.credits{ui.horizontal_wrapped(|ui|{ui.label(egui::RichText::new("可用积分").size(11.0).color(ui.visuals().weak_text_color()));ui.label(egui::RichText::new(credits.full()).size(20.0).strong());ui.label(egui::RichText::new(credits.packages.iter().map(|(label,n)|format!("{label} {n}")).collect::<Vec<_>>().join(" · ")).size(11.0).color(ui.visuals().weak_text_color()));});}else if let Some(wallet)=&s.wallet{
                             ui.horizontal_wrapped(|ui|{
                                 ui.label(egui::RichText::new(if wallet.available{"可用余额"}else{"余额不可用"}).size(11.0).color(ui.visuals().weak_text_color()));
                                 ui.label(egui::RichText::new(wallet.primary().full(wallet.primary().total)).size(20.0).strong());
@@ -655,7 +680,7 @@ impl App {
                         if ui.button("重新连接").clicked(){connect=Some(a.id.clone());}
                         if let Some(s)=snapshot{let time=chrono::DateTime::from_timestamp(s.at,0).map(|at|at.with_timezone(&chrono::Local).format(if a.provider==Provider::Claude{"%m-%d %H:%M 本地记录"}else{"%H:%M 更新"}).to_string()).unwrap_or_default();ui.label(egui::RichText::new(time).size(10.0).color(ui.visuals().weak_text_color()));}
                     });
-                    if !a.provider.balance(){
+                    if !a.provider.balance()&&!quota::magpie::balance_account(&a){
                         let mut color=self.quota.config.colors.get(&a.id).copied().unwrap_or_default();color_picker(ui,a.provider,&mut color);
                         if color==Accent::Brand{self.quota.config.colors.remove(&a.id);}else{self.quota.config.colors.insert(a.id.clone(),color);}
                     }
@@ -695,13 +720,13 @@ impl App {
             egui::ScrollArea::vertical().max_height(if self.quota.provider==Provider::RelayCustom{(ctx.screen_rect().height()-140.0).clamp(260.0,640.0)}else{460.0}).show(ui,|ui|{
             let previous_provider=self.quota.provider;
             let mut group=connection_group(self.quota.provider);
-            ui.add_enabled_ui(self.quota.connect_target.is_none()&&self.quota.api_connecting.is_none()&&self.quota.kiro_connecting.is_none()&&self.quota.workbuddy_connecting.is_none()&&self.quota.deepseek_connecting.is_none()&&self.quota.gemini_connecting.is_none()&&self.quota.doubao_connecting.is_none()&&self.quota.login.is_none(),|ui|{
+            ui.add_enabled_ui(self.quota.connect_target.is_none()&&self.quota.api_connecting.is_none()&&self.quota.kiro_connecting.is_none()&&self.quota.magpie_connecting.is_none()&&self.quota.workbuddy_connecting.is_none()&&self.quota.deepseek_connecting.is_none()&&self.quota.gemini_connecting.is_none()&&self.quota.doubao_connecting.is_none()&&self.quota.login.is_none(),|ui|{
                 settings_control_row(ui,"服务",56.0,|ui|{egui::ComboBox::from_id_salt("quota-provider").selected_text(connection_name(group)).show_ui(ui,|ui|{
                     for p in Provider::ALL.into_iter().filter(|p|connection_group(*p)==*p){ui.selectable_value(&mut group,p,connection_name(p));}
                 }).response});
             });
             if group!=connection_group(previous_provider){self.quota.provider=group;}
-            ui.add_enabled_ui((self.quota.connect_target.is_none()||group==Provider::NewApi)&&self.quota.api_connecting.is_none()&&self.quota.kiro_connecting.is_none(),|ui|{
+            ui.add_enabled_ui((self.quota.connect_target.is_none()||group==Provider::NewApi)&&self.quota.api_connecting.is_none()&&self.quota.kiro_connecting.is_none()&&self.quota.magpie_connecting.is_none(),|ui|{
                 if group==Provider::ZCode{
                     let mut use_key=self.quota.provider==Provider::Glm;
                     ui.horizontal(|ui|{ui.label("连接方式");ui.selectable_value(&mut use_key,false,"本机 ZCode");ui.selectable_value(&mut use_key,true,"套餐 API Key");});
@@ -836,6 +861,9 @@ impl App {
                 if ui.add_enabled(self.quota.kiro_connecting.is_none(),egui::Button::new("连接本机 Kiro")).clicked(){match quota::kiro::path(){Some(path)=>self.quota_start_kiro(path),None=>self.quota.note="未找到 Kiro 登录目录".into()}}
                 ui.collapsing("导入其他登录文件",|ui|{self.quota_file_form(ui);});
                 ui.label(egui::RichText::new("只读识别 Kiro 登录缓存，核验用户后显示套餐、有效试用和赠送 / 加购点数；超额上限单独显示。不自动续期，登录过期时请在 Kiro 中重新登录。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75))));
+            }else if self.quota.provider==Provider::Magpie{
+                if ui.add_enabled(self.quota.magpie_connecting.is_none(),egui::Button::new("连接本机 magpie")).clicked(){self.quota_start_magpie();}
+                ui.label(egui::RichText::new("只读本机 magpie 的缓存额度，不触发厂商请求，也不经过代理。每个条目对应一个账号；重新连接只补建新条目，已消失的条目保留但暂不可刷新。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75))));
             }else if self.quota.provider==Provider::Claude{
                 ui.add(egui::Label::new(CLAUDE_LOCAL_NOTICE).wrap());
                 ui.horizontal(|ui|{
@@ -861,6 +889,7 @@ impl App {
                 if self.quota.login.is_some(){ui.horizontal(|ui|{ui.spinner();ui.label("等待浏览器登录…");if ui.button("取消登录").clicked(){self.quota.login=None;self.quota.note="登录已取消".into();}});ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));}
                 if self.quota.gemini_connecting.is_some(){ui.horizontal(|ui|{ui.spinner();ui.label("正在连接 Gemini…");});ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));}
                 if let Some(connect)=&mut self.quota.kiro_connecting{ui.horizontal(|ui|{ui.spinner();ui.label(if connect.cancelled(){"正在结束 Kiro 查询…"}else{"正在核验 Kiro 用户与额度…"});if !connect.cancelled()&&ui.button("取消连接").clicked(){connect.cancel();}});ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));}
+                if let Some(connect)=&mut self.quota.magpie_connecting{ui.horizontal(|ui|{ui.spinner();ui.label(if connect.cancelled(){"正在结束 magpie 查询…"}else{"正在读取本机 magpie 条目…"});if !connect.cancelled()&&ui.button("取消连接").clicked(){connect.cancel();}});ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));}
             });
         });self.quota.connect_open=open;
         if !open{self.quota_close_connection();}
@@ -1082,7 +1111,7 @@ pub(crate) const SIDE_QUOTA_BALANCE_H:f32=38.0;
 impl App {
     pub(crate) fn quota_side_items(&self)->Vec<(usize,f32)>{
         self.quota_bar_indices().into_iter().map(|i|{
-            let balance=self.quota.config.accounts[i].provider.balance();
+            let account=&self.quota.config.accounts[i];let balance=account.provider.balance()||quota::magpie::balance_account(account);
             (i,if balance{SIDE_QUOTA_BALANCE_H}else{SIDE_QUOTA_RING_H})
         }).collect()
     }
@@ -1091,7 +1120,7 @@ impl App {
         let Some(a)=self.quota.config.accounts.get(i).cloned() else{return};
         let snapshot=self.quota.rows.get(&a.id).and_then(|r|r.as_ref().ok()).cloned();
         let summary;
-        if a.provider.balance(){
+        if a.provider.balance()||quota::magpie::balance_account(&a){
             let icon_y=mid-7.0;
             if a.provider!=Provider::DeepSeek{logo(c,a.provider,cx,icon_y,20.0);}else{deepseek_badge(c,self.settings.skin,cx,icon_y,22.0);}
             let loading=self.quota.balance_loading(&a.id);let stale=self.quota.stale.contains_key(&a.id);
