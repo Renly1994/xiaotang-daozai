@@ -76,7 +76,7 @@ Windows 验收另用临时 `DAOZAI_DATA_DIR`；不运行 ignore 的私人账号�
 ## 协议来源
 
 - 豆包网页会员：[0011-joe 的 PR #42](https://github.com/Renly1994/xiaotang-daozai/pull/42)，保留原作者提交，针对当前额度页修正和适配。
-- magpie 本机额度：https://github.com/Renly1994/magpie/commit/5df7ce8 （`GET /v1/magpie/quotas`，回环直连无认证，`kept=1` 只读缓存；带转发头会被判定为外部请求并返回 403）。
+- magpie 本机额度：https://github.com/yetone/magpie/commit/5df7ce8774b4e43e47545516ad7aa24e0a05f8d9 （`GET /v1/magpie/quotas`，回环直连无认证，`kept=1` 只读缓存；带转发头会被判定为外部请求并返回 403）。
 - OpenCode Go: https://github.com/anomalyco/opencode/blob/d21b0790a6c146815f28fea604e41e922f009590/packages/console/app/src/routes/zen/go/v1/usage.ts
 - MiniMax 官方 CLI: https://github.com/MiniMax-AI/cli/blob/38aba5f26173dd1065b115b221d79c9ddd87c6bb/src/client/endpoints.ts （同提交 schema、types、quota 工具）
 - GLM 官方插件: https://github.com/zai-org/zai-coding-plugins/blob/main/plugins/glm-plan-usage/skills/usage-query-skill/scripts/query-usage.mjs

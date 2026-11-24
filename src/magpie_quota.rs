@@ -1,6 +1,6 @@
 //! magpie 本机额度：只读本机服务的缓存条目，不触发厂商请求。
 //! 服务地址固定为回环地址，专用无代理 agent，且不发送任何转发头。
-//! 协议来源：https://github.com/Renly1994/magpie/blob/5df7ce8（`GET /v1/magpie/quotas`）。
+//! 协议来源：https://github.com/yetone/magpie/blob/5df7ce8774b4e43e47545516ad7aa24e0a05f8d9（`GET /v1/magpie/quotas`）。
 use super::{relay, Account, Amount, Config, Provider, Snapshot, Window};
 use serde_json::Value;
 use std::{
