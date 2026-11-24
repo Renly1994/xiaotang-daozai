@@ -10,8 +10,11 @@
 - New API：输入 HTTPS 站点地址 + API Key，默认自动识别，也可在高级设置指定协议。仅展示接口明确返回的账户额度，保持原单位；不把 Key 额度或无限额状态当成账户余额，不擅自换算美元。
 - One API：独立读取 `/dashboard/billing/subscription` 和 `/dashboard/billing/usage`。兼容计费接口不能证明数据属于账户还是 Key，当前显示「余额暂不可查询」，不冒充账户余额；保留原单位及无限额哨兵校验。
 - Sub2API：独立 `/v1/usage`，钱包显示余额，订阅周期显示剩余百分比；只提供 Key 限额时显示「余额暂不可查询」。Key 限额不进入主卡片、收起状态或设置明细。到期时间不是重置时间。
+- Magpie：本机服务发现型，读取 `http://127.0.0.1:3425/v1/magpie/quotas?kept=1` 的缓存条目，不触发厂商请求，也不需要凭据。一个条目对应一个账号，按条目标识串 `provider|user|kind|plan` 识别；重新连接即重新探测并合并，新条目补建账号，消失的条目只提示、不自动删除。订阅／套餐条目的窗口名称是厂商自定义的不透明文本，直接显示，`remaining` 作为剩余百分比，`resetsAt` 作为重置时间，`amount`/`limit` 显示具体数值；`unlimited` 与仅文本窗口不伪造百分比；`balance` 条目复用中转站的余额展示。条目级 `error`/`readError` 视为刷新失败，保留上次数据并显示陈旧提示。
 - Kimi Code：只读使用本机订阅登录，查询时检查凭据有效期。登录过期时请在 Kimi Code 中重新登录，岛仔会在下一次定时刷新时重读登录文件。
 - 豆包：读取网页会员的非官方 `subscription/quota/summary` 接口，支持 5 小时、每周及活动额度，不查询火山方舟 API 余额。浏览器登录优先识别 Windows 默认的 Chrome／Edge，再查找本机已安装的 Chrome／Edge，使用独立临时目录及随机本地调试端口，不依赖浏览器扩展；仅采集适用于豆包额度接口的会话，结束或取消后关闭本次启动的浏览器进程并清理临时目录。也可只读导入本机豆包客户端当前配置的登录，数据库占用或加密格式未知时引导官网登录；不读取常用 Chrome／Edge 的账号目录。登录使用当前 Windows 用户的 DPAPI 加密，配置和缓存仅保存随机引用及额度快照。取消或关闭连接窗口不保存登录，重新连接保留账号名称、排序、常驻与配色。缺失、无效及零总额度不推断为剩余 100%；活动及其他权益池保留在完整明细中。
+
+Magpie 是本机服务发现型适配，回环地址写死为 `http://127.0.0.1:3425`，不开放用户输入，也不经过中转站的 HTTPS 校验。刷新始终使用 `?kept=1`，由专用无代理 agent 直连（公共 agent 会读取系统代理，不能复用）；不发送 `Forwarded` / `X-Forwarded-For` / `X-Real-IP` 等转发头，响应上限 1 MiB、超时 5 秒。连接被拒绝时提示「未检测到本机 magpie，请先启动 magpie」。
 
 中转地址要求站点根地址，原样保留反向代理部署前缀（包括路径中的 `/v1`），不会猜测或删除 API 后缀。拒绝 HTTP（含 localhost）、用户名/密码、查询参数和 fragment。自动识别仅尝试当前站点的已知额度接口，不向其他站点、厂商或地区发送 Key。
 
@@ -73,6 +76,7 @@ Windows 验收另用临时 `DAOZAI_DATA_DIR`；不运行 ignore 的私人账号�
 ## 协议来源
 
 - 豆包网页会员：[0011-joe 的 PR #42](https://github.com/Renly1994/xiaotang-daozai/pull/42)，保留原作者提交，针对当前额度页修正和适配。
+- magpie 本机额度：https://github.com/Renly1994/magpie/commit/5df7ce8 （`GET /v1/magpie/quotas`，回环直连无认证，`kept=1` 只读缓存；带转发头会被判定为外部请求并返回 403）。
 - OpenCode Go: https://github.com/anomalyco/opencode/blob/d21b0790a6c146815f28fea604e41e922f009590/packages/console/app/src/routes/zen/go/v1/usage.ts
 - MiniMax 官方 CLI: https://github.com/MiniMax-AI/cli/blob/38aba5f26173dd1065b115b221d79c9ddd87c6bb/src/client/endpoints.ts （同提交 schema、types、quota 工具）
 - GLM 官方插件: https://github.com/zai-org/zai-coding-plugins/blob/main/plugins/glm-plan-usage/skills/usage-query-skill/scripts/query-usage.mjs
