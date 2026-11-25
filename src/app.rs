@@ -893,6 +893,8 @@ pub struct App {
     pub(crate) updates: crate::updates::State,
     pub(crate) resident: bar::Motion,
     pub(crate) resident_power: (Option<u8>,bool),
+    /// 配置导入/导出弹窗状态。
+    pub(crate) config_transfer: Option<crate::config_transfer::Dialog>,
 }
 
 impl App {
@@ -1026,6 +1028,7 @@ impl App {
             weather_source,
             updates: crate::updates::State::load(model::config_dir().join("update-check.json")),
             resident: Default::default(), resident_power:(None,false),
+            config_transfer: None,
         }
     }
 

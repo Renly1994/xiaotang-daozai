@@ -1,7 +1,7 @@
 //! 设置窗口独立外观，不改变岛体的绘制样式。
 use eframe::egui::{self,Color32};
 
-#[derive(Clone,Copy,Debug,Default,PartialEq,Eq)]
+#[derive(Clone,Copy,Debug,Default,PartialEq,Eq,serde::Serialize,serde::Deserialize)]
 pub enum SettingsTheme { #[default] System, Light, Dark }
 impl SettingsTheme {
     pub fn key(self)->&'static str {match self {Self::System=>"system",Self::Light=>"light",Self::Dark=>"dark"}}

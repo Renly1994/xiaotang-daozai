@@ -17,7 +17,7 @@ pub const MICROSOFT_UNSUPPORTED: &str = "Outlook、Hotmail、Live 和 Microsoft 
 
 // ---------------------------------------------------------------- 邮箱类型
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Provider {
     Qq,
     Mail163,
@@ -137,7 +137,7 @@ impl Provider {
 
 // ---------------------------------------------------------------- 账号与状态
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Account {
     pub email: String,
     pub provider: Provider,
@@ -146,7 +146,7 @@ pub struct Account {
     pub enabled: bool,
 }
 
-#[derive(Clone,Debug,PartialEq,Eq)]
+#[derive(Clone,Debug,PartialEq,Eq,serde::Serialize,serde::Deserialize)]
 pub struct CustomImap { pub host:String, pub port:u16, pub username:String }
 impl Default for CustomImap {fn default()->Self{Self{host:String::new(),port:993,username:String::new()}}}
 impl Account {

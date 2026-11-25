@@ -26,7 +26,7 @@ const WINDOW_SECS: i64 = 24 * 3600;
 
 // ---------------------------------------------------------------- 平台
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Provider {
     #[default]
     Feishu,
@@ -140,7 +140,7 @@ impl Provider {
 
 // ---------------------------------------------------------------- 配置
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Config {
     pub provider: Provider,
     pub username: String,

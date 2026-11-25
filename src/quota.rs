@@ -35,7 +35,7 @@ impl Discovery {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini, ZCode, WorkBuddy, DeepSeek, OpenCodeGo, MiniMax, Glm, NewApi, OneApi, Sub2Api, Kiro, Doubao, RelayGeneral, RelayCustom }
 impl Provider {
     pub const ALL: [Self; 18] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini, Self::ZCode, Self::WorkBuddy, Self::DeepSeek, Self::OpenCodeGo, Self::MiniMax, Self::Glm, Self::NewApi, Self::OneApi, Self::Sub2Api, Self::Kiro, Self::Doubao, Self::RelayGeneral, Self::RelayCustom];
@@ -45,7 +45,7 @@ impl Provider {
     pub fn balance(self)->bool{matches!(self,Self::WorkBuddy|Self::DeepSeek)||self.relay()}
     fn parse(s: &str) -> Option<Self> {if s.eq_ignore_ascii_case("grokbot"){return Some(Self::GrokBot);}if s.eq_ignore_ascii_case("doubao"){return Some(Self::Doubao);}Self::ALL.into_iter().find(|p|p.name().eq_ignore_ascii_case(s))}
 }
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Accent { #[default] Brand, Violet, Orange, Blue, Cyan, Pink, Gold, Green }
 impl Accent {
     pub const ALL:[Self;8]=[Self::Brand,Self::Violet,Self::Orange,Self::Blue,Self::Cyan,Self::Pink,Self::Gold,Self::Green];
@@ -53,9 +53,9 @@ impl Accent {
     pub fn label(self)->&'static str{match self{Self::Brand=>"跟随厂商",Self::Violet=>"蓝紫",Self::Orange=>"暖橙",Self::Blue=>"湛蓝",Self::Cyan=>"青蓝",Self::Pink=>"玫红",Self::Gold=>"金黄",Self::Green=>"翠绿"}}
     fn parse(key:&str)->Self{Self::ALL.into_iter().find(|c|c.key()==key).unwrap_or_default()}
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Account {pub id:String, pub provider:Provider, pub alias:String, pub source:PathBuf, pub slot:Option<String>, pub enabled:bool, pub pinned:bool}
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Config {pub enabled:bool, pub compact:bool, pub selected:String, pub accounts:Vec<Account>, pub colors:HashMap<String,Accent>}
 impl Default for Config {fn default()->Self {Self{enabled:true,compact:true,selected:String::new(),accounts:vec![],colors:HashMap::new()}}}
 impl Config {

@@ -101,7 +101,7 @@ fn replace_file(tmp:&Path,path:&Path)->std::io::Result<()> {
 /// 岛体配色皮肤（与形状独立，可任意组合）。
 /// - 经典：纯黑；奶油：暖白底深棕字、橙色强调（参考 Oyen）；
 /// - 毛玻璃·浅 / 毛玻璃·深：系统实时模糊 + 浅色或深色玻璃。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Skin {
     #[default]
     Classic,
@@ -135,7 +135,7 @@ impl Skin {
 }
 
 /// 岛体形状：贴着屏幕顶边的刘海，或悬浮在顶边下方的胶囊。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum IslandShape {
     #[default]
     Notch,
@@ -162,7 +162,7 @@ impl IslandShape {
 }
 
 /// 岛体停靠的屏幕边缘：顶部为横向刘海 / 胶囊，左右两侧为竖向排列。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Dock {
     #[default]
     Top,
@@ -196,7 +196,7 @@ pub fn island_size_value(value: u32) -> u32 {
     (value + ISLAND_SIZE_STEP / 2) / ISLAND_SIZE_STEP * ISLAND_SIZE_STEP
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     pub display_id: String,
     /// 岛体皮肤、毛玻璃是否使用系统模糊、大小百分比、水平位置。

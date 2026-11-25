@@ -1402,11 +1402,12 @@ fn setting_choices(ui:&mut egui::Ui,title:&str,value:&mut u32,values:[u32;3],uni
 /// 设置页分页序号。旧序号保持不变（岛上入口、测试都按序号跳转），新增外观与位置两页。
 pub(crate) const SETTINGS_TAB_APPEARANCE: usize = 13;
 pub(crate) const SETTINGS_TAB_POSITION: usize = 14;
+pub(crate) const SETTINGS_TAB_BACKUP: usize = 15;
 /// 侧栏：一项就是一页，不再有页内子标签。专注与健康（2、3）、待办与置物（4、5）各合成一页；关于固定左下角。
 /// 第四列是这一项之前的分组标题。
-const SETTINGS_GROUPS: [(&str,usize,usize,&str);13] = [
+const SETTINGS_GROUPS: [(&str,usize,usize,&str);14] = [
     ("通用",0,0,"岛仔"), ("外观",SETTINGS_TAB_APPEARANCE,SETTINGS_TAB_APPEARANCE,""), ("位置",SETTINGS_TAB_POSITION,SETTINGS_TAB_POSITION,""), ("页面管理",10,10,""),
-    ("音乐",1,1,"功能"), ("专注与健康",2,3,""), ("待办与置物",4,5,""), ("消息提醒",6,6,""), ("邮箱",7,7,""), ("日程",8,8,""), ("AI 额度",11,11,""), ("天气",12,12,""),
+    ("音乐",1,1,"功能"), ("专注与健康",2,3,""), ("待办与置物",4,5,""), ("消息提醒",6,6,""), ("邮箱",7,7,""), ("日程",8,8,""), ("AI 额度",11,11,""), ("天气",12,12,""), ("备份",SETTINGS_TAB_BACKUP,SETTINGS_TAB_BACKUP,""),
     ("关于",9,9,""),
 ];
 /// 分页标题；合并页（3→2、5→4）显示合并后的名字。
@@ -1746,6 +1747,21 @@ impl App {
                                     settings_hint(ui,&if reserved>0 {format!("已检测到顶栏，岛体下移 {reserved} 像素。")}else{"未检测到顶栏；没有向系统登记的顶栏可尝试“岛仔置顶”。".to_string()});
                                 }
                             }
+                        });
+                    }
+                    SETTINGS_TAB_BACKUP=>{
+                        settings_label(ui,"配置备份");
+                        settings_card(ui,|ui|{
+                            settings_hint(ui,"将当前岛仔的全部设置、邮件账号、日历配置等打包成加密字符串，方便在另一台电脑上还原。密码可留空，此时同一密码可直接解密。");
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui|{
+                                if ui.add_sized([120.0,30.0],egui::Button::new("导出配置")).clicked(){
+                                    self.config_transfer=Some(crate::config_transfer::Dialog::open_export());
+                                }
+                                if ui.add_sized([120.0,30.0],egui::Button::new("导入配置")).clicked(){
+                                    self.config_transfer=Some(crate::config_transfer::Dialog::open_import());
+                                }
+                            });
                         });
                     }
                     1=>{
@@ -2295,6 +2311,101 @@ impl App {
                 });
             });
             self.avoidance.dialog(ctx,&mut self.settings);
+            if let Some(dialog) = &mut self.config_transfer {
+                let id = egui::Id::new("config-transfer-modal");
+                let mut close = false;
+                egui::Modal::new(id)
+                    .frame(settings_modal_frame(ctx))
+                    .backdrop_color(Color32::from_black_alpha(110))
+                    .show(ctx, |ui| {
+                        ui.set_width(480.0);
+                        settings_apply_style(ui);
+                        let title = if dialog.export { "导出配置" } else { "导入配置" };
+                        if settings_modal_title(ui, title) { close = true; }
+                        ui.add_space(6.0);
+
+                        ui.label("密码（可留空，空密码用固定密钥加密）");
+                        ui.horizontal(|ui| {
+                            let response = ui.add(
+                                egui::TextEdit::singleline(&mut dialog.password)
+                                    .password(true)
+                                    .desired_width(ui.available_width() - 80.0)
+                                    .hint_text("留空 = 同一字符串可直接导入，无需密码"),
+                            );
+                            if ui.add_sized([72.0, 26.0], egui::Button::new("清空")).clicked() {
+                                dialog.password.clear();
+                            }
+                            response.request_focus();
+                        });
+                        ui.add_space(6.0);
+
+                        if dialog.export {
+                            ui.separator();
+                            ui.add_space(4.0);
+                            if ui.add_sized([120.0, 30.0], egui::Button::new("生成加密字符串")).clicked() {
+                                dialog.message.clear();
+                                dialog.stage = 0;
+                                match dialog.do_export() {
+                                    Ok(()) => {}
+                                    Err(e) => { dialog.message = e; dialog.stage = 0; }
+                                }
+                            }
+                            if dialog.stage >= 1 {
+                                ui.add_space(8.0);
+                                ui.label("加密字符串");
+                                ui.horizontal(|ui| {
+                                    ui.add_sized([ui.available_width() - 90.0, 28.0],
+                                        egui::TextEdit::singleline(&mut dialog.encrypted)
+                                            .password(false)
+                                            .hint_text("加密字符串（右侧复制按钮即可）")
+                                            .desired_width(f32::INFINITY)
+                                    );
+                                    if ui.add_sized([80.0, 28.0], egui::Button::new("复制")).clicked() {
+                                        self.pending.push(Cmd::Copy(dialog.encrypted.clone()));
+                                        dialog.message = "已复制到剪贴板".into();
+                                    }
+                                });
+                            }
+                        } else {
+                            // 导入模式
+                            ui.separator();
+                            ui.add_space(4.0);
+                            ui.label("粘贴另一台电脑导出的加密字符串");
+                            ui.add_sized([ui.available_width(), 120.0],
+                                egui::TextEdit::multiline(&mut dialog.import_input)
+                                    .desired_rows(6)
+                                    .hint_text("粘贴以 DZ1: 开头的加密字符串")
+                                    .code_editor()
+                            );
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                if ui.add_sized([120.0, 30.0], egui::Button::new("解密并导入")).clicked() {
+                                    dialog.message.clear();
+                                    dialog.stage = 0;
+                                    match dialog.do_import() {
+                                        Ok(()) => {}
+                                        Err(e) => { dialog.message = e; dialog.stage = 0; }
+                                    }
+                                }
+                                if ui.button("关闭").clicked() { close = true; }
+                            });
+                        }
+
+                        if !dialog.message.is_empty() {
+                            ui.add_space(6.0);
+                            let is_error = dialog.stage == 0 && (dialog.export || dialog.import_input.is_empty());
+                            let color = if is_error {
+                                Color32::from_rgb(230, 80, 80)
+                            } else if dialog.stage >= 1 {
+                                Color32::from_rgb(80, 190, 120)
+                            } else {
+                                settings_color(ui.ctx(), Color32::from_gray(180), Color32::from_gray(75))
+                            };
+                            ui.label(egui::RichText::new(&dialog.message).size(12.0).color(color));
+                        }
+                    });
+                if close { self.config_transfer = None; }
+            }
             if before!=format!("{:?}",self.settings){self.settings.save();}
             ctx.set_style(original_style);
         });
