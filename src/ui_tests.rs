@@ -2989,6 +2989,23 @@ fn kiro_connection_save_failure_keeps_the_original_account_and_cache(){
 }
 
 #[test]
+fn magpie_reconnect_error_keeps_the_existing_snapshot(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.app.settings_open=true;h.app.quota.connect_open=true;
+    let at=1_900_000_000;let snapshot=crate::quota::Snapshot{plan:"pro".into(),windows:vec![crate::quota::Window{label:"5 小时".into(),seconds:Some(18000),remaining:80.0,reset:None,amount:None}],at,..Default::default()};
+    let key="openai|alice|plan|pro";
+    let(connect,tx)=crate::quota::magpie::Connect::pending(None);h.app.quota.magpie_connecting=Some(connect);
+    tx.send(Ok(crate::quota::magpie::Connected::fixture(vec![(key,Ok(snapshot))]))).unwrap();
+    h.app.quota_tick();
+    let id=h.app.quota.config.accounts.iter().find(|a|a.source==std::path::PathBuf::from(key)).unwrap().id.clone();
+    assert_eq!(h.app.quota.rows[&id].as_ref().unwrap().at,at);
+    let(connect,tx)=crate::quota::magpie::Connect::pending(None);h.app.quota.magpie_connecting=Some(connect);
+    tx.send(Ok(crate::quota::magpie::Connected::fixture(vec![(key,Err("magpie 未能读取该账号额度".into()))]))).unwrap();
+    h.app.quota_tick();
+    assert_eq!(h.app.quota.rows[&id].as_ref().unwrap().at,at,"条目级错误不能覆盖已有快照");
+    assert_eq!(h.app.quota.stale[&id],"magpie 未能读取该账号额度");
+}
+
+#[test]
 fn kiro_ring_uses_logo_for_all_point_balances_and_skins(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     for skin in crate::model::Skin::ALL{for remaining in [0.0,0.01,99.9,1000.0,10000.0]{

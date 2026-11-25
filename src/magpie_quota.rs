@@ -53,6 +53,11 @@ pub(crate) fn balance_account(a: &Account) -> bool {
             .is_some_and(|kind| kind == "balance")
 }
 
+/// 组件经百分号转义，避免厂商文本里的 `|`、`%` 改变身份串的分段含义。
+fn escape(part: &str) -> String {
+    part.replace('%', "%25").replace('|', "%7C")
+}
+
 /// 条目标识串 `provider|user|kind|plan`；刷新时据此从列表中找回条目。
 fn identity(q: &Value) -> Option<(String, String, String, String)> {
     let provider = text(q, "provider")?;
@@ -65,7 +70,7 @@ fn identity(q: &Value) -> Option<(String, String, String, String)> {
 }
 
 fn key(provider: &str, user: &str, kind: &str, plan: &str) -> String {
-    format!("{provider}|{user}|{kind}|{plan}")
+    format!("{}|{}|{}|{}", escape(provider), escape(user), escape(kind), escape(plan))
 }
 
 fn account_id(key: &str) -> String {
@@ -284,6 +289,22 @@ pub(crate) struct Connected {
     entries: Vec<Entry>,
 }
 
+#[cfg(test)]
+impl Connected {
+    pub(crate) fn fixture(entries: Vec<(&str, Result<Snapshot, String>)>) -> Self {
+        Self {
+            entries: entries
+                .into_iter()
+                .map(|(key, snapshot)| Entry {
+                    key: key.into(),
+                    alias: format!("magpie · {key}"),
+                    snapshot,
+                })
+                .collect(),
+        }
+    }
+}
+
 pub(crate) struct Connect {
     rx: mpsc::Receiver<Result<Connected, String>>,
     pub target: Option<Account>,
@@ -324,7 +345,6 @@ impl Connect {
 }
 
 pub(crate) struct Applied {
-    pub selected: String,
     pub rows: Vec<(String, Result<Snapshot, String>)>,
     pub notes: Vec<String>,
 }
@@ -374,7 +394,7 @@ pub(crate) fn apply_connection(
         Some(account) if present.contains(source_string(account).as_str()) => account.id.clone(),
         _ => config.selected.clone(),
     };
-    config.selected = selected.clone();
+    config.selected = selected;
     let rows = config
         .accounts
         .iter()
@@ -384,7 +404,7 @@ pub(crate) fn apply_connection(
             Some((account.id.clone(), entry.snapshot.clone()))
         })
         .collect();
-    Ok(Applied { selected, rows, notes })
+    Ok(Applied { rows, notes })
 }
 
 #[cfg(test)]
@@ -485,6 +505,30 @@ mod tests {
     }
 
     #[test]
+    fn identity_components_are_percent_escaped_before_joining() {
+        let value = json!({"object":"list","data":[
+            {"provider":"openai","name":"ChatGPT","user":"ali|ce%","plan":"pro|%","kind":"balance","balance":"$1.00"},
+            {"provider":"openai","name":"ChatGPT","user":"ali","plan":"ce%7C%25","kind":"plan","windows":[{"name":"5h","remaining":50}]}
+        ]});
+        let items = entries(&value).unwrap();
+        let escaped = "openai|ali%7Cce%25|balance|pro%7C%25";
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].key, escaped);
+        assert_ne!(items[1].key, escaped, "转义后不同条目不能撞身份");
+        let mut config = Config::default();
+        apply_connection(&mut config, None, &Connected { entries: items }).unwrap();
+        assert_eq!(config.accounts.len(), 2);
+        let balance = config.accounts.iter().find(|a| balance_account(a)).unwrap();
+        assert_eq!(balance.source, PathBuf::from(escaped));
+        assert_eq!(config.accounts.iter().filter(|a| balance_account(a)).count(), 1);
+        let (base, worker) = server(value.to_string().into_bytes());
+        let agent = ureq::AgentBuilder::new().try_proxy_from_env(false).redirects(0).build();
+        let snapshot = fetch_with(&agent, &base, escaped).unwrap();
+        worker.join().unwrap();
+        assert_eq!(snapshot.relay.unwrap().primary().unwrap().remaining, Some(1.0));
+    }
+
+    #[test]
     fn invalid_percentages_fail_instead_of_becoming_zero() {
         let value = json!({"object":"list","data":[quota("openai","alice","plan","ChatGPT")]});
         let mut value = value;
@@ -580,7 +624,7 @@ mod tests {
             quota("anthropic","bob","plan","Claude")
         ]})).unwrap();
         let applied = apply_connection(&mut config, Some(&alice), &Connected { entries: second }).unwrap();
-        assert_eq!(applied.selected, saved);
+        assert_eq!(config.selected, saved);
         assert_eq!(config.accounts.len(), 3, "消失的条目保留，新增条目补建");
         assert_eq!(config.accounts.iter().find(|a|a.id==saved).unwrap().alias, "我的主账号");
         assert_eq!(config.accounts.iter().find(|a|a.alias.contains("carol")).unwrap().source, PathBuf::from("deepseek|carol|balance|pro"));

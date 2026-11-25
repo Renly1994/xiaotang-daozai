@@ -73,7 +73,8 @@ impl State {
         let count=connected.len();
         let mut next=self.config.clone();let applied=quota::magpie::apply_connection(&mut next,target,&connected)?;
         next.save_checked()?;self.config=next;
-        for (id,result) in applied.rows{self.stale.remove(&id);self.busy.remove(&id);self.rows.insert(id,result);}
+        // 与刷新结果一致：条目级错误不能覆盖已有的成功快照，只标记为陈旧。
+        for (id,result) in applied.rows{self.receive(quota::Event{id,result});}
         self.save_snapshots();self.connect_target=None;
         let mut message=format!("Magpie 已连接 · 本次探测到 {count} 个条目");
         if !applied.notes.is_empty(){message.push_str("；");message.push_str(&applied.notes.join("；"));}
