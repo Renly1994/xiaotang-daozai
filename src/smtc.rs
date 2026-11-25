@@ -84,7 +84,7 @@ impl NowPlaying {
         }
         let source=self.source.to_lowercase();
         if (matches!(source.as_str(),"kugou"|"kugou.exe"|"cloudmusic.exe"|"汽水音乐"|"sodamusic.exe"|"spotify"|"spotify.exe"|"kwmusic.exe"|"bodian_pc.exe") || is_qqmusic(&source) || apple_music::is_source(&source)) && self.playback_type==MediaKind::Music{return MediaKind::Music;}
-        if ["chrome","msedge","firefox","brave","opera"].iter().any(|name|source.contains(name)) {
+        if source=="msedge" || ["chrome","firefox","brave","opera"].iter().any(|name|source.contains(name)) {
             let album=self.album.trim().to_lowercase();
             if ["youtube","bilibili","抖音","哔哩哔哩"].contains(&album.as_str()){return MediaKind::Video;}
             // 视频作者也可能被放进 Artist；浏览器缺少专辑信息时不自动认作歌曲。
@@ -1470,6 +1470,17 @@ mod tests {
         np.title="阿拉斯加海湾".into();np.artist="蓝心羽".into();np.album="阿拉斯加海湾".into();
         assert_eq!(np.kind(),MediaKind::Music,"网易云网页版的完整歌曲元数据仍应识别为音乐");
         np.source="Spotify.exe".into();np.album.clear();assert_eq!(np.kind(),MediaKind::Music,"音乐客户端不强制要求专辑信息");
+    }
+
+    #[test]
+    fn webview2_host_apps_are_not_browser_pages(){
+        // WebView2 宿主应用上报的是镜像名 msedgewebview2.exe，按子串匹配会连它一起当成网页。
+        let mut np=NowPlaying{title:"阿拉斯加海湾".into(),artist:"蓝心羽".into(),source:"msedgewebview2.exe".into(),playback_type:MediaKind::Music,..Default::default()};
+        assert_eq!(np.kind(),MediaKind::Music,"内嵌 WebView2 的桌面播放器缺专辑信息也应认作歌曲");
+        np.source="MSEdge".into();
+        assert_eq!(np.kind(),MediaKind::Unknown,"Edge 网页缺少专辑信息时仍不认作歌曲");
+        np.album="阿拉斯加海湾".into();
+        assert_eq!(np.kind(),MediaKind::Music,"Edge 网页拿到完整歌曲元数据时仍认作歌曲");
     }
 
     #[test]
