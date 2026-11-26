@@ -96,6 +96,9 @@ struct Shell {
     #[cfg(windows)]
     receiver_rx: Option<daozai::bt::Service>,
     receivers: Vec<daozai::bt::Device>,
+    /// 2.4G 接收器私有电量：只有用户主动看时才读一次（查询会打断设备休眠）。
+    #[cfg(windows)]
+    mchose_rx: Option<daozai::bt::mchose::Service>,
     volume_quiet: PollClock,
     /// v0.5.5：邮件收信服务（工作线程），以及上次同步给它的账号/开关快照。
     /// 邮箱模块开启时才存在；关闭后收信与整理线程随之退出。
@@ -412,6 +415,8 @@ impl Shell {
             #[cfg(windows)]
             receiver_rx: None,
             receivers: Vec::new(),
+            #[cfg(windows)]
+            mchose_rx: None,
             volume_quiet: PollClock::default(),
             mail: None,
             mail_sig: None,
@@ -749,9 +754,21 @@ impl eframe::App for Shell {
                     daozai::bt::spawn_receivers(self.app.wireless_compat_store(),move||ctx.request_repaint())
                 });
                 while let Ok(found)=service.rx.try_recv(){self.receivers=found;}
+                // 接收器私有电量：启动时读一次让岛上先有数，之后只在用户主动看时才补读。
+                #[cfg(windows)]
+                {
+                    let service=self.mchose_rx.get_or_insert_with(||{
+                        let service=daozai::bt::mchose::spawn();
+                        service.refresh();
+                        service
+                    });
+                    if self.app.take_wireless_battery_request(){service.refresh();}
+                }
             } else {
                 self.receiver_rx=None;
                 self.receivers.clear();
+                #[cfg(windows)]
+                { self.mchose_rx=None; }
             }
             mark!("蓝牙与无线");
             let previous_pending=self.app.pending_messengers.clone();

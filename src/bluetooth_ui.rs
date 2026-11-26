@@ -205,13 +205,13 @@ fn reading_age(device:&Device)->Option<String> {
     let reading=device.reading.as_ref()?;
     let secs=match reading.source {
         BatterySource::Windows=>reading.observed.saturating_duration_since(reading.value_since).as_secs(),
-        BatterySource::Gatt=>reading.observed.elapsed().as_secs(),
+        BatterySource::Gatt|BatterySource::Receiver=>reading.observed.elapsed().as_secs(),
     };
     let age=duration_text(secs);
     Some(match reading.source {
         BatterySource::Windows if secs==0=>"刚读到".into(),
         BatterySource::Windows=>format!("读数已保持 {age}"),
-        BatterySource::Gatt=>format!("{age}前读取"),
+        BatterySource::Gatt|BatterySource::Receiver=>format!("{age}前读取"),
     })
 }
 
@@ -292,7 +292,7 @@ impl App {
     pub(crate) fn wireless_resident(&self)->Vec<Device> {
         if !self.settings.show_bluetooth||!self.module_on(BLUETOOTH_PAGE){return vec![];}
         let custom=self.settings.bluetooth_resident_custom;
-        let mut devices:Vec<_>=self.wireless_devices.iter().filter(|d|d.connected&&d.kind!=DeviceKind::Receiver24G)
+        let mut devices:Vec<_>=self.wireless_devices.iter().filter(|d|d.connected&&(d.kind!=DeviceKind::Receiver24G||d.battery.is_some()))
             .filter(|d|if custom {self.settings.bluetooth_pinned.contains(&d.id)} else {d.battery.is_some()}).cloned().collect();
         devices.sort_by_key(|d|(stale(d),d.battery.unwrap_or(101)));
         devices.truncate(2);devices
@@ -323,7 +323,9 @@ impl App {
             ring(c,left+9.0,15.0,&spec,device,fx,self.t);
             if self.resident_value(device) {reading(c,left+21.0+(w-21.0)/2.0,15.5,9.5,device,fx,self.t,false,1.0,true,false);}
             let tip=format!("{} · {}",device.name,device.battery.map_or("未上报电量".into(),|b|format!("{b}%")));
+            // 悬停说明用户正在看，按 5 秒节流补读一次；移开就什么都不做。
             let hit=c.hit(left-2.0,2.0,w+4.0,26.0,("wireless-resident",&device.id));
+            if hit.hovered() {self.want_wireless_battery(5.0);}
             if crate::quota_ui::bar_tooltip(hit,tip).clicked(){self.wireless_focus=Some(device.id.clone());self.show_page(BLUETOOTH_PAGE);}
             left+=w+8.0;
         }
@@ -337,11 +339,12 @@ impl App {
         ring(c,cx,ring_y,&spec,&device,fx,self.t);
         if value {reading(c,cx,y+14.0,8.5,&device,fx,self.t,false,1.0,true,false);}
         let hit=c.hit(cx-17.0,y-18.0,34.0,37.0,"wireless-side");
+        if hit.hovered() {self.want_wireless_battery(5.0);}
         if crate::quota_ui::bar_tooltip(hit,device.name.clone()).clicked(){self.wireless_focus=Some(device.id.clone());self.show_page(BLUETOOTH_PAGE);}
     }
 
     pub(crate) fn page_wireless(&mut self,c:&Card,env:&Env) {
-        if self.wireless_enter_at.is_none() {self.wireless_enter_at=Some(self.t);}
+        if self.wireless_enter_at.is_none() {self.wireless_enter_at=Some(self.t);self.want_wireless_battery(0.0);}
         let devices=self.wireless_devices.clone();
         // 只有一台时直接用详情版式，不让一个小环孤零零地待在中间。
         if devices.len()==1 {self.wireless_detail(c,&devices[0],false);return;}
@@ -369,7 +372,7 @@ impl App {
         for (index,device) in shown.iter().enumerate() {
             let x=start+index as f32*(col_w+gap);let cx=x+col_w/2.0;
             let linked=self.wireless_linked(device);
-            let details=if device.kind==DeviceKind::Receiver24G {format!("{}\n{RECEIVER_NOTE}",device.name)}
+            let details=if device.kind==DeviceKind::Receiver24G&&device.battery.is_none() {format!("{}\n{RECEIVER_NOTE}",device.name)}
                 else if linked {format!("{}\n{LINKED} · {NO_BATTERY_NOTE}",device.name)} else {
                 device.reading.as_ref().map(|r|format!("{}\n{} · {}",device.name,r.source.label(),reading_age(device).unwrap_or_default())).unwrap_or_else(||format!("{}\n正在读取电量",device.name))
             };
@@ -410,7 +413,8 @@ impl App {
         ring(c,112.0,100.0,&RingSpec{r:50.0,w:6.0,icon:38.0,live:true,enter,hover:false,linked},device,fx.as_ref(),self.t);
         let x=190.0;
         c.centered_text(x,66.0,&c.fit(&device.name,15.0,W::Bold,190.0),15.0,W::Bold,theme::WHITE,H::Left);
-        if device.kind==DeviceKind::Receiver24G {
+        // 报不出电量的接收器只显示说明；能报电量的（如迈从）走下面的常规详情。
+        if device.kind==DeviceKind::Receiver24G&&device.battery.is_none() {
             reading(c,x,101.0,26.0,device,None,self.t,true,1.0,false,true);
             c.text(x,140.0,RECEIVER_NOTE,10.5,W::Regular,theme::DIM,H::Left);
             return;

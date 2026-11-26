@@ -1,6 +1,6 @@
 //! 已识别的 2.4G USB 接收器。拔插查询独立于蓝牙枚举。
 use super::compat::{builtin_receivers, Package, Store};
-use super::{Device, DeviceKind};
+use super::{mchose, BatteryReading, BatterySource, Device, DeviceKind};
 use std::{
     ffi::c_void,
     sync::{
@@ -34,17 +34,49 @@ fn receiver_snapshot(
             let name = builtin
                 .receiver_name(hardware)
                 .or_else(|| pack?.receiver_name(hardware))?;
-            Some(Device {
+            let mut device = Device {
                 id: format!("usb:{instance}"),
                 name: name.into(),
                 kind: DeviceKind::Receiver24G,
                 ..Default::default()
-            })
+            };
+            // 厂商协议能给电量的接收器（迈从）：补上读数和更具体的产品名。
+            if let Some((vid, pid)) = usb_pair(hardware) {
+                if let Some(link) = mchose::link(vid, pid) {
+                    if !link.product.trim().is_empty() {
+                        device.name = link.product.trim().to_string();
+                    }
+                    device.battery = Some(link.percent);
+                    device.reading = Some(BatteryReading {
+                        percent: link.percent,
+                        source: BatterySource::Receiver,
+                        observed: link.observed,
+                        value_since: link.value_since,
+                        charging: link.charging,
+                    });
+                }
+            }
+            Some(device)
         })
         .collect();
     devices.sort_unstable_by(|a, b| a.id.cmp(&b.id));
     devices.dedup_by(|a, b| a.id == b.id);
     devices
+}
+
+/// 从 `VID_3837&PID_1018` 这样的硬件 ID 里取 VID/PID。
+fn usb_pair(hardware: &str) -> Option<(u16, u16)> {
+    let hex = |text: &str| u16::from_str_radix(text, 16).ok();
+    let mut vid = None;
+    let mut pid = None;
+    for part in hardware.split('&') {
+        if let Some(text) = part.strip_prefix("VID_") {
+            vid = hex(text);
+        } else if let Some(text) = part.strip_prefix("PID_") {
+            pid = hex(text);
+        }
+    }
+    Some((vid?, pid?))
 }
 
 fn present_usb_instances() -> Option<Vec<String>> {
@@ -213,7 +245,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn receiver_snapshot_native_catalog_covers_all_23_without_plugin() {
+    fn receiver_snapshot_native_catalog_covers_all_without_plugin() {
         let rows = builtin_data();
         let instances: Vec<_> = rows
             .iter()
@@ -226,14 +258,75 @@ mod tests {
             })
             .collect();
         let devices = receiver_snapshot(None, &instances);
-        assert_eq!(devices.len(), 23);
+        assert_eq!(devices.len(), rows.len());
         for (instance, row) in instances.iter().zip(rows) {
             let device = devices
                 .iter()
                 .find(|device| device.id == format!("usb:{instance}"))
                 .unwrap();
             assert_eq!(Some(device.name.as_str()), row["name"].as_str());
+            // 没有实测报文前，接收器只报连接、不报电量。
+            assert_eq!(device.battery, None);
+            assert_eq!(device.kind, DeviceKind::Receiver24G);
         }
+    }
+
+    #[test]
+    fn usb_pair_reads_vid_pid_from_hardware_id() {
+        assert_eq!(usb_pair("VID_3837&PID_1018"), Some((0x3837, 0x1018)));
+        assert_eq!(usb_pair("VID_046D&PID_C548"), Some((0x046D, 0xC548)));
+        assert_eq!(usb_pair("VID_2717&PID_5055"), Some((0x2717, 0x5055)));
+        assert_eq!(usb_pair("VID_2717"), None);
+        assert_eq!(usb_pair(""), None);
+    }
+
+    #[test]
+    fn mchose_battery_needs_a_real_reading() {
+        // 缓存里没有读数时，即使硬件 ID 是迈从也不编造电量。
+        assert!(mchose::link(0x3837, 0x1018).is_none());
+        assert!(mchose::link(0x046D, 0xC548).is_none());
+        let devices = receiver_snapshot(None, [r"USB\VID_3837&PID_1018\0123456789"]);
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].battery, None);
+        assert_eq!(devices[0].reading, None);
+    }
+
+    /// 真机验收：插着迈从接收器时手动跑
+    /// `cargo test --lib --features sdk-js bt::receivers::tests::live -- --ignored --nocapture`
+    /// 只按需读一次（和界面一致），不做任何轮询。
+    #[test]
+    #[ignore]
+    fn live_mchose_receiver_reports_battery() {
+        let service = mchose::spawn();
+        service.refresh();
+        let mut found = None;
+        for _ in 0..60 {
+            std::thread::sleep(Duration::from_millis(100));
+            if let Some(link) = mchose::link(0x3837, 0x1018) {
+                found = Some(link);
+                break;
+            }
+        }
+        let Some(link) = found else {
+            panic!("等待期间没有读到迈从接收器电量（接收器没插或鼠标在休眠）");
+        };
+        println!(
+            "迈从接收器：{} · {}% · 充电={:?}",
+            link.product, link.percent, link.charging
+        );
+        let instances = present_usb_instances().expect("枚举 USB 设备失败");
+        let devices = receiver_snapshot(None, &instances);
+        let device = devices
+            .iter()
+            .find(|device| device.id.contains("VID_3837&PID_1018"))
+            .expect("接收器没有出现在快照里");
+        assert_eq!(device.battery, Some(link.percent));
+        assert_eq!(
+            device.reading.as_ref().map(|reading| reading.source),
+            Some(BatterySource::Receiver)
+        );
+        assert_eq!(device.kind, DeviceKind::Receiver24G);
+        println!("快照：{} · {:?}%", device.name, device.battery);
     }
 
     #[test]
