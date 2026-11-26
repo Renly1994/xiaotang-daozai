@@ -8,6 +8,9 @@ pub mod compat;
 mod windows;
 #[cfg(windows)]
 mod receivers;
+/// 迈从 2.4G 接收器的私有电量报文：只在用户主动查看时读一次，避免打断设备休眠。
+#[cfg(windows)]
+pub mod mchose;
 
 /// 识别顺序：具体型号词 → 通用名称词 → 蓝牙类别码 → 兜底名称词。
 /// 短词（pen、mic、band…）按整词匹配，避免 OpenRun 里的 pen 被认成触控笔。

@@ -16,9 +16,9 @@ impl DeviceKind {
 }
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
-pub enum BatterySource {Windows,Gatt}
+pub enum BatterySource {Windows,Gatt,Receiver}
 impl BatterySource {
-    pub fn label(self)->&'static str {match self {Self::Windows=>"Windows 设备电量",Self::Gatt=>"蓝牙电池服务"}}
+    pub fn label(self)->&'static str {match self {Self::Windows=>"Windows 设备电量",Self::Gatt=>"蓝牙电池服务",Self::Receiver=>"2.4G 接收器直连"}}
 }
 
 #[derive(Clone,Debug,PartialEq,Eq)]
@@ -128,7 +128,8 @@ impl State {
         let mut devices:Vec<_>=self.entries.iter().map(|e|{
             let reading=e.readings.iter().filter(|r|r.active).map(|r|&r.value).max_by_key(|r|{
                 let fresh=now.saturating_duration_since(r.observed)<=FRESH_FOR;
-                (fresh,fresh&&r.source==BatterySource::Gatt,r.observed)
+                // 新鲜的设备侧读数（蓝牙电池服务、接收器直连）优先于 Windows 缓存值。
+                (fresh,fresh&&r.source!=BatterySource::Windows,r.observed)
             }).cloned();
             Device{id:e.key.clone(),name:e.name.clone(),kind:e.kind,battery:reading.as_ref().map(|r|r.percent),reading,connected:e.connected}
         }).collect();

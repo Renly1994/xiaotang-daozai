@@ -990,6 +990,10 @@ pub struct App {
     pub(crate) wireless_alerted: std::collections::HashMap<(String,&'static str),f64>,
     /// 每台已连接设备第一次出现的时刻；用来区分“正在读取电量”和“设备不提供电量”。
     pub(crate) wireless_seen_at: std::collections::HashMap<String,f64>,
+    /// 2.4G 接收器电量：查询会经接收器转发给设备、重置它的空闲计时器，
+    /// 所以只在用户主动看（打开无线设备页、悬停常驻徽标）时请求一次，绝不轮询。
+    wireless_read_want: bool,
+    wireless_read_at: f64,
     bt_initialized: bool,
     /// v0.5.5：邮件账号、最近邮件与设置表单。
     pub(crate) mail: MailState,
@@ -1164,6 +1168,7 @@ impl App {
             music_seek_quiet_until: 0.0,
             music_restart_at: None,
             bt_shown: Vec::new(), wireless_devices:Vec::new(),wireless_offset:0,wireless_focus:None,wireless_enter_at:None,wireless_fx:Default::default(),wireless_alerted:Default::default(),wireless_seen_at:Default::default(),
+            wireless_read_want:false,wireless_read_at:f64::NEG_INFINITY,
             bt_initialized: false,
             mail: MailState { accounts: mail::load_accounts(), ..Default::default() },
             mail_lines_cache: Vec::new(),
@@ -1764,6 +1769,17 @@ impl App {
         self.w.tune(OPEN_W.0,OPEN_W.1);self.h.tune(OPEN_H.0,OPEN_H.1);
         self.w.target=PW;self.h.target=self.expanded_height();
     }
+    /// 请求读一次 2.4G 接收器电量。查询会打断设备休眠，所以只在用户主动看时调用；
+    /// `cooldown` 秒内的重复请求直接忽略，`0.0` 表示这次一定要读（如刚打开页面）。
+    pub(crate) fn want_wireless_battery(&mut self,cooldown:f64) {
+        if self.t-self.wireless_read_at>=cooldown {
+            self.wireless_read_at=self.t;
+            self.wireless_read_want=true;
+        }
+    }
+    /// 主循环每帧取一次：true 表示该让后台线程去读一遍。
+    pub fn take_wireless_battery_request(&mut self)->bool {std::mem::take(&mut self.wireless_read_want)}
+
     pub(crate) fn window_layout(&self)->std::sync::MutexGuard<'_,crate::settings_window::State>{
         self.settings_window.lock().unwrap_or_else(|e|e.into_inner())
     }
