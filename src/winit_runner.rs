@@ -208,8 +208,7 @@ impl DaozaiApp {
             .map(|s| s.app.settings.island_scale())
             .unwrap_or(1.0);
         let ppp = w.scale_factor() as f32 * scale;
-        let liquid = self.shell.as_ref()
-            .is_some_and(|s| s.app.settings.skin == daozai::model::Skin::Liquid);
+        let liquid = true; // d3d11-glass feature 开启即液态玻璃路径
         let dock = self.shell.as_ref()
             .map(|s| s.app.settings.dock)
             .unwrap_or(daozai::model::Dock::Top);
@@ -237,7 +236,7 @@ impl DaozaiApp {
         let stats: FrameStats = {
             let rt = self.runtime.as_mut().unwrap();
             let sh = self.shell.as_mut().unwrap();
-            rt.render(window, origin, &params, input, scale, |_ctx, ui| sh.draw(ui))
+            rt.render(window, origin, &params, input, scale, |_ctx, ui| sh.draw(ui.ctx()))
         };
         if stats.device_lost {
             // 设备已重置：这一帧的 viewport output 全部作废，交给事件方法末尾重建。
@@ -359,7 +358,9 @@ impl ApplicationHandler<Wakeup> for DaozaiApp {
                     m.borrow().get(&id).map(|(_, old)| *old != builder).unwrap_or(true)
                 });
                 if need_create {
-                    let attrs = egui_winit::create_winit_window_attributes(egui_ctx, builder.clone());
+                    let attrs = with_current_event_loop(|el|
+                        egui_winit::create_winit_window_attributes(egui_ctx, el, builder.clone()))
+                        .unwrap_or_else(winit::window::WindowAttributes::default);
                     let Some(Ok(window)) = with_current_event_loop(|el| el.create_window(attrs)) else {
                         eprintln!("[winit] viewport {id:?} create_window failed");
                         return;
@@ -409,14 +410,15 @@ impl ApplicationHandler<Wakeup> for DaozaiApp {
                         .events.push(egui::ViewportEvent::Close);
                 }
                 // 同步跑子窗口 UI（viewport_ui_cb 借用 app，只能在此调用，不能跨帧存）。
-                let output = egui_ctx.run_ui(input, |ui| viewport_ui_cb(ui));
+                // egui 0.31 的 immediate viewport 回调签名是 FnMut(&Context)。
+                let output = egui_ctx.run(input, |ctx| viewport_ui_cb(ctx));
                 VIEWPORT_REQ.with(|q| q.borrow_mut().push((id, window, output)));
             });
         }
 
         // Shell 承载全部 app 状态与后台服务：suspend 时保留，resume 只重建窗口绑定。
         if self.shell.is_none() {
-            self.shell = Some(Shell::new(ctx.clone(), hwnd, daozai::app::Options {
+            self.shell = Some(Shell::new_d3d11(ctx.clone(), hwnd, daozai::app::Options {
                 liquid_prefer_dgpu_boot: self.prefer_dgpu,
                 ..Default::default()
             }));

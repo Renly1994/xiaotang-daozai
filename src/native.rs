@@ -673,7 +673,53 @@ impl Window {
         }
     }
 
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Option<Self> {
+    #[cfg(feature="d3d11-glass")]
+    /// D3D11 栈直接传 HWND + egui Context（不再经由 eframe CreationContext）。
+    pub fn new(hwnd: windows::Win32::Foundation::HWND, egui_ctx: egui::Context) -> Option<Self> {
+        let hook = unsafe {
+            apply_style(hwnd, false, false);
+            let _ = enable_alpha_composition(hwnd);
+            let _ = SetWindowSubclass(hwnd, Some(subclass), SUBCLASS_ID, 0);
+            SetWinEventHook(
+                EVENT_SYSTEM_FOREGROUND,
+                EVENT_SYSTEM_FOREGROUND,
+                None,
+                Some(on_foreground),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT,
+            )
+        };
+        if !hook.is_invalid() {
+            FG_CONTEXT.set(Some(egui_ctx.clone()));
+        }
+        // 区域用哨兵值：首帧（包括启动即隐藏的空区域）也必须真正调用 SetWindowRgn，
+        // 否则整块透明画布会挡住下层程序的点击。
+        // D3D11+DComp 有逐像素 alpha，不需要旧 wgpu 时代的轮廓裁剪兜底。
+        let opaque_surface = false;
+        let wake = Arc::new(Mutex::new(PointerWake::default()));
+        watch_drag(hwnd, egui_ctx.clone(), wake);
+        Some(Self {
+            hwnd,
+            capture_exclusion: capture::Exclusion::default(),
+            crop: Crop::default(),
+            page_wheel_hook: None,
+            layering: Layering::Pending,
+            region: (i32::MIN, 0, 0, 0),
+            expanded: false,
+            hook,
+            browser_state: (None, PollClock::default()),
+            drag_capture: DragCapture::default(),
+            glass: None,
+            backdrop: None,
+            blur: false,
+            blur_unavailable: false,
+            opaque_surface,
+            outline: ShapeAlpha::default(),
+        })
+    }
+
+    pub fn from_cc(cc: &eframe::CreationContext<'_>) -> Option<Self> {
         let RawWindowHandle::Win32(handle) = cc.window_handle().ok()?.as_raw() else { return None };
         let hwnd = HWND(handle.hwnd.get() as *mut _);
         #[cfg(feature = "sdk-material")]

@@ -111,11 +111,16 @@ pub struct Options {
     pub fetch_lyrics: bool,
     /// 吉祥物在多久无操作后出现（秒）。
     pub pet_idle: f64,
+    /// 启动期独显偏好快照（D3D11 栈选卡用）。
+    #[cfg(feature="d3d11-glass")]
+    pub liquid_prefer_dgpu_boot: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { fetch_lyrics: true, pet_idle: 45.0 }
+        Self { fetch_lyrics: true, pet_idle: 45.0,
+            #[cfg(feature="d3d11-glass")]
+            liquid_prefer_dgpu_boot: true }
     }
 }
 

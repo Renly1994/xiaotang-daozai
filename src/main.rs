@@ -11,6 +11,12 @@ use std::time::{Duration, Instant};
 
 mod diagnostics;
 mod graphics;
+#[cfg(feature="d3d11-glass")]
+mod winit_runner;
+
+/// D3D11 自绘路径没有 eframe Frame 的 vendor 补丁字段；兼容渲染读回只在 eframe 路径使用。
+fn interactive_frame_start_for_draw() -> Option<Instant> { None }
+fn d3d11_front_ready_for_draw() -> bool { false }
 
 struct Shell {
     app: App,
@@ -297,7 +303,7 @@ impl Shell {
         #[cfg(windows)] eframe::set_root_viewport_scale(app.settings.island_scale());
         #[cfg(windows)]
         let native = {
-            let mut window = daozai::native::Window::new(cc);
+            let mut window = daozai::native::Window::from_cc(cc);
             #[cfg(feature = "sdk-material")]
             let material_window = window.as_ref().and_then(daozai::native::Window::material_window).is_some();
             #[cfg(not(feature = "sdk-material"))]
@@ -562,32 +568,11 @@ impl Shell {
             material_appearance: self.material.as_ref().map_or_else(Default::default, daozai::material::Runtime::appearance),
         }
     }
-}
 
-impl eframe::App for Shell {
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [0.0; 4]
-    }
-
-    #[cfg(windows)]
-    fn raw_input_hook(&mut self, ctx:&egui::Context, input:&mut egui::RawInput) {
-        if input.viewport_id != egui::ViewportId::ROOT || self.native.is_none() {return;}
-        let size=if self.app.settings.dock.is_side() {
-            egui::vec2(daozai::side_dock::SIDE_W,daozai::side_dock::SIDE_H)
-        } else {
-            let width = self.next_horizontal_width(ctx.pixels_per_point());
-            if self.horizontal_width != width {
-                self.horizontal_width = width;
-                self.placement_at = PollClock::default();
-            }
-            egui::vec2(width + app::CANVAS_W - app::WIN_W, app::WIN_H)
-        };
-        input.screen_rect=Some(egui::Rect::from_min_size(Pos2::ZERO,size));
-    }
-
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    /// 岛仔 UI 绘制主体：eframe 与 D3D11 winit 自绘循环共用。
+    fn draw(&mut self, ctx: &egui::Context) {
         let update_start=Instant::now();
-        #[cfg(all(windows, feature = "sdk-js", feature = "sdk-material"))]
+        #[cfg(all(windows, feature = "sdk-js", feature = "sdk-material", not(feature = "d3d11-glass")))]
         self.reconcile_material(ctx, _frame.wgpu_render_state());
         #[cfg(windows)]
         self.app.poll_plugin_notices();
@@ -622,7 +607,7 @@ impl eframe::App for Shell {
         #[cfg(windows)]
         thread_local!{static AFTER_INTERACTIVE_CAPTURE:std::cell::Cell<bool>=const{std::cell::Cell::new(false)};}
         #[cfg(windows)]
-        if let Some(start)=_frame.interactive_frame_start {
+        if let Some(start)=interactive_frame_start_for_draw() {
             self.frame_at=start;
             AFTER_INTERACTIVE_CAPTURE.set(true);
         } else if AFTER_INTERACTIVE_CAPTURE.replace(false) {
@@ -956,7 +941,7 @@ impl eframe::App for Shell {
 
         #[cfg(windows)]
         if let Some(native) = &mut self.native {
-            native.begin_crop_frame(_frame.root_gl_front_ready);
+            native.begin_crop_frame(d3d11_front_ready_for_draw());
             // 兼容渲染：读回的画面交给分层窗口，边缘保留抗锯齿。画面变化（或有其他输入）时才请求下一次读回，
             // 读回完成本身触发的那一帧若画面没变就停下，静止时不会一直空转。
             if native.wants_frames() {
@@ -1014,7 +999,7 @@ impl eframe::App for Shell {
                 && self.app.settings.island_shape==daozai::model::IslandShape::Pill).then_some(out.hit);
             native.watch_collapsed_pill_edge(pill_hover,ppp,self.app.settings.dock);
             native_cost=native_start.elapsed();
-            _frame.root_window_offset=native.paint_offset();
+            let _paint_offset=native.paint_offset();
             native.set_page_scroll_area(out.page_scroll_area.filter(|_|!self.hidden && out.expanded),ppp);
             if !self.hidden && self.app.settings.dock==daozai::model::Dock::Top {
                 let on_top=self.app.settings.avoid_top_bar && self.app.settings.top_bar_on_top;
@@ -1238,11 +1223,213 @@ impl eframe::App for Shell {
                         interval.saturating_sub(logic).as_secs_f64()*1000.0,draw_cost.as_secs_f64()*1000.0,
                         daozai::resources::PLUGIN_FRAME_US.load(std::sync::atomic::Ordering::Relaxed) as f64/1000.0,
                         native_cost.as_secs_f64()*1000.0,pre_parts,out.interactive_transition,
-                        _frame.interactive_frame_start.is_some(),self.app.render_compat_running));
+                        interactive_frame_start_for_draw().is_some(),self.app.render_compat_running));
             }
         }
         PREVIOUS_FRAME.set(Some((frame_start,elapsed)));
     }
+
+
+    #[cfg(feature="d3d11-glass")]
+    fn new_d3d11(egui_ctx: egui::Context, hwnd: windows::Win32::Foundation::HWND, opts: Options) -> Self {
+        // D3D11 路径不写 last-graphics.log（那里只有 eframe GL/wgpu 信息）。
+        let running_compat=false;
+        diagnostics::startup("加载本地配置");
+        let mut app = App::new(&egui_ctx, opts);
+        #[cfg(all(windows, feature = "sdk-material", not(feature = "d3d11-glass")))]
+        let material_debug = daozai::material::debug_requested();
+        app.render_compat_running=running_compat;
+        #[cfg(feature="record")] let quota_demo=std::env::var("DAOZAI_QUOTA_DEMO").is_ok();
+        #[cfg(not(feature="record"))] let quota_demo=false;
+        diagnostics::startup("迁移配置");
+        if !quota_demo{app.migrate_merged_switches();}
+        diagnostics::startup("启动剪贴板记录");
+        if std::env::args().any(|arg|arg=="--settings"){app.open_settings();}
+        if std::env::args().any(|arg|arg=="--calendar"){app.open_calendar(None);}
+        #[cfg(feature="record")]
+        if std::env::var("DAOZAI_MAIL_DEMO").is_ok(){app.mail_demo();}
+        #[cfg(feature="record")]
+        if std::env::var("DAOZAI_CAL_DEMO").is_ok(){app.calendar_demo();}
+        #[cfg(feature="record")]
+        if let Ok(mode)=std::env::var("DAOZAI_QUOTA_DEMO"){app.quota_demo(&mode);}
+        diagnostics::startup("初始化媒体和托盘");
+        let media = smtc::shared();
+        let media_enabled=smtc::spawn_poller(media.clone(),egui_ctx.clone());
+        media_enabled.store(app.settings.visible_pages[0],std::sync::atomic::Ordering::Relaxed);
+        #[cfg(windows)]
+        let autostart = daozai::tray::autostart_enabled();
+        #[cfg(windows)]
+        let tray = if profiling_island(){None}else{app.start_tray(daozai::tray::State {
+            pet: app.settings.pet,
+            minimal: app.settings.minimal,
+            autostart,
+        })};
+        diagnostics::startup("初始化通知监听");
+        #[cfg(windows)]
+        app.start_plugin_notices(&egui_ctx);
+        #[cfg(windows)]
+        let incoming=if app.settings.read_notifications {match daozai::system::connect_with_settings(egui_ctx.clone(),&app.settings){Ok(rx)=>Some(rx),Err(e)=>{app.listener_status=format!("Windows 无法读取通知：{}",e.code());None}}}else{None};
+        // 音频、网络与输入法查询由后台完成，避免首帧等待系统服务。
+        diagnostics::startup("创建后台采样与窗口");
+        let initial_input=None;
+        #[cfg(windows)] let system_state=daozai::system::Snapshot::default();
+        #[cfg(windows)] let system_rx=daozai::system::observe(egui_ctx.clone(),system_state.clone(),initial_input);
+        // 岛体大小只作用于主窗口，在首帧之前生效，避免启动时先按 100% 闪一下。
+        #[cfg(windows)] // D3D11 栈在 winit_runner::scale_root_input 里换算岛体缩放。
+        #[cfg(windows)]
+        let native = {
+            let mut window = daozai::native::Window::new(hwnd, egui_ctx.clone());
+            #[cfg(all(feature = "sdk-material", not(feature = "d3d11-glass")))]
+            let material_window = window.as_ref().and_then(daozai::native::Window::material_window).is_some();
+            #[cfg(not(feature = "sdk-material"))]
+            let material_window = false;
+            if !material_window {
+                if app.settings.exclude_from_capture {
+                    app.capture_exclusion_request = Some(true);
+                }
+                Self::sync_capture_exclusion(&mut app, window.as_mut());
+            }
+            window
+        };
+        #[cfg(all(windows, feature = "sdk-material", not(feature = "d3d11-glass")))]
+        if let Some(error) = daozai::material::take_startup_failure() {
+            #[cfg(feature = "sdk-js")]
+            if !material_debug {
+                persist_material_failure(&mut app);
+            }
+            app.alert("材质加载失败", error, 0, false);
+        } else if daozai::material::falling_back() {
+            app.say("材质加载失败，已恢复普通绘制");
+        } else {
+            #[cfg(feature = "sdk-js")]
+            if !material_debug
+                && app.settings.render_compat
+                && app.material_spec().is_some()
+                && native.as_ref().and_then(daozai::native::Window::material_window).is_none()
+            {
+                let error = "无法使用 Direct3D 12 透明交换链，已恢复普通绘制";
+                daozai::material::Runtime::report_failure(error);
+                persist_material_failure(&mut app);
+                app.alert("材质加载失败", error, 0, false);
+            }
+        }
+        #[cfg(all(windows, feature = "sdk-material", not(feature = "d3d11-glass")))]
+        let material = native.as_ref()
+            .filter(|window| material_debug && window.material_window().is_some())
+            .zip(cc.wgpu_render_state.as_ref())
+            .and_then(|(_, state)| {
+                match daozai::material::Runtime::debug(state) {
+                    Ok(runtime) => Some(runtime),
+                    Err(error) => {
+                        disable_material(&mut app, &egui_ctx, error, false);
+                        None
+                    }
+                }
+            });
+        #[cfg(all(windows, feature = "sdk-js", feature = "sdk-material", not(feature = "d3d11-glass")))]
+        let material_requested_id = app.material_spec().map(|spec| spec.id.to_owned());
+        Self {
+            app,
+            t0: Instant::now(),
+            #[cfg(windows)]
+            frame_at: Instant::now(),
+            #[cfg(windows)]
+            readback_at: None,
+            #[cfg(windows)]
+            was_interactive_transition: false,
+            media,
+            seek_rx: None,
+            media_control:None,
+            music_volume_rx:None,
+            _resource_monitor:daozai::resources::Monitor::start(daozai::model::config_dir().join("diagnostics")),
+            resource_at:PollClock::default(),
+            guard_notified:false,
+            media_enabled,
+            media_fast_until: None,
+            placed: false,
+            placement_at: PollClock::default(),
+            placement_scale: 0.0,
+            #[cfg(windows)] placed_bounds:None,
+            #[cfg(windows)] horizontal_width:app::WIN_W,
+            placement_key: (String::new(), 0, daozai::model::Dock::Top, true, (0, 0)),
+            #[cfg(windows)]
+            oled_shift: (0, 0),
+            win_x: 0.0,
+            sys: (None, false, PollClock::default()),
+            #[cfg(windows)]
+            system_state,
+            #[cfg(windows)] system_ready:false,
+            #[cfg(windows)] system_rx,
+            fullscreen:None,
+            input_state:daozai::input::Monitor::new(initial_input),
+            #[cfg(windows)] input_keys:daozai::input::Shortcuts::start(),
+            #[cfg(windows)] incoming,
+            #[cfg(windows)] messengers:Default::default(),
+            #[cfg(windows)] unread_at:PollClock::default(),
+            #[cfg(windows)] opening_messenger:None,
+            #[cfg(windows)] tray_opening:None,
+            #[cfg(windows)] hidden:false,
+            #[cfg(windows)] backdrop:None,
+            #[cfg(windows)]
+            native,
+            #[cfg(all(windows, feature = "sdk-material", not(feature = "d3d11-glass")))]
+            material,
+            #[cfg(all(windows, feature = "sdk-js", feature = "sdk-material", not(feature = "d3d11-glass")))]
+            material_debug,
+            #[cfg(all(windows, feature = "sdk-js", feature = "sdk-material", not(feature = "d3d11-glass")))]
+            material_requested_id,
+            #[cfg(all(windows, feature = "sdk-js", feature = "sdk-material", not(feature = "d3d11-glass")))]
+            material_source: None,
+            #[cfg(all(windows, feature = "sdk-js", feature = "sdk-material", not(feature = "d3d11-glass")))]
+            material_failed: false,
+            #[cfg(windows)]
+            tray,
+            #[cfg(windows)]
+            autostart,
+            #[cfg(windows)]
+            bt_rx: None,
+            bt: Vec::new(),
+            bt_ready: false,
+            #[cfg(windows)]
+            receiver_rx: None,
+            receivers: Vec::new(),
+            volume_quiet: PollClock::default(),
+            mail: None,
+            mail_sig: None,
+            cal: None,
+            cal_sig: None,
+            clipboard_watch: None,
+            quota: daozai::quota::Service::start(), quota_sig: None, quota_at: PollClock::default(),
+        }
+    }
+
+}
+
+impl eframe::App for Shell {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.draw(ctx);
+    }
+
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4]
+    }
+
+    #[cfg(windows)]
+    fn raw_input_hook(&mut self, ctx:&egui::Context, input:&mut egui::RawInput) {
+        if input.viewport_id != egui::ViewportId::ROOT || self.native.is_none() {return;}
+        let size=if self.app.settings.dock.is_side() {
+            egui::vec2(daozai::side_dock::SIDE_W,daozai::side_dock::SIDE_H)
+        } else {
+            let width = self.next_horizontal_width(ctx.pixels_per_point());
+            if self.horizontal_width != width {
+                self.horizontal_width = width;
+                self.placement_at = PollClock::default();
+            }
+            egui::vec2(width + app::CANVAS_W - app::WIN_W, app::WIN_H)
+        };
+        input.screen_rect=Some(egui::Rect::from_min_size(Pos2::ZERO,size));
+    }
+
 }
 
 // ---------------- 额度线程对齐 ----------------
@@ -1575,6 +1762,12 @@ fn run() -> eframe::Result<()> {
     #[cfg(windows)]
     if !profiling_island(){std::thread::spawn(daozai::record_install_size);}
     diagnostics::startup("初始化图形窗口");
+    #[cfg(feature="d3d11-glass")]
+    {
+        let boot = daozai::model::Settings::load();
+        return winit_runner::run(true)
+            .map_err(|e| eframe::Error::AppCreation(Box::new(std::io::Error::other(e.to_string()))));
+    }
     let viewport = egui::ViewportBuilder::default()
         .with_title("岛仔").with_icon(daozai::theme::app_icon())
         .with_inner_size([app::CANVAS_W, app::WIN_H])
