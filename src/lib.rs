@@ -20,6 +20,7 @@ mod plugin_notice_settings;
 mod plugin_notice_ui;
 pub mod poll_clock;
 pub mod resources;
+pub mod brief_card;
 pub mod anim;
 pub mod oled_shift;
 pub mod app;
