@@ -1812,6 +1812,59 @@ impl App {
         }
         self.module_on(page)
     }
+/// 液态玻璃参数弹窗（d3d11-glass feature）：主题 / 独显 / 折射色散等参数。
+/// 入口在「外观 → 皮肤」下的「配置液态玻璃」按钮。
+#[cfg(feature="d3d11-glass")]
+fn liquid_config_window(app: &mut crate::app::App, ctx: &egui::Context) {
+    use crate::model::LiquidTheme;
+    if !crate::gpu_glass_stub::config_open() { return; }
+    let mut open = true;
+    egui::Window::new(egui::RichText::new("液态玻璃配置").size(14.0).strong())
+        .open(&mut open).collapsible(false).resizable(false).default_width(560.0)
+        .show(ctx, |ui| {
+            egui::ScrollArea::vertical().max_height(430.0).show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                settings_hint(ui, "参数即时生效；形态由岛体当前展开/收起状态决定");
+                let themes: [(LiquidTheme, &str); 3] = [
+                    (LiquidTheme::Auto, "自动"), (LiquidTheme::Dark, "深色"), (LiquidTheme::Light, "浅色")];
+                let before = app.settings.liquid_theme;
+                settings_control_row_right(ui, "主题", |ui| { settings_segmented(ui, &mut app.settings.liquid_theme, &themes, 52.0); });
+                if before != app.settings.liquid_theme { app.settings.save(); }
+                settings_hint(ui, "自动：跟随桌面亮度切换深/浅（带滞回）；深色/浅色：固定");
+                ui.separator();
+                let before = app.settings.liquid_prefer_dgpu;
+                setting_row(ui, "优先独立显卡", "让液态玻璃尽量使用独显，重启生效", &mut app.settings.liquid_prefer_dgpu);
+                if before != app.settings.liquid_prefer_dgpu { app.settings.save(); }
+                ui.separator();
+                let slider = |ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>, def: f32, hint: &str| {
+                    settings_control_row(ui, label, 56.0, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().slider_width = 180.0;
+                            ui.add(egui::Slider::new(v, range).fixed_decimals(2));
+                            if ui.add_enabled((*v - def).abs() > 0.001, egui::Button::new("恢复默认")).clicked() { *v = def; }
+                        }).response
+                    });
+                    settings_hint(ui, hint);
+                    ui.separator();
+                };
+                slider(ui, "形变强度", &mut app.settings.liquid_morph, 0.0..=3.0, 1.0, "展开/折叠瞬间边缘折射增强倍数；0=关闭");
+                slider(ui, "折射强度", &mut app.settings.liquid_refract_px, 0.0..=120.0, 48.0, "边缘背景弯折的像素数；大=更厚透镜");
+                slider(ui, "色散强度", &mut app.settings.liquid_chroma_px, 0.0..=30.0, 8.0, "红蓝彩边强度；0=关闭色散");
+                slider(ui, "内部模糊", &mut app.settings.liquid_blur_px, 0.0..=4.0, 1.5, "折射带采样步长；大=更磨砂");
+                slider(ui, "折射带宽", &mut app.settings.liquid_band_px, 10.0..=140.0, 87.0, "折射从边缘往里延伸多深");
+                slider(ui, "白边宽度", &mut app.settings.liquid_edge_w_px, 0.0..=4.0, 1.5, "边缘高光宽度；0=关闭");
+                slider(ui, "白边亮度", &mut app.settings.liquid_edge_op, 0.0..=1.0, 0.90, "边缘高光亮度");
+                slider(ui, "高光跟随鼠标", &mut app.settings.liquid_light_follow, 0.0..=1.0, 1.0, "0=固定左上光；1=完全跟随");
+                slider(ui, "弹簧刚度", &mut app.settings.liquid_spring, 0.2..=3.0, 1.0, "控件果冻回弹快慢");
+                slider(ui, "阻尼比", &mut app.settings.liquid_zeta, 0.1..=1.0, 0.5, "入场回弹收劲；1.0=不弹跳");
+                let before = app.settings.liquid_shadow;
+                setting_row(ui, "岛体投影", "胶囊外围的多层落影", &mut app.settings.liquid_shadow);
+                if before != app.settings.liquid_shadow { app.settings.save(); }
+            });
+        });
+    crate::gpu_glass_stub::set_config_open(open);
+}
+
     pub fn settings_ui(&mut self,ctx:&egui::Context,autostart:bool){
         // 设置弹窗独立于页面的灰显区域。模块关掉后撤下弹窗，避免继续操作。
         if !self.module_on(crate::app::MAIL_PAGE) {self.mail.form.open=false;}
@@ -1825,6 +1878,8 @@ impl App {
         self.updates.poll(ctx);
         self.updates.dialog_ui(ctx);
         if !self.settings_open{return;}
+        #[cfg(feature="d3d11-glass")]
+        Self::liquid_config_window(self, ctx);
         let id=egui::ViewportId::from_hash_of("daozai-settings");
         let focus_requested=std::mem::take(&mut self.settings_focus_requested);
         let opening=self.window_layout().open();
@@ -2198,6 +2253,10 @@ impl App {
                                 settings_control_row_right(ui,"皮肤",|ui|{settings_segmented(ui,&mut self.settings.skin,&skins,64.0);});
                             }
                             settings_hint(ui,self.effective_skin().description());
+                            #[cfg(feature="d3d11-glass")]
+                            if self.settings.skin==Skin::Liquid && ui.button("配置液态玻璃").clicked() {
+                                crate::gpu_glass_stub::toggle_config();
+                            }
                             if self.effective_skin().is_glass() {
                                 let mut blur=self.settings.glass_blur;
                                 setting_row(ui,"背景模糊","需开启系统“透明效果”；关闭后改为烟熏半透明",&mut blur);

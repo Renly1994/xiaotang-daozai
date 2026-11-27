@@ -10,6 +10,9 @@
 pub mod sdk_spike;
 pub mod display_layout;
 pub mod diagnostics_tool;
+/// 材质包接口预留：d3d11-glass + sdk-js 下提供 material_d3d11 占位实现。
+#[cfg(feature="sdk-js")]
+pub mod local_plugins;
 pub mod rtl_text;
 mod mail_privacy;
 #[cfg(windows)]

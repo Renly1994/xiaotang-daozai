@@ -172,6 +172,17 @@ pub fn uniforms() -> GlassUniforms {
 }
 
 /// app 的 paint_gpu_glass 每帧写入岛体真实几何/指针/材质。
+/// 液态玻璃配置弹窗开关（UI 状态，无需落盘）。
+static CONFIG_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn toggle_config() { CONFIG_OPEN.fetch_xor(true, std::sync::atomic::Ordering::Relaxed); }
+pub fn config_open() -> bool { CONFIG_OPEN.load(std::sync::atomic::Ordering::Relaxed) }
+pub fn set_config_open(v: bool) { CONFIG_OPEN.store(v, std::sync::atomic::Ordering::Relaxed); }
+
+/// 深/浅主题平滑值（1=浅底深字，0=深底白字），app tick 写入、paint_body 读取。
+static THEME_LEVEL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+pub fn set_theme_level(v: f32) { THEME_LEVEL.store(v.to_bits(), std::sync::atomic::Ordering::Relaxed); }
+pub fn theme_level() -> f32 { f32::from_bits(THEME_LEVEL.load(std::sync::atomic::Ordering::Relaxed)) }
+
 pub fn set_body(rect: Rect, radius: f32, pointer: (f32, f32), material: f32) {
     if let Ok(mut u) = UNIFORMS.lock() {
         u.body_rect = [rect.left(), rect.top(), rect.width(), rect.height()];

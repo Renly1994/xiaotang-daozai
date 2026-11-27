@@ -3189,6 +3189,8 @@ impl App {
     }
 
     pub(crate) fn glassy(&self) -> bool {
+        #[cfg(feature="d3d11-glass")]
+        { return self.settings.skin == model::Skin::Liquid; }
         #[cfg(all(windows, feature = "sdk-material"))]
         { self.material_appearance.glass_foreground }
         #[cfg(not(all(windows, feature = "sdk-material")))]
@@ -3196,6 +3198,8 @@ impl App {
     }
 
     pub(crate) fn glass_controls_ready(&self) -> bool {
+        #[cfg(feature="d3d11-glass")]
+        { return self.glassy() && !self.calendar.draft.is_some() && self.open && self.progress() >= 0.985; }
         #[cfg(all(windows, feature = "sdk-material"))]
         { self.glassy() && self.material_appearance.controls && self.material_appearance.ready && self.open && self.reveal >= 0.6 && self.progress() >= 0.985 }
         #[cfg(not(all(windows, feature = "sdk-material")))]
@@ -3289,7 +3293,21 @@ impl App {
                 let is_notch=self.settings.island_shape!=model::IslandShape::Pill;
                 crate::gpu_glass::set_shape(flare,flare_h,is_notch);
                 let center=rect.center();
-                crate::gpu_glass::set_body(rect,radius,(center.x,center.y),1.0);
+                crate::gpu_glass::set_body(rect,radius,(center.x,center.y),crate::gpu_glass::theme_level());
+                // 核心控件透镜：齿轮/播放/切歌/音量/翻页箭头（坐标与 pages.rs 绘制一致）。
+                // 融球水滴不接；其余控件的透镜在后续 PR 补。
+                let mut ctls = Vec::new();
+                if self.page == 0 && self.media.title.len() > 0 {
+                    for (x, r) in [(74.0, 15.0), (162.0, 15.0), (210.5, 15.0), (258.0, 15.0), (367.0, 15.0)] {
+                        ctls.push(crate::gpu_glass::Ctl {
+                            rect: Rect::from_center_size(egui::pos2(x, 118.0), egui::vec2(r * 2.0, r * 2.0)),
+                            radius: r, mag: 1.06, refract: (r / 70.0).clamp(0.3, 1.0), style: 0 });
+                    }
+                }
+                ctls.push(crate::gpu_glass::Ctl {
+                    rect: Rect::from_center_size(egui::pos2(394.0, 18.0), egui::vec2(26.0, 26.0)),
+                    radius: 13.0, mag: 1.06, refract: 0.3, style: 0 });
+                crate::gpu_glass::set_controls(&ctls);
             } else {
                 crate::gpu_glass::set_active(false);
             }
@@ -4254,6 +4272,22 @@ impl App {
     // 每帧推进：番茄钟、饮水提醒、跨天
     // ---------------------------------------------------------------
     fn tick(&mut self, env: &Env, dt: f32, elapsed: f32) {
+        #[cfg(feature="d3d11-glass")]
+        {
+            static LIQUID_K: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let luma = crate::gpu_glass::background_luma();
+            let cur = f32::from_bits(LIQUID_K.load(std::sync::atomic::Ordering::Relaxed));
+            let target = self.settings.liquid_theme.target(luma, if cur == 0.0 {1.0} else {cur});
+            let k = cur + (target - cur) * (dt as f32 * 6.0).clamp(0.0, 1.0);
+            LIQUID_K.store(k.to_bits(), std::sync::atomic::Ordering::Relaxed);
+            crate::gpu_glass::set_theme_level(k);
+            crate::gpu_glass::set_morph_scale(self.settings.liquid_morph);
+            crate::gpu_glass::set_liquid_optics(self.settings.liquid_refract_px, self.settings.liquid_chroma_px);
+            crate::gpu_glass::set_liquid_look(self.settings.liquid_blur_px, self.settings.liquid_band_px,
+                self.settings.liquid_edge_w_px, self.settings.liquid_edge_op);
+            crate::gpu_glass::set_light_follow(self.settings.liquid_light_follow);
+            crate::gpu_glass::set_shadow(self.settings.liquid_shadow);
+        }
         if self.toast.as_ref().is_some_and(|(_,at)|self.t-at>2.4){self.toast=None;}
         // 跳转后先用本地目标位置显示；播放器回报追上了、换歌了或超时就交还真实位置。
         let seek_done=self.music_seek_ui.as_ref().is_some_and(|(target,title)|{
