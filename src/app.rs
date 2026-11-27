@@ -3278,6 +3278,14 @@ impl App {
 
     /// 绘制岛体（或通知胶囊）的本体：经典皮肤为纯黑；毛玻璃为着色底 + 顶部柔光 + 边缘高光。
     fn paint_body(&self,painter:&egui::Painter,rect:Rect,flare:f32,flare_h:f32,radius:f32,feather:f32){
+        #[cfg(feature="d3d11-glass")]
+        {
+            // 把岛体几何发布给 D3D11 HLSL pass（它在 egui 之前绘制玻璃）。
+            let is_notch=self.settings.island_shape!=model::IslandShape::Pill;
+            crate::gpu_glass::set_shape(flare,flare_h,is_notch);
+            let center=rect.center();
+            crate::gpu_glass::set_body(rect,radius,(center.x,center.y),1.0);
+        }
         let skin=self.effective_skin();
         if skin==model::Skin::Fluid {
             let pill=self.settings.island_shape==model::IslandShape::Pill;
