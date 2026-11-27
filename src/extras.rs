@@ -2425,6 +2425,8 @@ impl App {
                                 settings_hint(ui,"歌词和歌声对不上时调整：正数提前，负数延后；默认提前 0.35 秒。");
                             });
                         });
+                        #[cfg(feature="sdk-js")]
+                        self.plugins.settings(ui,"music",on);
                     }
                     2=>{
                         let on=self.settings_feature_header(ui,crate::app::FOCUS_PAGE,"番茄钟与休息计时",|_,_|{});

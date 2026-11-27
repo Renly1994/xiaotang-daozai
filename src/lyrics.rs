@@ -66,10 +66,44 @@ fn write_negative(path:&std::path::Path,plain:Option<&Lyrics>) {
     let _=crate::model::atomic_write(&negative_path(path),raw.as_bytes());
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct LyricWord {
+    /// 相对本句起点的偏移（秒）。
+    pub offset: f32,
+    /// 该词/字的持续时长（秒）。
+    pub duration: f32,
+    /// 对应的字符数（用于将时间进度平滑映射到本句文字）。
+    pub chars: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct LyricsLine {
     pub t: f32,
     pub text: String,
+    /// 可选：整句结束时间（秒），来自 KRC/YRC 等带句长标注的格式。
+    pub end: Option<f32>,
+    /// 当原生负偏移把本句起点推到 0 秒之前时，记录被截断的正偏移量（秒），
+    /// 使 `t` 保持 `>= 0.0` 同时 `words` / `end` 仍对齐真实起点 `t - start_shift`。
+    pub start_shift: f32,
+    /// 可选：逐字时间片段（来自 KRC / YRC 等逐字格式）。
+    pub words: Vec<LyricWord>,
+}
+
+impl LyricsLine {
+    /// 整体平移该句时间轴（如酷狗 `[offset:...]`），保证起点跨零时逐字与行尾进度不错位。
+    pub(crate) fn shift_offset(&mut self, offset: f32) {
+        let origin = self.t - self.start_shift + offset;
+        if origin < 0.0 {
+            self.t = 0.0;
+            self.start_shift = -origin;
+        } else {
+            self.t = origin;
+            self.start_shift = 0.0;
+        }
+        if let Some(end) = &mut self.end {
+            *end += offset;
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -101,6 +135,72 @@ impl Lyrics {
     pub fn index_at(&self, secs: f32) -> Option<usize> {
         self.lines.iter().rposition(|line|line.t<=secs)
     }
+
+    /// 返回第 `index` 句在 `secs` 时刻已唱的逻辑字符数与总字符数 `(done_chars, total_chars)`。
+    /// 有逐字时间戳（KRC / YRC）时严格按逐字时间推进，精准保留词间静默；
+    /// 仅有行级时间戳时，按句间跨度平滑插值，并对长间奏做合理封顶避免卡在半句。
+    pub fn line_char_progress(&self, index: usize, secs: f32, track_duration: f32) -> (f32, usize) {
+        let Some(line) = self.lines.get(index) else { return (0.0, 0); };
+        let text_chars = line.text.chars().count();
+        let origin_t = line.t - line.start_shift;
+        let elapsed = secs - origin_t;
+        if line.text.trim().is_empty() || elapsed <= 0.0 {
+            return (0.0, text_chars);
+        }
+        if !line.words.is_empty() {
+            let total_chars: usize = line.words.iter().map(|w| w.chars).sum();
+            if total_chars == 0 {
+                return (0.0, text_chars);
+            }
+            let mut done = 0.0f32;
+            for w in &line.words {
+                if elapsed >= w.offset + w.duration {
+                    done += w.chars as f32;
+                } else if elapsed > w.offset {
+                    let frac = if w.duration > 0.001 {
+                        ((elapsed - w.offset) / w.duration).clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    done += w.chars as f32 * frac;
+                    break;
+                } else {
+                    break;
+                }
+            }
+            return (done.clamp(0.0, total_chars as f32), total_chars);
+        }
+        let next_line = self.lines.iter().skip(index + 1).find(|l| l.t - l.start_shift > origin_t);
+        let (end_t, explicit_end) = if let Some(end) = line.end.filter(|e| *e > origin_t) {
+            (end, true)
+        } else if let Some(next) = next_line {
+            (next.t - next.start_shift, next.text.trim().is_empty())
+        } else if track_duration > origin_t {
+            (track_duration, false)
+        } else {
+            (origin_t + 4.0, false)
+        };
+        let raw_span = (end_t - origin_t).max(0.05);
+        let sing_span = if explicit_end {
+            raw_span
+        } else {
+            let chars = line.text.chars().filter(|c| !c.is_whitespace()).count().max(1) as f32;
+            let max_sing = (chars * 0.72).max(4.8);
+            (raw_span.min(max_sing) * 0.94).max(0.25)
+        };
+        let frac = (elapsed / sing_span).clamp(0.0, 1.0);
+        (frac * text_chars as f32, text_chars)
+    }
+
+    /// 返回第 `index` 句在 `secs` 时刻已唱进度（0.0..=1.0）。
+    pub fn line_progress(&self, index: usize, secs: f32, track_duration: f32) -> f32 {
+        let (done, total) = self.line_char_progress(index, secs, track_duration);
+        if total == 0 {
+            0.0
+        } else {
+            (done / total as f32).clamp(0.0, 1.0)
+        }
+    }
 }
 
 fn parse_time(tag: &str) -> Option<f32> {
@@ -113,6 +213,40 @@ fn parse_time(tag: &str) -> Option<f32> {
     let s: f32 = seconds.parse().ok()?;
     if !s.is_finite() || !(0.0..60.0).contains(&s){return None;}
     Some(m as f32 * 60.0 + s)
+}
+
+/// 将 `(offset_secs, duration_secs, slice)` 片段列表裁剪首尾空白，
+/// 生成与 `text.trim()` 字符数精确一致的逐字时间表。
+fn build_trimmed_words(segments: &[(f32, f32, &str)]) -> (String, Vec<LyricWord>) {
+    let full: String = segments.iter().map(|(_, _, s)| *s).collect();
+    let trimmed = full.trim();
+    if trimmed.is_empty() {
+        return (String::new(), Vec::new());
+    }
+    let start_byte = trimmed.as_ptr() as usize - full.as_ptr() as usize;
+    let lead_chars = full[..start_byte].chars().count();
+    let keep_chars = trimmed.chars().count();
+    let mut skipped = 0usize;
+    let mut kept = 0usize;
+    let mut words = Vec::new();
+    for &(offset, duration, slice) in segments {
+        let mut count = slice.chars().count();
+        if skipped < lead_chars {
+            let take_skip = (lead_chars - skipped).min(count);
+            skipped += take_skip;
+            count -= take_skip;
+        }
+        if count > 0 && kept < keep_chars {
+            let take_keep = (keep_chars - kept).min(count);
+            kept += take_keep;
+            words.push(LyricWord {
+                offset: offset.max(0.0),
+                duration: duration.max(0.0),
+                chars: take_keep,
+            });
+        }
+    }
+    (trimmed.to_string(), words)
 }
 
 pub fn parse_lrc(raw: &str) -> Lyrics {
@@ -139,7 +273,7 @@ pub fn parse_lrc(raw: &str) -> Lyrics {
             continue;
         }
         for t in times {
-            lines.push(LyricsLine { t, text: body.to_string() });
+            lines.push(LyricsLine { t, text: body.to_string(), end: None, start_shift: 0.0, words: Vec::new() });
         }
     }
     lines.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
@@ -160,7 +294,7 @@ pub fn from_plain(raw: &str) -> Lyrics {
     let lines: Vec<LyricsLine> = raw
         .lines()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| LyricsLine { t: 0.0, text: l.trim().to_string() })
+        .map(|l| LyricsLine { t: 0.0, text: l.trim().to_string(), end: None, start_shift: 0.0, words: Vec::new() })
         .collect();
     Lyrics { lines, synced: false }
 }
@@ -309,27 +443,99 @@ fn parse_krc(raw:&str)->Lyrics {
     static WORD_TAG:std::sync::OnceLock<regex::Regex>=std::sync::OnceLock::new();
     // 本地歌词会被轮询读取，正则只编译一次。
     let line_tag=LINE_TAG.get_or_init(||regex::Regex::new(r"^\[(\d+),(\d+)\]").unwrap());
-    let word_tag=WORD_TAG.get_or_init(||regex::Regex::new(r"<\d+,\d+,\d+>").unwrap());
+    let word_tag=WORD_TAG.get_or_init(||regex::Regex::new(r"<(\d+),(\d+),\d+>").unwrap());
     let mut timed=Vec::new();
     for line in raw.lines() {
         let Some(c)=line_tag.captures(line) else{continue;};
         let (Ok(start),Ok(length))=(c[1].parse::<u32>(),c[2].parse::<u32>()) else{continue;};
         let Some(end)=start.checked_add(length).filter(|end|*end<=86_400_000) else{continue;};
-        let text=word_tag.replace_all(&line[c.get(0).unwrap().end()..],"").trim().to_string();
+        let body=&line[c.get(0).unwrap().end()..];
+        let matches:Vec<_>=word_tag.captures_iter(body).collect();
+        let (text,words)=if matches.is_empty() {
+            (body.trim().to_string(),Vec::new())
+        } else {
+            let mut segments=Vec::with_capacity(matches.len());
+            for (idx,cap) in matches.iter().enumerate() {
+                let m=cap.get(0).unwrap();
+                let next_start=matches.get(idx+1).map_or(body.len(),|next|next.get(0).unwrap().start());
+                let slice=&body[m.end()..next_start];
+                let w_off=cap[1].parse::<u32>().unwrap_or(0) as f32/1000.0;
+                let w_dur=cap[2].parse::<u32>().unwrap_or(0) as f32/1000.0;
+                segments.push((w_off,w_dur,slice));
+            }
+            build_trimmed_words(&segments)
+        };
         if text.len()>MAX_LINE_TEXT{return rejected_lyrics();}
-        timed.push((start,end,text));
+        timed.push((start,end,text,words));
     }
     if timed.is_empty(){return parse_lrc(raw);}
     timed.sort_by_key(|line|line.0);
     let mut lines=Vec::new();
-    for (i,(start,end,text)) in timed.iter().enumerate() {
-        lines.push(LyricsLine{t:*start as f32/1000.0,text:text.clone()});
+    for (i,(start,end,text,words)) in timed.iter().enumerate() {
+        lines.push(LyricsLine{
+            t:*start as f32/1000.0,
+            text:text.clone(),
+            end:(end>start).then_some(*end as f32/1000.0),
+            start_shift:0.0,
+            words:words.clone(),
+        });
         // 短暂换气保留上一句，只在至少 3 秒的间奏或尾奏清空歌词。
         if end>start && timed.get(i+1).is_none_or(|next|next.0.saturating_sub(*end)>=3000) {
-            lines.push(LyricsLine{t:*end as f32/1000.0,text:String::new()});
+            lines.push(LyricsLine{t:*end as f32/1000.0,text:String::new(),end:None,start_shift:0.0,words:Vec::new()});
         }
     }
     Lyrics{synced:lines.iter().any(|line|!line.text.is_empty()),lines}
+}
+
+/// 解析网易云逐字歌词 YRC：`[start_ms,dur_ms](word_start_ms,word_dur_ms,0)字...`。
+pub(crate) fn parse_yrc(raw:&str)->Lyrics {
+    if raw.len()>MAX_TEXT || raw.lines().count()>MAX_LINES/2{return rejected_lyrics();}
+    static LINE_TAG:std::sync::OnceLock<regex::Regex>=std::sync::OnceLock::new();
+    static WORD_TAG:std::sync::OnceLock<regex::Regex>=std::sync::OnceLock::new();
+    let line_tag=LINE_TAG.get_or_init(||regex::Regex::new(r"^\[(\d+),(\d+)\]").unwrap());
+    let word_tag=WORD_TAG.get_or_init(||regex::Regex::new(r"\((\d+),(\d+),\d+\)").unwrap());
+    let mut timed=Vec::new();
+    for line in raw.lines() {
+        let Some(c)=line_tag.captures(line) else{continue;};
+        let (Ok(start),Ok(length))=(c[1].parse::<u32>(),c[2].parse::<u32>()) else{continue;};
+        let Some(end)=start.checked_add(length).filter(|end|*end<=86_400_000) else{continue;};
+        let body=&line[c.get(0).unwrap().end()..];
+        let matches:Vec<_>=word_tag.captures_iter(body).collect();
+        let (text,words)=if matches.is_empty() {
+            (body.trim().to_string(),Vec::new())
+        } else {
+            let mut segments=Vec::with_capacity(matches.len());
+            for (idx,cap) in matches.iter().enumerate() {
+                let m=cap.get(0).unwrap();
+                let next_start=matches.get(idx+1).map_or(body.len(),|next|next.get(0).unwrap().start());
+                let slice=&body[m.end()..next_start];
+                let w_start=cap[1].parse::<u32>().unwrap_or(start);
+                let w_dur=cap[2].parse::<u32>().unwrap_or(0);
+                let w_off=w_start.saturating_sub(start) as f32/1000.0;
+                segments.push((w_off,w_dur as f32/1000.0,slice));
+            }
+            build_trimmed_words(&segments)
+        };
+        if text.len()>MAX_LINE_TEXT{return rejected_lyrics();}
+        timed.push((start,end,text,words));
+    }
+    if timed.is_empty(){return Lyrics::default();}
+    timed.sort_by_key(|line|line.0);
+    let mut lines=Vec::new();
+    for (i,(start,end,text,words)) in timed.iter().enumerate() {
+        lines.push(LyricsLine{
+            t:*start as f32/1000.0,
+            text:text.clone(),
+            end:(end>start).then_some(*end as f32/1000.0),
+            start_shift:0.0,
+            words:words.clone(),
+        });
+        if end>start && timed.get(i+1).is_none_or(|next|next.0.saturating_sub(*end)>=3000) {
+            lines.push(LyricsLine{t:*end as f32/1000.0,text:String::new(),end:None,start_shift:0.0,words:Vec::new()});
+        }
+    }
+    let body_timed=lines.iter().any(|line|!line.text.trim().is_empty() && !is_credit(&line.text));
+    Lyrics{synced:body_timed,lines}
 }
 
 pub fn fetch(track: &str, artist: &str, duration_secs: f64) -> Result<Lyrics, FetchError> {
@@ -371,19 +577,117 @@ fn cache_path(track:&str,artist:&str,duration:f64)->std::path::PathBuf {
     crate::model::config_dir().join("lyrics").join(format!("{hash:016x}.lrc"))
 }
 
+const WORD_CACHE_HEADER: &str = "#daozai-word-lyrics-v1\n";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedWordLine {
+    /// 行起点（毫秒）。
+    t: u32,
+    /// 可选：行终点（毫秒）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    e: Option<u32>,
+    /// 原始歌词正文（JSON 编码，完整保留 `<...>` 等字面字符）。
+    s: String,
+    /// 逐字时间片 `[offset_ms, duration_ms, chars]`，无损保留词长与词间静默。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    w: Vec<[u32; 3]>,
+}
+
+fn parse_word_cache(body: &str) -> Option<Lyrics> {
+    let rows: Vec<CachedWordLine> = serde_json::from_str(body).ok()?;
+    if rows.is_empty() || rows.len() > MAX_LINES {
+        return None;
+    }
+    let mut lines = Vec::with_capacity(rows.len());
+    for row in rows {
+        if row.t > 86_400_000 || row.s.len() > MAX_LINE_TEXT || row.w.len() > MAX_LINE_TEXT {
+            return None;
+        }
+        if let Some(end) = row.e {
+            if end < row.t || end > 86_400_000 {
+                return None;
+            }
+        }
+        let mut words = Vec::with_capacity(row.w.len());
+        let mut total_chars = 0usize;
+        for [off, dur, chars] in row.w {
+            if chars == 0 || off > 86_400_000 || dur > 86_400_000 {
+                return None;
+            }
+            let c = chars as usize;
+            total_chars = total_chars.checked_add(c)?;
+            words.push(LyricWord {
+                offset: off as f32 / 1000.0,
+                duration: dur as f32 / 1000.0,
+                chars: c,
+            });
+        }
+        if !words.is_empty() && total_chars != row.s.chars().count() {
+            return None;
+        }
+        lines.push(LyricsLine {
+            t: row.t as f32 / 1000.0,
+            text: row.s,
+            end: row.e.map(|e| e as f32 / 1000.0),
+            start_shift: 0.0,
+            words,
+        });
+    }
+    lines.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
+    let synced = lines.iter().any(|l| !l.text.is_empty());
+    Some(Lyrics { lines, synced })
+}
+
+/// 识别早期预览版曾生成的行内增强 LRC 缓存（`[mm:ss.xxx]<mm:ss.xxx>...<mm:ss.xxx>`），
+/// 命中时按缓存失效处理，自动重新拉取并升级为无损结构化缓存；不影响含字面 `<...>` 的普通 LRC。
+fn is_legacy_word_cache(raw: &str) -> bool {
+    static LEGACY_LINE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = LEGACY_LINE.get_or_init(|| {
+        regex::Regex::new(r"^\[\d{2}:\d{2}\.\d{3}\](?:<\d{2}:\d{2}\.\d{3}>[^<\r\n]+)+(?:<\d{2}:\d{2}\.\d{3}>)?$").unwrap()
+    });
+    raw.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.matches('<').count() >= 2 && re.is_match(trimmed)
+    })
+}
+
 fn read_cache(path:&std::path::Path)->Option<Lyrics> {
     use std::io::Read;
     let file=std::fs::File::open(path).ok()?;
     if file.metadata().ok()?.len()>MAX_TEXT as u64{rejected_lyrics();return None;}
     let mut raw=String::new();file.take(MAX_TEXT as u64+1).read_to_string(&mut raw).ok()?;
-    let lyrics=parse_lrc(&raw);
+    let lyrics=if let Some(body)=raw.strip_prefix(WORD_CACHE_HEADER).or_else(||raw.strip_prefix("#daozai-word-lyrics-v1\r\n")) {
+        parse_word_cache(body)?
+    } else if is_legacy_word_cache(&raw) {
+        return None;
+    } else {
+        parse_lrc(&raw)
+    };
     (lyrics.synced && lyrics.lines.iter().any(|l|!l.text.is_empty())).then_some(lyrics)
 }
 
 fn write_cache(path:&std::path::Path,lyrics:&Lyrics) {
     if let Some(parent)=path.parent(){if std::fs::create_dir_all(parent).is_err(){return;}}
-    let raw=lyrics.lines.iter().map(|line|format!("[{:02}:{:06.3}]{}\n",(line.t/60.0) as u32,line.t%60.0,line.text)).collect::<String>();
-    let _=crate::model::atomic_write(path,raw.as_bytes());
+    let has_word_timing=lyrics.lines.iter().any(|l|!l.words.is_empty() || l.end.is_some());
+    if !has_word_timing {
+        let raw=lyrics.lines.iter().map(|line|format!("[{:02}:{:06.3}]{}\n",(line.t/60.0) as u32,line.t%60.0,line.text)).collect::<String>();
+        let _=crate::model::atomic_write(path,raw.as_bytes());
+        return;
+    }
+    let to_ms=|secs:f32| -> u32 { (secs.max(0.0) * 1000.0).round().min(86_400_000.0) as u32 };
+    let rows:Vec<CachedWordLine>=lyrics.lines.iter().map(|line|CachedWordLine{
+        t:to_ms(line.t),
+        e:line.end.filter(|e|*e>=line.t).map(to_ms),
+        s:line.text.clone(),
+        w:line.words.iter().map(|w|[to_ms(w.offset),to_ms(w.duration),w.chars as u32]).collect(),
+    }).collect();
+    let Ok(json)=serde_json::to_string(&rows) else {return;};
+    let mut raw=String::with_capacity(WORD_CACHE_HEADER.len()+json.len());
+    raw.push_str(WORD_CACHE_HEADER);
+    raw.push_str(&json);
+    if raw.len()<=MAX_TEXT {
+        let _=crate::model::atomic_write(path,raw.as_bytes());
+    }
 }
 
 #[cfg(test)]
@@ -577,9 +881,13 @@ fn fetch_netease(base:&str,track:&str,artist:&str,duration:f64)->Result<Lyrics,F
 }
 
 fn fetch_netease_song(base:&str,id:u64)->Result<Lyrics,FetchError>{
-    let result=request_json(&format!("{base}/api/song/lyric?id={id}&lv=-1&kv=-1&tv=-1"),base)?;
+    let result=request_json(&format!("{base}/api/song/lyric?id={id}&lv=-1&kv=-1&tv=-1&yv=-1"),base)?;
     if result.get("code").and_then(|v|v.as_i64())!=Some(200){return Err(FetchError::Unavailable("网易云取词未成功".into()));}
     if result.get("nolyric").and_then(|v|v.as_bool())==Some(true) || result.get("uncollected").and_then(|v|v.as_bool())==Some(true){return Err(FetchError::NotFound);}
+    if let Some(yrc_raw)=result.pointer("/yrc/lyric").and_then(|v|v.as_str()).filter(|s|!s.trim().is_empty()) {
+        let parsed=parse_yrc(yrc_raw);
+        if parsed.synced {return Ok(parsed);}
+    }
     let raw=result.pointer("/lrc/lyric").and_then(|v|v.as_str()).filter(|s|!s.trim().is_empty()).ok_or(FetchError::NotFound)?;
     Ok(lyrics_from_text(raw))
 }
@@ -1347,5 +1655,91 @@ mod tests {
     #[test]
     fn urlencode_escapes_spaces_and_symbols() {
         assert_eq!(urlencode("a b&c"), "a%20b%26c");
+    }
+
+    #[test]
+    fn krc_and_yrc_preserve_word_timings_and_progress() {
+        let krc = parse_krc("[1000,4000]<0,1000,0>你<1000,1000,0>好<2000,2000,0>世界");
+        assert!(krc.synced);
+        assert_eq!(krc.lines[0].text, "你好世界");
+        assert_eq!(krc.lines[0].words.len(), 3);
+        assert!((krc.line_progress(0, 1.0, 60.0) - 0.0).abs() < 0.001);
+        // 1.5s = 第 1 字唱到一半 → 0.5 / 4 = 0.125
+        assert!((krc.line_progress(0, 1.5, 60.0) - 0.125).abs() < 0.01);
+        // 3.0s = 前 2 字唱完 → 2 / 4 = 0.5
+        assert!((krc.line_progress(0, 3.0, 60.0) - 0.5).abs() < 0.01);
+        // 5.0s = 全部唱完 → 1.0
+        assert!((krc.line_progress(0, 5.0, 60.0) - 1.0).abs() < 0.001);
+
+        let yrc = parse_yrc("[10000,3000](10000,1000,0)晚(11000,1000,0)风(12000,1000,0)吹");
+        assert!(yrc.synced);
+        assert_eq!(yrc.lines[0].text, "晚风吹");
+        assert_eq!(yrc.lines[0].words.len(), 3);
+        assert!((yrc.line_progress(0, 11.5, 60.0) - 0.5).abs() < 0.01);
+
+        // 写入并回读缓存后应完整保留逐字时间表。
+        let path = std::env::temp_dir().join(format!("daozai-yrc-cache-{}.lrc", std::process::id()));
+        write_cache(&path, &yrc);
+        let reloaded = read_cache(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(reloaded.lines[0].text, "晚风吹");
+        assert_eq!(reloaded.lines[0].words.len(), 3);
+        assert!((reloaded.line_progress(0, 11.5, 60.0) - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn word_cache_roundtrip_preserves_word_durations_gaps_and_literal_angle_tags() {
+        // 1. 普通 LRC 正文含形似增强时间标签的字面内容，不得被剥离。
+        let literal_lrc = parse_lrc("[00:01.00]请看 <00:12.340> 这个标签\n[00:05.00]下一句");
+        assert_eq!(literal_lrc.lines[0].text, "请看 <00:12.340> 这个标签");
+        let plain_path = std::env::temp_dir().join(format!("daozai-literal-lrc-{}.lrc", std::process::id()));
+        write_cache(&plain_path, &literal_lrc);
+        let reloaded_plain = read_cache(&plain_path).unwrap();
+        let _ = std::fs::remove_file(&plain_path);
+        assert_eq!(reloaded_plain.lines[0].text, "请看 <00:12.340> 这个标签");
+
+        // 2. KRC/YRC 含词间静默（词A 0..300ms，词B 1000..1400ms，行尾 1500ms）与字面 `<...>`：
+        //    缓存往返后，词长、间隙、正文与各时间点的 line_progress 必须完全一致。
+        let gapped = parse_krc("[1000,1500]<0,300,0>词A<1000,400,0>词B");
+        assert_eq!(gapped.lines[0].text, "词A词B");
+        assert_eq!(gapped.lines[0].words.len(), 2);
+        let gap_path = std::env::temp_dir().join(format!("daozai-gap-krc-{}.lrc", std::process::id()));
+        write_cache(&gap_path, &gapped);
+        let reloaded_gap = read_cache(&gap_path).unwrap();
+        let _ = std::fs::remove_file(&gap_path);
+        assert_eq!(reloaded_gap.lines[0].text, gapped.lines[0].text);
+        assert_eq!(reloaded_gap.lines[0].words, gapped.lines[0].words);
+        assert_eq!(reloaded_gap.lines[0].end, gapped.lines[0].end);
+        // 1.15s（词A中点）、1.50s（词间静默，应停在 0.5 而不提前推进）、2.20s（词B中点）、2.45s（词B结束、行尾前，应达 1.0）
+        for secs in [1.0, 1.15, 1.30, 1.50, 1.99, 2.20, 2.45, 2.50] {
+            let before = gapped.line_progress(0, secs, 60.0);
+            let after = reloaded_gap.line_progress(0, secs, 60.0);
+            assert!((before - after).abs() < 0.0005, "时刻 {secs} 缓存前后进度不一致：{before} vs {after}");
+        }
+        assert!((reloaded_gap.line_progress(0, 1.50, 60.0) - 0.5).abs() < 0.001, "词间静默期间高亮不得提前推进");
+        assert!((reloaded_gap.line_progress(0, 2.45, 60.0) - 1.0).abs() < 0.001, "末词结束时应到达 1.0");
+
+        // 3. 损坏的结构化词缓存应被安全拒绝。
+        let bad_path = std::env::temp_dir().join(format!("daozai-bad-word-cache-{}.lrc", std::process::id()));
+        std::fs::write(&bad_path, "#daozai-word-lyrics-v1\n[{\"t\":1000,\"s\":\"ab\",\"w\":[[0,100,5]]}]").unwrap();
+        assert!(read_cache(&bad_path).is_none());
+        let _ = std::fs::remove_file(&bad_path);
+
+        // 4. 早期自生成增强 LRC 缓存应被判定失效以便自动重新拉取升级，不得把 `<00:10.000>` 当正文展示。
+        let legacy_path = std::env::temp_dir().join(format!("daozai-legacy-word-cache-{}.lrc", std::process::id()));
+        std::fs::write(&legacy_path, "[00:10.000]<00:10.000>A<00:11.000>B<00:12.000>\n").unwrap();
+        assert!(read_cache(&legacy_path).is_none(), "旧版自生成增强 LRC 缓存应失效重建");
+        let _ = std::fs::remove_file(&legacy_path);
+    }
+
+    #[test]
+    fn plain_lrc_line_progress_interpolates_and_caps_long_gaps() {
+        let lrc = parse_lrc("[00:10.00]一句普通歌词\n[00:14.00]下一句\n[00:40.00]间奏后");
+        assert!((lrc.line_progress(0, 10.0, 120.0) - 0.0).abs() < 0.001);
+        let mid = lrc.line_progress(0, 12.0, 120.0);
+        assert!(mid > 0.45 && mid < 0.60, "行中点应在 0.5 附近，实际 {mid}");
+        assert!(lrc.line_progress(0, 13.9, 120.0) > 0.95);
+        // 下一句之后有 26 秒长间奏：3 个字的句子不应拖满 26 秒，应在 5 秒内唱完。
+        assert!(lrc.line_progress(1, 19.0, 120.0) >= 0.99);
     }
 }

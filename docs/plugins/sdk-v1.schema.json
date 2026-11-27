@@ -104,6 +104,7 @@
           "appearance.material",
           "navigation.shortcuts",
           "mail.view",
+          "lyrics.style",
           "wireless.receivers",
           "storage",
           "timer",
@@ -954,7 +955,7 @@
     {
       "if": {"properties": {"runtime": {"const": "assets"}}},
       "then": {"properties": {"capabilities": {"contains": {
-        "enum": ["appearance.skin", "appearance.pet", "appearance.icon", "appearance.font", "navigation.shortcuts", "mail.view", "wireless.receivers"]
+        "enum": ["appearance.skin", "appearance.pet", "appearance.icon", "appearance.font", "navigation.shortcuts", "mail.view", "lyrics.style", "wireless.receivers"]
       }}}}
     },
     {
@@ -990,6 +991,24 @@
           "owner": {"const": "mail"},
           "entry": {"const": "mail-view.json"},
           "capabilities": {"contains": {"const": "mail.view"}, "items": {"enum": ["mail.view", "settings"]}},
+          "dataVersion": {"const": 1},
+          "refreshSeconds": {"const": 60},
+          "permissions": {"maxProperties": 0}
+        }
+      }
+    },
+    {
+      "if": {"anyOf": [
+        {"properties": {"owner": {"const": "music"}}},
+        {"properties": {"capabilities": {"contains": {"const": "lyrics.style"}}}}
+      ]},
+      "then": {
+        "required": ["entry", "settings"],
+        "properties": {
+          "runtime": {"const": "assets"},
+          "owner": {"const": "music"},
+          "entry": {"const": "lyrics-style.json"},
+          "capabilities": {"contains": {"const": "lyrics.style"}, "items": {"enum": ["lyrics.style", "settings"]}},
           "dataVersion": {"const": 1},
           "refreshSeconds": {"const": 60},
           "permissions": {"maxProperties": 0}

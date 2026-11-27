@@ -99,6 +99,61 @@ pub(crate) fn keep_glass_chrome(color: Color32, palette: &Palette) -> Color32 {
     if palette.glass_chrome { color } else { map_color(color, palette) }
 }
 
+/// 歌词已唱部分的专用前景换色：始终当作文字前景处理（不走深色底块浅化、也不把用户所选蓝色替换成主题强调色），
+/// 保留用户色相并按当前皮肤底色保证可读对比度。
+pub(crate) fn map_lyric_foreground(color: Color32, p: &Palette) -> Color32 {
+    let a = color.a();
+    if a == 0 {
+        return color;
+    }
+    let af = a as f32 / 255.0;
+    let c = [
+        (color.r() as f32 / 255.0 / af).min(1.0),
+        (color.g() as f32 / 255.0 / af).min(1.0),
+        (color.b() as f32 / 255.0 / af).min(1.0),
+    ];
+    let f = |v: [u8; 3]| [v[0] as f32 / 255.0, v[1] as f32 / 255.0, v[2] as f32 / 255.0];
+    let mut out = c;
+    let mut alpha = a as f32;
+    if light_paper(p) {
+        let paper = f(p.paper);
+        let seen = |rgb: [f32; 3], al: f32| {
+            let t = al / 255.0;
+            [
+                paper[0] + (rgb[0] - paper[0]) * t,
+                paper[1] + (rgb[1] - paper[1]) * t,
+                paper[2] + (rgb[2] - paper[2]) * t,
+            ]
+        };
+        let mut k = 1.0f32;
+        while k > 0.25 && contrast(seen(out, alpha), paper) < 3.2 {
+            k -= 0.05;
+            out = [c[0] * k, c[1] * k, c[2] * k];
+        }
+        if a >= 110 {
+            while alpha < 255.0 && contrast(seen(out, alpha), paper) < 3.2 {
+                alpha = (alpha * 1.15).min(255.0);
+            }
+        }
+        // 极端浅灰/近白自定义色仅按比例压暗后若仍对比度不足，向皮肤墨色靠拢保证可读。
+        if contrast(seen(out, alpha), paper) < 3.0 {
+            let ink = f(p.ink);
+            let mut blend = 0.2f32;
+            while blend <= 1.0 && contrast(seen(out, alpha), paper) < 3.0 {
+                out = [
+                    out[0] + (ink[0] - out[0]) * blend,
+                    out[1] + (ink[1] - out[1]) * blend,
+                    out[2] + (ink[2] - out[2]) * blend,
+                ];
+                blend += 0.2;
+            }
+        }
+    }
+    let alpha = alpha.round().clamp(0.0, 255.0);
+    let to = |v: f32| (v.clamp(0.0, 1.0) * alpha).round() as u8;
+    Color32::from_rgba_premultiplied(to(out[0]), to(out[1]), to(out[2]), alpha as u8)
+}
+
 /// 映射单个颜色（Color32 为预乘 alpha）。
 pub fn map_color(color: Color32, p: &Palette) -> Color32 {
     let a = color.a();
@@ -420,5 +475,21 @@ mod tests {
         recolor(&mut shape, &CREAM);
         let Shape::Mesh(mesh) = shape else { unreachable!() };
         assert_eq!(mesh.vertices[0].color, Color32::WHITE);
+    }
+
+    #[test]
+    fn dark_custom_lyric_color_stays_readable_on_light_skins() {
+        let dark_green = Color32::from_rgb(0, 127, 0);
+        for palette in [&CREAM, &GLASS_LIGHT, &GLASS_LIGHT_READABLE] {
+            let mapped = map_lyric_foreground(dark_green, palette);
+            let paper = [palette.paper[0] as f32 / 255.0, palette.paper[1] as f32 / 255.0, palette.paper[2] as f32 / 255.0];
+            let fg = [mapped.r() as f32 / 255.0, mapped.g() as f32 / 255.0, mapped.b() as f32 / 255.0];
+            let cr = contrast(fg, paper);
+            assert!(cr >= 3.2, "浅色皮肤下深绿歌词对比度不足：{cr:.2}（mapped={mapped:?}）");
+            assert!(mapped.g() > mapped.r() && mapped.g() > mapped.b(), "应保留绿色色相，实际 {mapped:?}");
+        }
+        // 晴空蓝在奶油皮肤下保留蓝色色相，不被替换成奶油橙。
+        let sky = map_lyric_foreground(Color32::from_rgb(56, 189, 248), &CREAM);
+        assert!(sky.b() > sky.r(), "晴空蓝歌词应保留蓝色色相，实际 {sky:?}");
     }
 }

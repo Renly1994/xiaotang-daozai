@@ -303,14 +303,25 @@ impl App {
                 let ink=if active {theme::WHITE}else{theme::GRAY};
                 let row=col.faded((1.0-distance.abs()*0.35).clamp(0.0,1.0));
                 let font=row.font(if active {12.0}else{10.0},if active {W::Semibold}else{W::Regular});
-                // 维语等从右往左的歌词：先按阅读顺序分行再逐行转换（#200）。
-                let text=crate::rtl_text::display_wrapped(&line.text,132.0*c.s,|s|row.painter.layout_no_wrap(s.to_owned(),font.clone(),ink).size().x).into_owned();
+                // 维语等从右往左的歌词：先按阅读顺序分行再逐行转换，并保留逻辑→视觉字符映射（#200）。
+                let karaoke_style=if active && lyrics.synced {self.active_lyrics_style().filter(|s|s.expanded)}else{None};
+                let (text,visual_map)=if karaoke_style.is_some() {
+                    crate::rtl_text::display_wrapped_with_map(&line.text,132.0*c.s,|s|row.painter.layout_no_wrap(s.to_owned(),font.clone(),ink).size().x)
+                } else {
+                    (crate::rtl_text::display_wrapped(&line.text,132.0*c.s,|s|row.painter.layout_no_wrap(s.to_owned(),font.clone(),ink).size().x).into_owned(),None)
+                };
                 let mut job=egui::text::LayoutJob::simple(text,font,ink,132.0*c.s);
                 job.wrap.max_rows=if active {3}else{1};
                 job.wrap.break_anywhere=true;
                 let galley=row.painter.layout_job(job);
                 let y=64.0+distance*29.0-galley.size().y/(2.0*c.s);
-                row.painter.galley(row.pos(246.0,y),galley,ink);
+                if let Some(style)=karaoke_style {
+                    let (done_chars,_)=lyrics.line_char_progress(index,self.lyric_position(),self.media.duration as f32);
+                    let phase=if crate::bar_layout::animations_enabled() {(self.t*0.22) as f32}else{0.0};
+                    paint::karaoke_galley(&row.painter,row.pos(246.0,y),galley,ink,style.color,style.custom_color,done_chars,visual_map.as_deref(),phase);
+                } else {
+                    row.painter.galley(row.pos(246.0,y),galley,ink);
+                }
             }
             if !lyrics.synced {col.text(246.0,39.0,"文本歌词",8.0,W::Regular,theme::GRAY,H::Left);}
         } else {

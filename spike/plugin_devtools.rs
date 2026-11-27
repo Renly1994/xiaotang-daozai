@@ -184,7 +184,7 @@ impl LocalPlugins {
         }
     }
 
-    fn reload_local(&mut self, id: &str) -> Result<()> {
+    pub(super) fn reload_local(&mut self, id: &str) -> Result<()> {
         let mut record = self.installed(id)?;
         let previous = &record.package.as_ref().unwrap().manifest;
         let package = Package::read(&record.origin)?;
@@ -196,8 +196,20 @@ impl LocalPlugins {
         if previous.source_kind() != package.manifest.source_kind() {
             record.source_grant = None;
         }
-        record.values = package.settings_values(&record.values);
+        record.values = if record
+            .package
+            .as_ref()
+            .is_some_and(|old_pkg| old_pkg.manifest.is_lyrics_style() && package.manifest.is_lyrics_style())
+        {
+            let old_pkg = record.package.as_ref().unwrap();
+            old_pkg
+                .migrate_lyrics_style_values(&package, &record.values)
+                .ok_or_else(|| fail("新版本的歌词样式设置与已保存配置不兼容，已保留当前版本"))?
+        } else {
+            package.settings_values(&record.values)
+        };
         record.package = Some(package);
+        self.drafts.remove(id);
         #[cfg(windows)]
         let previous_secret = {
             let scope_changed = match (previous_network.as_ref(), record.network()) {
@@ -377,6 +389,7 @@ pub(super) fn capability_report(manifest: &Value) -> String {
                     | "timer"
                     | "appearance.material"
                     | "mail.view"
+                    | "lyrics.style"
                     | "navigation.shortcuts"
                     | "wireless.receivers" => "可用",
                     _ => "实验",

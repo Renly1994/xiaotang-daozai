@@ -14,6 +14,184 @@ pub enum H {
     Right,
 }
 
+/// 逐字/逐行卡拉 OK 变色绘制：
+/// - 未唱部分保持 `unsung`（通常为白色，按当前皮肤自动换色）；
+/// - 已唱部分按真实字形边界与逻辑→视觉双向映射精确切分（支持比例字体、词间静默与混排 RTL），
+///   通过互补裁剪区避免双层抗锯齿白边，并登记专用前景换色以在浅色皮肤保持可读对比度。
+#[allow(clippy::too_many_arguments)]
+pub fn karaoke_galley(
+    painter: &egui::Painter,
+    position: Pos2,
+    galley: std::sync::Arc<egui::Galley>,
+    unsung: Color32,
+    style: crate::model::LyricColor,
+    custom_rgb: [u8; 3],
+    done_chars: f32,
+    visual_map: Option<&[crate::rtl_text::VisualChar]>,
+    phase: f32,
+) {
+    if galley.is_empty() {
+        return;
+    }
+    let total_glyphs: usize = galley.rows.iter().map(|row| row.glyphs.len()).sum();
+    if total_glyphs == 0 {
+        painter.galley(position, galley, unsung);
+        return;
+    }
+
+    let lookup = |cursor: usize| -> crate::rtl_text::VisualChar {
+        visual_map
+            .and_then(|map| map.get(cursor).copied())
+            .unwrap_or(crate::rtl_text::VisualChar {
+                logical_start: cursor,
+                logical_len: 1,
+                rtl: false,
+            })
+    };
+
+    let mut any_sung = false;
+    let mut all_sung = true;
+    let mut cursor = 0usize;
+    for row in &galley.rows {
+        for _ in &row.glyphs {
+            let vc = lookup(cursor);
+            cursor += 1;
+            let frac = ((done_chars - vc.logical_start as f32) / vc.logical_len.max(1) as f32).clamp(0.0, 1.0);
+            if frac > 0.001 {
+                any_sung = true;
+            }
+            if frac < 0.999 {
+                all_sung = false;
+            }
+        }
+    }
+    if !any_sung {
+        painter.galley(position, galley, unsung);
+        return;
+    }
+
+    let mut colored = galley.clone();
+    let (global_min_x, global_max_x) = {
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        for row in &colored.rows {
+            if row.visuals.mesh_bounds.is_positive() {
+                lo = lo.min(row.visuals.mesh_bounds.min.x);
+                hi = hi.max(row.visuals.mesh_bounds.max.x);
+            }
+        }
+        if lo.is_finite() && hi > lo { (lo, hi) } else { (0.0, 1.0) }
+    };
+    let has_map = visual_map.is_some();
+    let mut row_cursor = 0usize;
+    for row in &mut std::sync::Arc::make_mut(&mut colored).rows {
+        let glyph_boxes: Vec<(f32, f32, crate::rtl_text::VisualChar)> = row
+            .glyphs
+            .iter()
+            .enumerate()
+            .map(|(idx, glyph)| {
+                let x0 = glyph.pos.x;
+                let x1 = x0 + glyph.advance_width.max(0.0);
+                (x0, x1, lookup(row_cursor + idx))
+            })
+            .collect();
+        row_cursor += row.glyphs.len();
+        let (min_x, max_x) = if row.visuals.mesh_bounds.is_positive() {
+            (row.visuals.mesh_bounds.min.x, row.visuals.mesh_bounds.max.x)
+        } else {
+            (global_min_x, global_max_x)
+        };
+        for vertex in &mut row.visuals.mesh.vertices {
+            let u = gradient_u_for_x(vertex.pos.x, &glyph_boxes, min_x, max_x, has_map);
+            let col = style.color_at(u, phase, custom_rgb);
+            let a = vertex.color.a() as f32 / 255.0;
+            vertex.color = if a < 0.999 { col.gamma_multiply(a) } else { col };
+        }
+    }
+
+    let paint_colored = |clip: Rect, g: std::sync::Arc<egui::Galley>| {
+        if !clip.is_positive() {
+            return;
+        }
+        let ctx = painter.ctx();
+        let layer = painter.layer_id();
+        let from = crate::skin_paint::shape_count(ctx, layer);
+        painter.with_clip_rect(clip).galley(position, g, Color32::WHITE);
+        crate::skin_paint::tone_since(ctx, layer, from, crate::skin_paint::map_lyric_foreground);
+    };
+
+    let base_clip = painter.clip_rect();
+    if all_sung {
+        paint_colored(base_clip, colored);
+        return;
+    }
+
+    let row_count = galley.rows.len();
+    let mut glyph_cursor = 0usize;
+    for (i, row) in galley.rows.iter().enumerate() {
+        let top = if i == 0 {
+            base_clip.top()
+        } else {
+            ((position.y + galley.rows[i - 1].rect.max.y) + (position.y + row.rect.min.y)) * 0.5
+        };
+        let bottom = if i + 1 == row_count {
+            base_clip.bottom()
+        } else {
+            ((position.y + row.rect.max.y) + (position.y + galley.rows[i + 1].rect.min.y)) * 0.5
+        };
+        if row.glyphs.is_empty() {
+            continue;
+        }
+        let mut spans: Vec<(bool, f32, f32)> = Vec::with_capacity(row.glyphs.len() + 1);
+        let push_span = |spans: &mut Vec<(bool, f32, f32)>, is_colored: bool, x0: f32, x1: f32| {
+            if x1 <= x0 {
+                return;
+            }
+            if let Some(last) = spans.last_mut() {
+                if last.0 == is_colored && (x0 - last.2).abs() <= 0.5 {
+                    last.2 = last.2.max(x1);
+                    return;
+                }
+            }
+            spans.push((is_colored, x0, x1));
+        };
+        let last_idx = row.glyphs.len() - 1;
+        for (g_idx, glyph) in row.glyphs.iter().enumerate() {
+            let vc = lookup(glyph_cursor);
+            glyph_cursor += 1;
+            let raw_x0 = position.x + glyph.pos.x;
+            let raw_x1 = raw_x0 + glyph.advance_width.max(0.0);
+            let gx0 = if g_idx == 0 { base_clip.left().min(raw_x0) } else { raw_x0 };
+            let gx1 = if g_idx == last_idx { base_clip.right().max(raw_x1) } else { raw_x1 };
+            let frac = ((done_chars - vc.logical_start as f32) / vc.logical_len.max(1) as f32).clamp(0.0, 1.0);
+            if frac >= 0.999 {
+                push_span(&mut spans, true, gx0, gx1);
+            } else if frac <= 0.001 {
+                push_span(&mut spans, false, gx0, gx1);
+            } else if vc.rtl {
+                let mid = raw_x1 - (raw_x1 - raw_x0) * frac;
+                push_span(&mut spans, false, gx0, mid);
+                push_span(&mut spans, true, mid, gx1);
+            } else {
+                let mid = raw_x0 + (raw_x1 - raw_x0) * frac;
+                push_span(&mut spans, true, gx0, mid);
+                push_span(&mut spans, false, mid, gx1);
+            }
+        }
+        for (is_colored, x0, x1) in spans {
+            let clip = Rect::from_min_max(Pos2::new(x0, top), Pos2::new(x1, bottom)).intersect(base_clip);
+            if !clip.is_positive() {
+                continue;
+            }
+            if is_colored {
+                paint_colored(clip, colored.clone());
+            } else {
+                painter.with_clip_rect(clip).galley(position, galley.clone(), unsung);
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Card<'a> {
     pub ui: &'a egui::Ui,
@@ -1215,4 +1393,100 @@ pub fn chase(c: &Card, x0: f32, head: f32, y: f32, thick: f32, tint: Color32, ho
         }
     }
     c.painter.add(egui::Shape::mesh(mesh));
+}
+
+/// 计算单行歌词顶点横坐标 `x` 对应的渐变采样坐标 `u`（0..=1）：
+/// - 纯 LTR 行（`!has_map`）直接按行视觉宽度线性映射；
+/// - 含 RTL 或双向混排行按各字形的逻辑字符区间与字形书写方向映射，
+///   支持分页后的第 2+ 行 RTL（`logical_start > 0`）以及单行内 LTR/RTL 混排。
+pub(crate) fn gradient_u_for_x(
+    x: f32,
+    glyph_boxes: &[(f32, f32, crate::rtl_text::VisualChar)],
+    min_x: f32,
+    max_x: f32,
+    has_map: bool,
+) -> f32 {
+    if !has_map || glyph_boxes.is_empty() {
+        return ((x - min_x) / (max_x - min_x).max(1.0)).clamp(0.0, 1.0);
+    }
+    let mut row_lo = usize::MAX;
+    let mut row_hi = 0usize;
+    for &(_, _, vc) in glyph_boxes {
+        row_lo = row_lo.min(vc.logical_start);
+        row_hi = row_hi.max(vc.logical_start + vc.logical_len.max(1));
+    }
+    let span = row_hi.saturating_sub(row_lo).max(1) as f32;
+    let mut best = glyph_boxes[0];
+    let mut best_dist = f32::INFINITY;
+    let mut best_center_dist = f32::INFINITY;
+    for &(x0, x1, vc) in glyph_boxes {
+        let dist = if x < x0 {
+            x0 - x
+        } else if x > x1 {
+            x - x1
+        } else {
+            0.0
+        };
+        let center_dist = (x - (x0 + x1) * 0.5).abs();
+        if dist < best_dist - 1e-4
+            || ((dist - best_dist).abs() <= 1e-4 && center_dist < best_center_dist)
+        {
+            best = (x0, x1, vc);
+            best_dist = dist;
+            best_center_dist = center_dist;
+        }
+    }
+    let (x0, x1, vc) = best;
+    let mut local = if x1 - x0 > 1e-3 {
+        ((x - x0) / (x1 - x0)).clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    if vc.rtl {
+        local = 1.0 - local;
+    }
+    let logical_pos = vc.logical_start as f32 + local * vc.logical_len.max(1) as f32;
+    ((logical_pos - row_lo as f32) / span).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod karaoke_gradient_direction_tests {
+    use super::gradient_u_for_x;
+    use crate::rtl_text::VisualChar;
+
+    #[test]
+    fn second_rtl_row_sweeps_gradient_right_to_left() {
+        // 模拟分页后的第 2 行 RTL（全局 logical_start 从 24 起，共 4 个视觉字形，从左到右对应逻辑 27, 26, 25, 24）。
+        let boxes = vec![
+            (0.0, 10.0, VisualChar { logical_start: 27, logical_len: 1, rtl: true }),
+            (10.0, 20.0, VisualChar { logical_start: 26, logical_len: 1, rtl: true }),
+            (20.0, 30.0, VisualChar { logical_start: 25, logical_len: 1, rtl: true }),
+            (30.0, 40.0, VisualChar { logical_start: 24, logical_len: 1, rtl: true }),
+        ];
+        let u_right = gradient_u_for_x(40.0, &boxes, 0.0, 40.0, true);
+        let u_mid = gradient_u_for_x(20.0, &boxes, 0.0, 40.0, true);
+        let u_left = gradient_u_for_x(0.0, &boxes, 0.0, 40.0, true);
+        assert!(u_right < 0.01, "RTL 第 2 行最右侧应为渐变起点，实际 {u_right}");
+        assert!((u_mid - 0.5).abs() < 0.05, "中点应约 0.5，实际 {u_mid}");
+        assert!(u_left > 0.99, "RTL 第 2 行最左侧应为渐变终点，实际 {u_left}");
+    }
+
+    #[test]
+    fn mixed_bidi_row_follows_each_run_direction() {
+        // 逻辑 "AB مرح"：左侧 LTR "AB"(0,1)，中间空格(2)，右侧 RTL "مرح" 视觉为 ح(5) ر(4) م(3)。
+        let boxes = vec![
+            (0.0, 10.0, VisualChar { logical_start: 0, logical_len: 1, rtl: false }),
+            (10.0, 20.0, VisualChar { logical_start: 1, logical_len: 1, rtl: false }),
+            (20.0, 30.0, VisualChar { logical_start: 2, logical_len: 1, rtl: false }),
+            (30.0, 40.0, VisualChar { logical_start: 5, logical_len: 1, rtl: true }),
+            (40.0, 50.0, VisualChar { logical_start: 4, logical_len: 1, rtl: true }),
+            (50.0, 60.0, VisualChar { logical_start: 3, logical_len: 1, rtl: true }),
+        ];
+        // LTR 段左→右递增
+        assert!(gradient_u_for_x(5.0, &boxes, 0.0, 60.0, true) < gradient_u_for_x(15.0, &boxes, 0.0, 60.0, true));
+        // RTL 段右→左递增（右侧逻辑 3 小于左侧逻辑 5）
+        let u_rtl_first = gradient_u_for_x(55.0, &boxes, 0.0, 60.0, true);
+        let u_rtl_last = gradient_u_for_x(35.0, &boxes, 0.0, 60.0, true);
+        assert!(u_rtl_first < u_rtl_last, "混排行中 RTL 词应从右向左推进渐变：{u_rtl_first} vs {u_rtl_last}");
+    }
 }
