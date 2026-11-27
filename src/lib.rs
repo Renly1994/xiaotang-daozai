@@ -102,6 +102,18 @@ pub use updates::record_install_size;
 
 #[cfg(windows)]
 pub mod native;
+// 可选 Windows 原生 D3D11 渲染后端（默认关闭，上游 eframe/glow/wgpu 路径不变）。
+#[cfg(all(windows, feature = "d3d11-glass"))]
+pub mod gpu_glass_stub;
+#[cfg(all(windows, feature = "d3d11-glass"))]
+#[path = "gpu_glass_stub.rs"]
+pub mod gpu_glass;
+#[cfg(all(windows, feature = "d3d11-glass"))]
+pub mod wgc;
+#[cfg(all(windows, feature = "d3d11-glass"))]
+pub mod d3d11;
+#[cfg(all(windows, feature = "d3d11-glass"))]
+pub mod wallpaper;
 #[cfg(windows)]
 mod window_bounds;
 #[cfg(windows)]

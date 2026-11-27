@@ -23,6 +23,9 @@ required-features = ["record"]
 
 [features]
 record = []
+# 可选的 Windows 原生 D3D11 渲染后端：以 WGC 抓屏 + HLSL 玻璃替代默认 wgpu/D3D12 路径。
+# 默认关闭：不启用时上游 eframe/glow/wgpu 行为完全不变。
+d3d11-glass = ["dep:egui-winit", "dep:winit", "windows/Graphics_Capture", "windows/Graphics_DirectX", "windows/Graphics_DirectX_Direct3D11", "windows/Win32_Graphics_Direct3D11", "windows/Win32_Graphics_Dxgi", "windows/Win32_Graphics_Dxgi_Common", "windows/Win32_System_WinRT_Direct3D11", "windows/Win32_System_WinRT_Graphics_Capture"]
 sdk-js = ["dep:ab_glyph"]
 sdk-material = [
   "dep:bytemuck", "dep:pollster",
@@ -47,6 +50,10 @@ ureq = { path = "vendor/ureq" }
 [dependencies]
 ab_glyph = { version = "0.2", optional = true }
 eframe = { version = "0.31", default-features = false, features = ["glow", "wgpu", "default_fonts"] }
+# d3d11-glass 栈直接使用 egui::Context / RawInput，需显式依赖（版本与 eframe/egui_extras 一致）。
+egui = { version = "0.31", default-features = false }
+# d3d11-glass 的渲染器与 WGC 抓屏用 log 打诊断。
+log = "0.4"
 egui_extras = { version = "0.31", default-features = false, features = ["svg", "image"] }
 svgtypes = "0.13"
 ureq = { version = "2.12", default-features = false, features = ["tls", "gzip"] }
@@ -75,6 +82,9 @@ wasmi = { version = "=0.46.0", optional = true, default-features = false, featur
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "x11"] }
 
 [target.'cfg(windows)'.dependencies]
+# d3d11-glass feature：自绘事件循环与 D3D11 栈（winit 版本与上游锁文件一致，均为 0.30.13）。
+egui-winit = { version = "0.31", optional = true }
+winit = { version = "0.30", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
 pollster = { version = "0.4", optional = true }
 zip = { version = "9.7", default-features = false, features = ["deflate-flate2"] }
