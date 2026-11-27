@@ -208,7 +208,8 @@ impl DaozaiApp {
             .map(|s| s.app.settings.island_scale())
             .unwrap_or(1.0);
         let ppp = w.scale_factor() as f32 * scale;
-        let liquid = true; // d3d11-glass feature 开启即液态玻璃路径
+        let liquid = self.shell.as_ref()
+            .is_some_and(|s| s.app.settings.skin == daozai::model::Skin::Liquid);
         let dock = self.shell.as_ref()
             .map(|s| s.app.settings.dock)
             .unwrap_or(daozai::model::Dock::Top);

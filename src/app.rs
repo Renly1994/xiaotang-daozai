@@ -3241,7 +3241,8 @@ impl App {
     pub(crate) fn skin_palette(&self)->Option<crate::skin_paint::Palette> {
         #[cfg(feature="sdk-js")]
         if let Some(skin)=self.plugins.active_skin() {return Some(skin.palette);}
-        match self.settings.skin {model::Skin::Cream=>Some(crate::skin_paint::CREAM),model::Skin::GlassLight=>Some(crate::skin_paint::GLASS_LIGHT),model::Skin::GlassDark=>Some(crate::skin_paint::GLASS_DARK),model::Skin::Classic|model::Skin::Fluid=>None}
+        match self.settings.skin {model::Skin::Cream=>Some(crate::skin_paint::CREAM),model::Skin::GlassLight=>Some(crate::skin_paint::GLASS_LIGHT),model::Skin::GlassDark=>Some(crate::skin_paint::GLASS_DARK),model::Skin::Classic|model::Skin::Fluid=>None,
+            #[cfg(feature="d3d11-glass")] model::Skin::Liquid=>None}
     }
 
     /// 设置页预览用的岛体底色：没有真实模糊，毛玻璃按较实的玻璃表现。
@@ -3267,6 +3268,7 @@ impl App {
             model::Skin::Cream=>{let [r,g,b]=crate::skin_paint::CREAM.paper;Color32::from_rgb(r,g,b)}
             model::Skin::Classic=>Color32::BLACK,
             model::Skin::Fluid=>self.fluid.compose(0.5,0.5,1.0,1.0,0.0),
+            #[cfg(feature="d3d11-glass")] model::Skin::Liquid=>Color32::TRANSPARENT,
         }
     }
 
@@ -3278,15 +3280,20 @@ impl App {
 
     /// 绘制岛体（或通知胶囊）的本体：经典皮肤为纯黑；毛玻璃为着色底 + 顶部柔光 + 边缘高光。
     fn paint_body(&self,painter:&egui::Painter,rect:Rect,flare:f32,flare_h:f32,radius:f32,feather:f32){
+        let skin=self.effective_skin();
         #[cfg(feature="d3d11-glass")]
         {
-            // 把岛体几何发布给 D3D11 HLSL pass（它在 egui 之前绘制玻璃）。
-            let is_notch=self.settings.island_shape!=model::IslandShape::Pill;
-            crate::gpu_glass::set_shape(flare,flare_h,is_notch);
-            let center=rect.center();
-            crate::gpu_glass::set_body(rect,radius,(center.x,center.y),1.0);
+            // 只有选中「液态玻璃」皮肤才发布几何给 HLSL pass；其它皮肤每帧关掉，
+            // 避免残留上一次的 body_rect 造成折射残影（与 custom 行为一致）。
+            if skin==model::Skin::Liquid {
+                let is_notch=self.settings.island_shape!=model::IslandShape::Pill;
+                crate::gpu_glass::set_shape(flare,flare_h,is_notch);
+                let center=rect.center();
+                crate::gpu_glass::set_body(rect,radius,(center.x,center.y),1.0);
+            } else {
+                crate::gpu_glass::set_active(false);
+            }
         }
-        let skin=self.effective_skin();
         if skin==model::Skin::Fluid {
             let pill=self.settings.island_shape==model::IslandShape::Pill;
             let (map,frame)=shape::EdgeMap::of(rect,if pill {model::Dock::Top}else{self.dock()});

@@ -109,18 +109,28 @@ pub enum Skin {
     GlassLight,
     GlassDark,
     Fluid,
+    /// 液态玻璃（仅在 d3d11-glass feature 下由 HLSL pass 绘制）。
+    #[cfg(feature="d3d11-glass")]
+    Liquid,
 }
 
 impl Skin {
+    #[cfg(not(feature="d3d11-glass"))]
     pub const ALL: [Skin; 5] = [Skin::Classic, Skin::Cream, Skin::GlassLight, Skin::GlassDark, Skin::Fluid];
+    #[cfg(feature="d3d11-glass")]
+    pub const ALL: [Skin; 6] = [Skin::Classic, Skin::Cream, Skin::GlassLight, Skin::GlassDark, Skin::Fluid, Skin::Liquid];
     pub fn key(self) -> &'static str {
-        match self { Self::Classic => "classic", Self::Fluid => "fluid", Self::Cream => "cream", Self::GlassLight => "glass_light", Self::GlassDark => "glass" }
+        match self { Self::Classic => "classic", Self::Fluid => "fluid", Self::Cream => "cream", Self::GlassLight => "glass_light", Self::GlassDark => "glass",
+            #[cfg(feature="d3d11-glass")] Self::Liquid => "liquid_glass" }
     }
     pub fn parse(value: &str) -> Self {
-        match value { "fluid" => Self::Fluid, "cream" => Self::Cream, "glass_light" => Self::GlassLight, "glass" | "glass_dark" => Self::GlassDark, _ => Self::Classic }
+        match value { "fluid" => Self::Fluid, "cream" => Self::Cream, "glass_light" => Self::GlassLight, "glass" | "glass_dark" => Self::GlassDark,
+            #[cfg(feature="d3d11-glass")] "liquid_glass" | "liquid" => Self::Liquid,
+            _ => Self::Classic }
     }
     pub fn label(self) -> &'static str {
-        match self { Self::Classic => "经典", Self::Fluid => "悬浮云", Self::Cream => "奶油", Self::GlassLight => "毛玻璃·浅", Self::GlassDark => "毛玻璃·深" }
+        match self { Self::Classic => "经典", Self::Fluid => "悬浮云", Self::Cream => "奶油", Self::GlassLight => "毛玻璃·浅", Self::GlassDark => "毛玻璃·深",
+            #[cfg(feature="d3d11-glass")] Self::Liquid => "液态玻璃" }
     }
     pub fn description(self) -> &'static str {
         match self {
@@ -129,6 +139,7 @@ impl Skin {
             Self::Cream => "暖白底色配深棕文字和橙色强调，柔和明亮。",
             Self::GlassLight => "浅色磨砂玻璃，透出身后桌面的颜色，文字为深色；按背景明暗自动调整，保证清晰。",
             Self::GlassDark => "深色磨砂玻璃，透出身后桌面的颜色，文字为白色；按背景明暗自动调整，保证清晰。",
+            #[cfg(feature="d3d11-glass")] Self::Liquid => "液态玻璃：GPU 折射 + 真实桌面底片，自动切换深/浅材质（由 cayww 贡献）。",
         }
     }
     pub fn is_glass(self) -> bool { matches!(self, Self::GlassLight | Self::GlassDark) }
