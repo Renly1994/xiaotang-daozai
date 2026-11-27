@@ -199,6 +199,192 @@ pub enum IslandShape {
     Pill,
 }
 
+/// 歌词逐字变色的已唱配色风格：未唱保持白色，已唱按所选配色从左到右推进。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LyricColor {
+    /// 彩虹流光（多色横向渐变，轻微动态流光）
+    #[default]
+    Rainbow,
+    /// 极光渐变（薄荷青 → 天蓝 → 紫罗兰）
+    Aurora,
+    /// 晚霞渐变（暖金 → 珊瑚橙 → 玫红）
+    Sunset,
+    /// 晴空蓝
+    SkyBlue,
+    /// 樱花粉
+    SakuraPink,
+    /// 薄荷绿
+    MintGreen,
+    /// 琥珀金
+    AmberGold,
+    /// 电光紫
+    NeonPurple,
+    /// 自定义单色
+    Custom,
+}
+
+/// 歌词样式扩展配置（由 `lyrics.style` 声明式资源插件提供；停用或卸载后恢复原生纯白歌词）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LyricsStyle {
+    /// 岛上单行歌词是否开启逐字变色。
+    pub island: bool,
+    /// 展开音乐页歌词是否开启逐字变色。
+    pub expanded: bool,
+    pub color: LyricColor,
+    pub custom_color: [u8; 3],
+}
+
+impl Default for LyricsStyle {
+    fn default() -> Self {
+        Self {
+            island: true,
+            expanded: true,
+            color: LyricColor::Rainbow,
+            custom_color: [56, 189, 248],
+        }
+    }
+}
+
+impl LyricColor {
+    pub const ALL: [LyricColor; 9] = [
+        Self::Rainbow,
+        Self::Aurora,
+        Self::Sunset,
+        Self::SkyBlue,
+        Self::SakuraPink,
+        Self::MintGreen,
+        Self::AmberGold,
+        Self::NeonPurple,
+        Self::Custom,
+    ];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Rainbow => "rainbow",
+            Self::Aurora => "aurora",
+            Self::Sunset => "sunset",
+            Self::SkyBlue => "sky_blue",
+            Self::SakuraPink => "sakura_pink",
+            Self::MintGreen => "mint_green",
+            Self::AmberGold => "amber_gold",
+            Self::NeonPurple => "neon_purple",
+            Self::Custom => "custom",
+        }
+    }
+
+    pub fn try_parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "rainbow" => Self::Rainbow,
+            "aurora" => Self::Aurora,
+            "sunset" => Self::Sunset,
+            "sky_blue" => Self::SkyBlue,
+            "sakura_pink" => Self::SakuraPink,
+            "mint_green" => Self::MintGreen,
+            "amber_gold" => Self::AmberGold,
+            "neon_purple" => Self::NeonPurple,
+            "custom" => Self::Custom,
+            _ => return None,
+        })
+    }
+
+    pub fn parse(value: &str) -> Self {
+        Self::try_parse(value).unwrap_or(Self::Rainbow)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rainbow => "彩虹",
+            Self::Aurora => "极光",
+            Self::Sunset => "晚霞",
+            Self::SkyBlue => "晴空蓝",
+            Self::SakuraPink => "樱花粉",
+            Self::MintGreen => "薄荷绿",
+            Self::AmberGold => "琥珀金",
+            Self::NeonPurple => "电光紫",
+            Self::Custom => "自定义",
+        }
+    }
+
+    pub fn is_gradient(self) -> bool {
+        matches!(self, Self::Rainbow | Self::Aurora | Self::Sunset)
+    }
+
+    /// 采样横向位置 `u`（0..=1）的颜色；渐变模式支持按 `phase` 轻微流动。
+    pub fn color_at(self, u: f32, phase: f32, custom: [u8; 3]) -> eframe::egui::Color32 {
+        use eframe::egui::Color32;
+        let lerp_stops = |stops: &[[u8; 3]], t: f32| -> Color32 {
+            let n = stops.len();
+            let scaled = t.clamp(0.0, 1.0) * (n - 1) as f32;
+            let idx = (scaled.floor() as usize).min(n - 2);
+            let frac = scaled - idx as f32;
+            let a = stops[idx];
+            let b = stops[idx + 1];
+            Color32::from_rgb(
+                (a[0] as f32 + (b[0] as f32 - a[0] as f32) * frac).round() as u8,
+                (a[1] as f32 + (b[1] as f32 - a[1] as f32) * frac).round() as u8,
+                (a[2] as f32 + (b[2] as f32 - a[2] as f32) * frac).round() as u8,
+            )
+        };
+        let u = u.clamp(0.0, 1.0);
+        match self {
+            Self::Rainbow => {
+                const STOPS: [[u8; 3]; 7] = [
+                    [255, 96, 134],
+                    [255, 166, 68],
+                    [255, 226, 89],
+                    [82, 232, 152],
+                    [72, 202, 255],
+                    [180, 124, 255],
+                    [255, 96, 134],
+                ];
+                let shifted = (u + phase).rem_euclid(1.0);
+                lerp_stops(&STOPS, shifted)
+            }
+            Self::Aurora => {
+                const STOPS: [[u8; 3]; 4] = [
+                    [62, 245, 212],
+                    [68, 178, 255],
+                    [184, 124, 255],
+                    [62, 245, 212],
+                ];
+                let shifted = (u * 0.72 + phase * 0.5).rem_euclid(1.0);
+                lerp_stops(&STOPS, shifted)
+            }
+            Self::Sunset => {
+                const STOPS: [[u8; 3]; 4] = [
+                    [255, 224, 102],
+                    [255, 132, 82],
+                    [255, 79, 147],
+                    [255, 224, 102],
+                ];
+                let shifted = (u * 0.72 + phase * 0.5).rem_euclid(1.0);
+                lerp_stops(&STOPS, shifted)
+            }
+            Self::SkyBlue => Color32::from_rgb(56, 189, 248),
+            Self::SakuraPink => Color32::from_rgb(255, 119, 183),
+            Self::MintGreen => Color32::from_rgb(69, 230, 155),
+            Self::AmberGold => Color32::from_rgb(255, 201, 77),
+            Self::NeonPurple => Color32::from_rgb(192, 132, 252),
+            Self::Custom => Color32::from_rgb(custom[0], custom[1], custom[2]),
+        }
+    }
+}
+
+pub fn parse_hex_rgb(raw: &str) -> Option<[u8; 3]> {
+    let s = raw.trim().strip_prefix('#').unwrap_or(raw.trim());
+    if s.len() != 6 || !s.is_ascii() || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+    Some([r, g, b])
+}
+
+pub fn format_hex_rgb(rgb: [u8; 3]) -> String {
+    format!("#{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2])
+}
+
 impl IslandShape {
     pub const ALL: [IslandShape; 2] = [IslandShape::Notch, IslandShape::Pill];
     pub fn key(self) -> &'static str {

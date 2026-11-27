@@ -54,7 +54,9 @@ fn select(raw:&str,title:&str,artist:&str,duration:f64)->Option<Lyrics>{
     }
     // 文件自身的校准量属于原生时间轴，用户的提前量仍由界面单独应用。
     let offset=header(raw,"offset").and_then(|s|s.parse::<i32>().ok()).unwrap_or_default() as f32/1000.0;
-    for line in &mut lyrics.lines{line.t=(line.t+offset).max(0.0);}
+    for line in &mut lyrics.lines{
+        line.shift_offset(offset);
+    }
     Some(lyrics)
 }
 
@@ -250,5 +252,21 @@ mod tests{
         for title in ["测试","测试歌 (Live)"] {assert!(read_directory(&dir,title,"歌手",0.0).is_none());}
         assert!(read_directory(&dir,"测试歌","别的歌手",0.0).is_none());
         fs::remove_file(path).unwrap();fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn negative_offset_crossing_zero_preserves_word_and_end_timing() {
+        let raw = "[ti:T]\n[ar:A]\n[offset:-2500]\n[1000,4000]<0,2000,0>你<2000,2000,0>好";
+        let lyrics = select(raw, "T", "A", 0.0).unwrap();
+        assert_eq!(lyrics.lines[0].t, 0.0);
+        // 原句起点 1.0s 平移 -2.5s 后为 -1.5s；在 1.0s 处已经过 2.5s，进度应为 2.5 / 4.0 = 0.625。
+        assert!((lyrics.line_progress(0, 1.0, 0.0) - 0.625).abs() < 0.001, "实际进度 {}", lyrics.line_progress(0, 1.0, 0.0));
+        // 在 2.5s（行尾）应正好到达 1.0。
+        assert!((lyrics.line_progress(0, 2.5, 0.0) - 1.0).abs() < 0.001);
+
+        // 整句完全平移到 0 秒之前时，在 0.0s 应视为已唱完（1.0），不产生负值或 NaN。
+        let before_zero = "[ti:T]\n[ar:A]\n[offset:-5000]\n[1000,1500]<0,1500,0>已过";
+        let lyrics2 = select(before_zero, "T", "A", 0.0).unwrap();
+        assert!((lyrics2.line_progress(0, 0.0, 0.0) - 1.0).abs() < 0.001);
     }
 }

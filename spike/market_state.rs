@@ -551,7 +551,7 @@ impl LocalPlugins {
     }
 }
 
-fn prepare_record(mut record: Record, package: Package) -> Result<Record> {
+pub(super) fn prepare_record(mut record: Record, package: Package) -> Result<Record> {
     let manifest = &package.manifest;
     if let Some(old) = &record.package {
         let old = &old.manifest;
@@ -570,23 +570,38 @@ fn prepare_record(mut record: Record, package: Package) -> Result<Record> {
         {
             return Err(fail("新版本与已安装版本的能力、权限或数据格式不兼容"));
         }
-        if !old.settings.iter().all(|previous| {
-            manifest
-                .settings
-                .iter()
-                .any(|field| field.key == previous.key && field.kind == previous.kind)
-        }) {
+        let lyrics_migration = record
+            .package
+            .as_ref()
+            .and_then(|old_pkg| old_pkg.migrate_lyrics_style_values(&package, &record.values));
+        if lyrics_migration.is_none()
+            && !old.settings.iter().all(|previous| {
+                manifest
+                    .settings
+                    .iter()
+                    .any(|field| field.key == previous.key && field.kind == previous.kind)
+            })
+        {
             return Err(fail("新版本删除或更改了已设置的字段类型"));
         }
     }
-    let values = package.settings_values(&record.values);
-    if record
-        .values
-        .iter()
-        .any(|(key, value)| values.get(key) != Some(value))
+    let values = if let Some(migrated) = record
+        .package
+        .as_ref()
+        .and_then(|old_pkg| old_pkg.migrate_lyrics_style_values(&package, &record.values))
     {
-        return Err(fail("新版本与已保存的设置不兼容"));
-    }
+        migrated
+    } else {
+        let values = package.settings_values(&record.values);
+        if record
+            .values
+            .iter()
+            .any(|(key, value)| values.get(key) != Some(value))
+        {
+            return Err(fail("新版本与已保存的设置不兼容"));
+        }
+        values
+    };
     if manifest.runtime == "js" {
         package.render(
             &values,

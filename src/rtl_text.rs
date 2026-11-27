@@ -237,6 +237,206 @@ pub fn display(text: &str) -> Cow<'_, str> {
     }).collect::<Vec<_>>().join("\n"))
 }
 
+/// 视觉显示顺序中的单个字符到原始逻辑字符串的映射，供卡拉 OK 逐字染色按阅读顺序着色。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VisualChar {
+    /// 原始逻辑文本中的起始字符索引（按 `char` 计数）。
+    pub logical_start: usize,
+    /// 对应的逻辑字符数（普通字符为 1，ل+ا 合字为 2）。
+    pub logical_len: usize,
+    /// 该字符在当前双向 run 中是否按从右往左书写。
+    pub rtl: bool,
+}
+
+/// 第一步（带映射）：按前后字母选连写形式，保留每个输出字符对应的原始逻辑范围。
+fn shape_with_map(text: &[char], base_logical: usize) -> Vec<(char, usize, usize)> {
+    let neighbour = |from: usize, step: isize| -> Option<char> {
+        let mut i = from as isize + step;
+        while i >= 0 && (i as usize) < text.len() {
+            let c = text[i as usize];
+            if !transparent(c) { return Some(c); }
+            i += step;
+        }
+        None
+    };
+    let mut out = Vec::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        let c = text[i];
+        let Some(f) = forms(c) else { out.push((c, base_logical + i, 1)); i += 1; continue; };
+        let prev = neighbour(i, -1).is_some_and(joins_next);
+        // ل + ا 合成一个字形（中间允许夹注音符号）。
+        if c == '\u{0644}' {
+            let next = (i + 1..text.len()).find(|&j| !transparent(text[j]));
+            if let Some((j, (iso, fin))) = next.and_then(|j| lam_alef(text[j]).map(|forms| (j, forms))) {
+                let merged = char::from_u32(if prev { fin } else { iso }).unwrap_or(c);
+                let span = (j - i) + 1;
+                out.push((merged, base_logical + i, span));
+                for k in (i + 1)..j {
+                    out.push((text[k], base_logical + k, 1));
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+        let next = f[2] != 0 && neighbour(i, 1).is_some_and(joins_prev);
+        let code = match (prev && f[1] != 0, next) {
+            (true, true) => f[3],
+            (true, false) => f[1],
+            (false, true) => f[2],
+            (false, false) => f[0],
+        };
+        out.push((char::from_u32(code).unwrap_or(c), base_logical + i, 1));
+        i += 1;
+    }
+    out
+}
+
+/// 第二步（带映射）：一行文字的显示顺序（与 `reorder` 完全一致的双向规则），
+/// 返回显示字符串和每个视觉字符的 `VisualChar` 映射。
+fn reorder_with_map(shaped: &[(char, usize, usize)]) -> (String, Vec<VisualChar>) {
+    let mut clusters: Vec<Vec<(char, usize, usize)>> = Vec::new();
+    for &item in shaped {
+        match clusters.last_mut() {
+            Some(last) if transparent(item.0) => last.push(item),
+            _ => clusters.push(vec![item]),
+        }
+    }
+    let classes: Vec<Class> = clusters.iter().map(|cluster| class(cluster[0].0)).collect();
+    let base: u8 = match classes.iter().find(|c| matches!(c, Class::L | Class::R)) { Some(Class::R) => 1, _ => 0 };
+    let strong = |c: Class| match c { Class::L => Some(false), Class::R | Class::Number => Some(true), Class::Neutral => None };
+    let edge = base == 1;
+    let mut levels = vec![base; clusters.len()];
+    for i in 0..clusters.len() {
+        levels[i] = match classes[i] {
+            Class::R => 1,
+            Class::L => if base == 1 { 2 } else { 0 },
+            Class::Number => {
+                let after_rtl = classes[..i].iter().rev().find_map(|c| match c { Class::L => Some(false), Class::R => Some(true), _ => None }).unwrap_or(edge);
+                if base == 1 || after_rtl { 2 } else { 0 }
+            }
+            Class::Neutral => {
+                let before = classes[..i].iter().rev().find_map(|c| strong(*c)).unwrap_or(edge);
+                let after = classes[i + 1..].iter().find_map(|c| strong(*c)).unwrap_or(edge);
+                match (before, after) {
+                    (true, true) => 1,
+                    (false, false) => if base == 1 { 2 } else { 0 },
+                    _ => base,
+                }
+            }
+        };
+    }
+    for i in (0..clusters.len()).rev() {
+        if classes[i] != Class::Neutral || !clusters[i][0].0.is_whitespace() { break; }
+        levels[i] = base;
+    }
+    let mut order: Vec<usize> = (0..clusters.len()).collect();
+    let highest = levels.iter().copied().max().unwrap_or(0);
+    for level in (1..=highest).rev() {
+        let mut i = 0;
+        while i < order.len() {
+            if levels[order[i]] >= level {
+                let start = i;
+                while i < order.len() && levels[order[i]] >= level { i += 1; }
+                order[start..i].reverse();
+            } else {
+                i += 1;
+            }
+        }
+    }
+    let mut text = String::with_capacity(shaped.len() * 3);
+    let mut map = Vec::with_capacity(shaped.len());
+    for i in order {
+        let rtl = levels[i] % 2 == 1;
+        for &(c, logical_start, logical_len) in &clusters[i] {
+            text.push(if rtl { mirror(c) } else { c });
+            map.push(VisualChar { logical_start, logical_len, rtl });
+        }
+    }
+    (text, map)
+}
+
+/// 对含双向文字的歌词按与 `display_wrapped` 相同的规则分行并转换，
+/// 同时返回每行非换行视觉字符的逻辑映射（不含 RTL 文字时返回 `None`，走零分配快速路径）。
+pub fn display_wrapped_with_map(text: &str, max_width: f32, width: impl Fn(&str) -> f32) -> (String, Option<Vec<VisualChar>>) {
+    #[cfg(test)]
+    if BYPASS.load(std::sync::atomic::Ordering::Relaxed) {
+        return (text.to_owned(), None);
+    }
+    if !has_rtl(text) {
+        return (text.to_owned(), None);
+    }
+    // 按空格记录每个词在原逻辑文本中的字符起止位置，确保折行后映射与原文完全对齐。
+    let mut visual_lines: Vec<String> = Vec::new();
+    let mut visual_map: Vec<VisualChar> = Vec::new();
+    let mut logical_cursor = 0usize;
+    for (p_idx, paragraph) in text.split('\n').enumerate() {
+        if p_idx > 0 {
+            logical_cursor += 1; // '\n'
+        }
+        let p_chars: Vec<char> = paragraph.chars().collect();
+        let mut word_spans: Vec<(usize, usize)> = Vec::new();
+        let mut i = 0usize;
+        while i < p_chars.len() {
+            while i < p_chars.len() && p_chars[i] == ' ' { i += 1; }
+            let start = i;
+            while i < p_chars.len() && p_chars[i] != ' ' { i += 1; }
+            if i > start {
+                word_spans.push((start, i));
+            }
+        }
+        let mut line_words: Vec<(usize, usize)> = Vec::new();
+        let mut current = String::new();
+        let flush_line = |line_words: &[(usize, usize)], visual_lines: &mut Vec<String>, visual_map: &mut Vec<VisualChar>| {
+            if line_words.is_empty() {
+                visual_lines.push(String::new());
+                return;
+            }
+            let mut chars = Vec::new();
+            let mut logical_indices = Vec::new();
+            for (idx, &(ws, we)) in line_words.iter().enumerate() {
+                if idx > 0 {
+                    // 取该词前紧邻的一个空格作为视觉空格的逻辑索引。
+                    let space_idx = ws.saturating_sub(1);
+                    chars.push(' ');
+                    logical_indices.push(logical_cursor + space_idx);
+                }
+                for pos in ws..we {
+                    chars.push(p_chars[pos]);
+                    logical_indices.push(logical_cursor + pos);
+                }
+            }
+            // 将 shape_with_map 输出的相对位置还原为真实逻辑索引。
+            let raw_shaped = shape_with_map(&chars, 0);
+            let mapped_shaped: Vec<(char, usize, usize)> = raw_shaped
+                .into_iter()
+                .map(|(ch, rel_start, len)| {
+                    let start = logical_indices.get(rel_start).copied().unwrap_or(logical_cursor);
+                    (ch, start, len)
+                })
+                .collect();
+            let (vis, map) = reorder_with_map(&mapped_shaped);
+            visual_lines.push(vis);
+            visual_map.extend(map);
+        };
+        for &(ws, we) in &word_spans {
+            let word: String = p_chars[ws..we].iter().collect();
+            let candidate = if current.is_empty() { word.clone() } else { format!("{current} {word}") };
+            if !current.is_empty() && width(&display(&candidate)) > max_width {
+                flush_line(&line_words, &mut visual_lines, &mut visual_map);
+                line_words.clear();
+                current = word;
+            } else {
+                current = candidate;
+            }
+            line_words.push((ws, we));
+        }
+        flush_line(&line_words, &mut visual_lines, &mut visual_map);
+        logical_cursor += p_chars.len();
+    }
+    (visual_lines.join("\n"), Some(visual_map))
+}
+
 /// 需要折行的文字（岛上歌词、歌词列表）：从右往左的句子必须先按阅读顺序分行、再逐行转换，
 /// 否则交给 egui 折行时会先显示句子的结尾。按空格分词，`width` 量的是转换后的宽度。
 /// 不含从右往左文字时原样返回，仍由 egui 自己折行。

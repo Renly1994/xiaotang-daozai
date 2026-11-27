@@ -558,11 +558,11 @@ fn read_catalog_zip(path: &Path) -> Result<Vec<u8>> {
 
 fn supported(manifest: &Manifest, allow_material: bool) -> Result<()> {
     let material = manifest.is_material() && allow_material;
-    if (manifest.runtime != "js" && !manifest.is_page_shortcuts() && !manifest.is_wireless() && !manifest.is_mail_view()
+    if (manifest.runtime != "js" && !manifest.is_page_shortcuts() && !manifest.is_wireless() && !manifest.is_mail_view() && !manifest.is_lyrics_style()
         && manifest.appearance_kind().is_none() && !material)
         || manifest.entry.contains('/')
     {
-        return Err(fail("集市支持入口在包根目录的脚本插件、外观资源包、快捷切换插件、邮箱视图和无线设备兼容包"));
+        return Err(fail("集市支持入口在包根目录的脚本插件、外观资源包、快捷切换插件、邮箱视图、歌词样式和无线设备兼容包"));
     }
     Ok(())
 }
