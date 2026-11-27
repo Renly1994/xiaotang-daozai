@@ -12,6 +12,8 @@ const BUILTIN: &[u8] = include_bytes!("../../assets/builtin-usb-receivers.json")
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum BatteryProtocol {
     CompX,
+    CompXKeyboard,
+    InphicIn10,
     LogitechHidpp20,
     EndgameXm2we,
     HyperXCloudIiCore,
@@ -123,6 +125,8 @@ impl ReceiverTable {
             }
             let battery_protocol = match receiver.battery_protocol.as_deref() {
                 Some("compx") => Some(BatteryProtocol::CompX),
+                Some("compx-keyboard") => Some(BatteryProtocol::CompXKeyboard),
+                Some("inphic-in10") => Some(BatteryProtocol::InphicIn10),
                 Some("logitech-hidpp-2") => Some(BatteryProtocol::LogitechHidpp20),
                 Some("endgame-xm2we") => Some(BatteryProtocol::EndgameXm2we),
                 Some("hyperx-cloud-ii-core") => Some(BatteryProtocol::HyperXCloudIiCore),
@@ -317,6 +321,8 @@ mod tests {
         assert_eq!(package.battery_protocol("VID_3554&PID_F58A&MI_00"), None);
 
         for (name, protocol) in [
+            ("compx-keyboard", BatteryProtocol::CompXKeyboard),
+            ("inphic-in10", BatteryProtocol::InphicIn10),
             ("endgame-xm2we", BatteryProtocol::EndgameXm2we),
             ("hyperx-cloud-ii-core", BatteryProtocol::HyperXCloudIiCore),
             ("hyperx-cloud-iii-s", BatteryProtocol::HyperXCloudIiiS),

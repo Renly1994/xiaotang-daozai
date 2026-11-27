@@ -6,8 +6,10 @@
 //!
 //! 完整许可声明见 THIRD_PARTY_NOTICES.txt。
 
+mod compx_keyboard;
 mod feature_mice;
 mod hyperx;
+mod inphic;
 mod mchose;
 mod steelseries;
 mod xm2we;
@@ -31,6 +33,8 @@ pub(super) fn read(instance: &str, protocol: BatteryProtocol) -> Option<(u8, Opt
         BatteryProtocol::CompX => {
             read_vendor_collection(instance, 0xff02, COMPX_REPORT_LEN, read_compx)
         }
+        BatteryProtocol::CompXKeyboard => compx_keyboard::read(instance),
+        BatteryProtocol::InphicIn10 => inphic::read_in10(instance),
         BatteryProtocol::LogitechHidpp20 => {
             read_vendor_collection(instance, 0xff00, HIDPP_REPORT_LEN, read_hidpp)
         }

@@ -179,8 +179,10 @@ fn collection_for(path: &[u16], interface: Option<u8>) -> Option<Collection> {
 }
 
 fn supported_usage(page: u16, usage: u16, interface: Option<u8>) -> bool {
-    // Cloud III S 的实测输入报告位于接口 3 的这一个集合。它只允许读取。
-    page >= 0xff00 || (page, usage, interface) == (0x01c0, 0x0001, Some(3))
+    // Cloud III S 的实测输入报告位于接口 3 的这一个集合；英菲克 IN10 的电量广播位于接口 2。两者均只允许读取。
+    page >= 0xff00
+        || (page, usage, interface) == (0x01c0, 0x0001, Some(3))
+        || (page, usage, interface) == (0x000a, 0x0000, Some(2))
 }
 
 fn supported_collection(node: u32, interface: Option<u8>) -> bool {
@@ -409,6 +411,10 @@ mod tests {
         assert!(!supported_usage(0x01c0, 1, Some(2)));
         assert!(!supported_usage(0x01c0, 1, None));
         assert!(!supported_usage(0x01c0, 2, Some(3)));
+        assert!(supported_usage(0x000a, 0, Some(2)));
+        assert!(!supported_usage(0x000a, 0, Some(1)));
+        assert!(!supported_usage(0x000a, 0, None));
+        assert!(!supported_usage(0x000a, 1, Some(2)));
         assert!(!supported_usage(1, 2, Some(3)));
         assert!(!supported_usage(1, 6, Some(3)));
     }

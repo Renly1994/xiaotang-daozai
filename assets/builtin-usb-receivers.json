@@ -21,5 +21,7 @@
   { "vid": "046D", "pid": "C52E", "name": "罗技 Nano 接收器" },
   { "vid": "046D", "pid": "C531", "name": "罗技 Nano 接收器" },
   { "vid": "046D", "pid": "C534", "name": "罗技 Nano 接收器" },
-  { "vid": "046D", "pid": "C537", "name": "罗技 Nano 接收器" }
+  { "vid": "046D", "pid": "C537", "name": "罗技 Nano 接收器" },
+  { "vid": "1D57", "pid": "FA65", "name": "英菲克 IN10 8K 接收器", "battery_protocol": "inphic-in10" },
+  { "vid": "3554", "pid": "FA09", "name": "CompX 2.4G 键盘接收器", "battery_protocol": "compx-keyboard" }
 ]
