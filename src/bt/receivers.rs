@@ -576,7 +576,8 @@ mod tests {
             })
             .collect();
         let devices = receiver_snapshot(None, &instances);
-        assert_eq!(devices.len(), 23);
+        assert!(rows.len() >= 25);
+        assert_eq!(devices.len(), rows.len());
         for (instance, row) in instances.iter().zip(rows) {
             let device = devices
                 .iter()
