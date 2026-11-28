@@ -31,6 +31,7 @@ function refresh({ settings, today }) {
 | 岛上常驻位 · 实验 | 声明 `island.pinned`，通过 `refresh` 返回 `pinned:{text:"今日金价",value:"850 元/克",icon:"coin"}` | 收起时各插件一起显示，用户可调整顺序 |
 | 结构化状态卡和独立详情页 · 测试版 | 清单使用 `"owner":"status"` 和 `"capabilities":["status.page","timer"]`，`refresh` 返回 `status`。可用 `statusLayout` 选择组件、排序和样式。 | 在岛上翻页查看，在「设置 → 页面管理 → 状态详情」单独启停 |
 | [邮箱视图扩展](mail-view.md) · 测试版 | 声明无脚本、无权限的 mail.view 资源包，扩展原生邮箱的多账号视图。 | 启用后在原生邮箱页使用，不注册独立状态页 |
+| [原生无线设备来源](wireless-source.md) · 宿主扩展待上游合入 | 声明 `owner:"wireless"`、`wireless.devices` 及用户授权的单一 file / loopback 来源，返回有界 `wireless` 数组 | 原生无线设备列表、详情、提醒及常驻选择。官方 v0.6.71 尚不支持此能力，需匹配的扩展宿主 |
 | 状态页组件与主题令牌 · 实验 | 在状态页布局中添加列表、迷你折线、多行说明和标签，可设强调色、强调程度及岛仔内置图标 | 在状态详情页查看 |
 | 自绘画布 · 实验 | 同时声明 `status.page` 和 `status.canvas`，脚本返回画布的图元与样式 | 可填满状态详情页或与标准组件混排 |
 | 实时状态组件与敏感值 · 实验 | 布局选择 `counter`、`clock`、`countdown`，由岛仔计算实时读数。金额等数据须标记 `sensitive:true`。 | 在状态详情页查看，点击暂时显示敏感值 |

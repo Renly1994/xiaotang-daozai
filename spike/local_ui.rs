@@ -1223,6 +1223,7 @@ impl LocalPlugins {
             "calendar" => calendar_on,
             "quota" => quota_on,
             "status" => !r.status_page_disabled,
+            "wireless" if manifest.has_surface(Surface::WirelessDevices) => self.live.contains(&Surface::WirelessDevices),
             "pages" | "wireless" | "appearance" | "mail" => true,
             _ => tasks_on,
         };

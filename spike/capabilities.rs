@@ -17,6 +17,8 @@ pub(super) enum Surface {
     StatusPage,
     /// 收起时由宿主轮播的短内容，读 `pinned`。
     IslandPinned,
+    /// 外部只读来源的设备，进入原生无线设备列表。
+    WirelessDevices,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -44,6 +46,7 @@ pub(super) const CAPABILITIES: &[Capability] = &[
     Capability { name: "status.page", runtime: "js", role: Role::Output(Surface::StatusPage) },
     Capability { name: "status.canvas", runtime: "js", role: Role::CanvasOutput },
     Capability { name: "island.pinned", runtime: "js", role: Role::Output(Surface::IslandPinned) },
+    Capability { name: "wireless.devices", runtime: "js", role: Role::Output(Surface::WirelessDevices) },
     Capability { name: "settings", runtime: "*", role: Role::Helper },
     Capability { name: "timer", runtime: "js", role: Role::Helper },
     Capability { name: "storage", runtime: "js", role: Role::Helper },
@@ -78,6 +81,7 @@ pub(super) const SCRIPT_OWNERS: &[(&str, &[Surface])] = &[
     ("calendar", &[Surface::CalendarMarker]),
     ("quota", &[Surface::Quota]),
     ("status", &[Surface::StatusPage]),
+    ("wireless", &[Surface::WirelessDevices]),
 ];
 
 pub(super) fn find(name: &str) -> Option<&'static Capability> {
@@ -96,6 +100,11 @@ pub(super) fn surface_of(name: &str, owner: &str) -> Option<Surface> {
 
 /// 核对一份清单的能力组合。只看能力、运行环境和归属；各类包自己的细则由调用方另查。
 pub(super) fn check(runtime: &str, owner: &str, names: &[String]) -> Result<Vec<Surface>, String> {
+    if names.iter().any(|name| name == "wireless.devices")
+        && (runtime != "js" || owner != "wireless" || names.iter().any(|name|
+            !matches!(name.as_str(), "wireless.devices" | "timer" | "settings" | "storage"))) {
+        return Err("wireless.devices 只接受 wireless 归属的只读脚本来源及 timer、settings、storage".into());
+    }
     let mut seen = std::collections::BTreeSet::new();
     let mut surfaces = Vec::new();
     let mut exclusive = None;
@@ -142,13 +151,14 @@ pub(super) fn check(runtime: &str, owner: &str, names: &[String]) -> Result<Vec<
         return Err(format!("{runtime} 插件需要声明对应的专属能力"));
     }
     let Some((_, home)) = SCRIPT_OWNERS.iter().find(|(key, _)| *key == owner) else {
-        return Err(format!("脚本插件的归属须为 tasks、calendar、quota 或 status，当前为 {owner}"));
+        return Err(format!("脚本插件的归属须为 tasks、calendar、quota、status 或 wireless，当前为 {owner}"));
     };
     if !home.iter().any(|surface| surfaces.contains(surface)) {
         return Err(match owner {
             "quota" => "AI 额度归属的插件需要声明 quota.source".into(),
             "status" => "状态页归属的插件需要声明 status.page".into(),
             "calendar" => "日程归属的插件需要声明 card 或 calendar.marker".into(),
+            "wireless" => "无线设备归属的脚本需要声明 wireless.devices".into(),
             _ => "待办归属的插件需要声明 card".into(),
         });
     }

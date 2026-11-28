@@ -82,16 +82,18 @@ fn mail_invitation(title:&str,body:&str)->bool {
 }
 
 fn bluetooth_notice_content(body:&str)->(&str,&str,Option<u8>){
+    let parse_level=|value:&str|value.strip_suffix('%').and_then(|s|
+        s.strip_prefix('≈').or_else(||s.strip_prefix("约 ")).unwrap_or(s).parse::<u8>().ok()).filter(|v|*v<=100);
     if let Some(name)=body.strip_suffix(" · 已断开") {return (name,"已断开",None);}
     if body=="已断开连接" {return ("蓝牙设备","已断开",None);}
     if let Some((name,level))=body.rsplit_once(" · 电量 ") {
-        if let Some(level)=level.strip_suffix('%').and_then(|s|s.parse::<u8>().ok()).filter(|v|*v<=100){
+        if let Some(level)=parse_level(level){
             return (name,"已连接",Some(level));
         }
     }
     // 电量事件：「名称 · 开始充电 · 64%」。
     if let Some((rest,level))=body.rsplit_once(" · ") {
-        if let (Some(level),Some((name,status)))=(level.strip_suffix('%').and_then(|s|s.parse::<u8>().ok()).filter(|v|*v<=100),rest.rsplit_once(" · ")) {
+        if let (Some(level),Some((name,status)))=(parse_level(level),rest.rsplit_once(" · ")) {
             return (name,status,Some(level));
         }
     }
@@ -644,7 +646,8 @@ impl App {
                 device_icon(&nc,kind,17.0,15.0,18.0);
                 let right=HUD_W-14.0;
                 let name_end=if let Some(level)=battery {
-                    let pct=format!("{level}%");
+                    let approximate=a.body.rsplit(" · ").next().is_some_and(|part|part.contains('≈')||part.contains("约 "));
+                    let pct=format!("{}{level}%",if approximate{"≈"}else{""});
                     let pct_width=nc.text_w(&pct,10.5,W::Semibold);
                     let x=right-pct_width-22.0;
                     nc.stroke(x,20.0,15.0,8.0,2.0,1.0,Color32::from_gray(175));
@@ -890,6 +893,8 @@ mod tests {
         assert_eq!(bluetooth_notice_content("已断开连接"),("蓝牙设备","已断开",None));
         assert_eq!(bluetooth_notice_content("青龙键盘 · 已断开"),("青龙键盘","已断开",None));
         assert_eq!(bluetooth_notice_content("耳机 · 电量 101%"),("耳机 · 电量 101%","已连接",None));
+        assert_eq!(bluetooth_notice_content("Test controller · 电量 约 83%"),("Test controller","已连接",Some(83)));
+        assert_eq!(bluetooth_notice_content("Test controller · 电量偏低 · ≈17%"),("Test controller","电量偏低",Some(17)));
     }
 
     #[test]
