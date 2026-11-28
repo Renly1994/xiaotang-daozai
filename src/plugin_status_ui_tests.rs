@@ -245,7 +245,7 @@ fn plugin_page_order_drag_persists_across_restart_and_visibility() {
     h.app.settings_tab = crate::extras::SETTINGS_TAB_PAGES;
     h.app.open_settings();
 
-    let size = egui::vec2(690.0, 1500.0);
+    let size = egui::vec2(690.0, 1700.0);
     for _ in 0..2 {
         render_settings(&mut h, size, vec![]);
     }

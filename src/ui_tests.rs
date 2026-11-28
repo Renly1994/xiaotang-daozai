@@ -1,5 +1,7 @@
 //! 无窗口交互测试：直接向 egui 注入输入事件，验证悬停展开、切页、按钮。
 use crate::app::{App, Env, Options, PH, PW, WIN_H, WIN_W};
+#[path="resident_navigation_tests.rs"]
+mod resident_navigation;
 #[path="messenger/ui_tests.rs"]
 mod enterprise_messenger;
 #[path="calendar/ui_compatibility_tests.rs"]
@@ -864,8 +866,8 @@ fn v0649_settings_and_mail_accounts_survive_upgrade(){
         crate::model::Settings::load().save();
         let saved=std::fs::read_to_string(directory.join("settings.txt")).unwrap();
         for line in legacy.lines().filter(|line|!line.starts_with("visible_pages=")&&!line.starts_with("page_order=")){assert!(saved.lines().any(|value|value==line),"升级保存不能改变旧设置：{line}");}
-        assert!(saved.lines().any(|value|value=="visible_pages=10111111101"),"旧页面开关应保留，并默认开启天气页");
-        assert!(saved.lines().any(|value|value=="page_order=5,2,0,1,3,4,6,7,8,9,10"),"旧顺序应保留，并把天气页接在最后");
+        assert!(saved.lines().any(|value|value=="visible_pages=101111111011"),"旧页面开关应保留，并默认开启天气页");
+        assert!(saved.lines().any(|value|value=="page_order=5,2,0,1,3,4,6,7,8,9,10,11"),"旧顺序应保留，并把天气页接在最后");
     }
     std::fs::write(directory.join("mail-accounts.json"),br#"[{"email":"OldUser@qq.com","provider":"qq","enabled":true},{"email":"old@icloud.com","provider":"icloud","enabled":false}]"#).unwrap();
     let accounts=crate::mail::load_accounts();
@@ -1374,7 +1376,7 @@ fn oled_shift_pauses_during_hover_intent() {
     h.app.settings.oled_shift=true;
     h.hover(Pos2::new(600.0,180.0),1.0);
     assert!(h.app.oled_shift_idle(&h.ctx));
-    h.hover(Pos2::new(WIN_W/2.0,12.0),0.05);
+    h.hover_island(0.05);
     assert!(!h.app.open,"悬停意图缓冲期间尚未展开");
     assert!(h.hit.contains(Pos2::new(WIN_W/2.0,12.0)),"鼠标已进入岛体交互区域");
     assert!(!h.app.oled_shift_idle(&h.ctx),"悬停交互期间不能移动岛体");
@@ -1495,6 +1497,11 @@ impl H {
             });
         });
         self.shapes=output.shapes;
+    }
+    // Expansion-only tests use the bottom hit margin, outside component page links.
+    fn hover_island(&mut self, secs:f64) {
+        let gap=if self.app.settings.island_shape==crate::model::IslandShape::Pill {crate::app::PILL_GAP}else{0.0};
+        self.hover(Pos2::new(WIN_W/2.0,gap+crate::app::BAR_H+3.0),secs);
     }
     fn hover(&mut self, p: Pos2, secs: f64) {
         self.cursor = Some(p);
@@ -1990,7 +1997,7 @@ fn shelf_file_drag_exit_keeps_a_pinned_panel_open(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
     h.app.go(3,1.0);
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    h.hover_island(1.0);
     let pin=h.ctx.read_response(egui::Id::new(("card",true,"hold-open"))).unwrap();
     h.click(pin.rect.center());
     h.app.go(1,1.0);
@@ -2088,7 +2095,7 @@ fn web_video_is_hidden_without_changing_music_preferences(){
     assert!(h.app.ly.key.is_empty(),"视频不应建立歌曲取词任务");
     assert!(h.app.ly.lyrics.is_none() && h.app.ly.error.is_none(),"切到视频应清除上一首歌词和歌词错误");
     assert!(tx.send(Ok((crate::lyrics::parse_lrc("[00:01.00]late song"),false))).is_err(),"视频不能接收旧歌曲迟到的查询结果");
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    h.hover_island(1.0);
     h.click(H::local(74.0,118.0));
     assert!(h.app.show_lyrics,"视频页面的标签不应切换用户的歌曲歌词偏好");
     h.click(H::local(210.5,118.0));
@@ -2096,7 +2103,7 @@ fn web_video_is_hidden_without_changing_music_preferences(){
     assert!(!matches!(h.app.pet_state(),crate::extras::PetState::Music),"视频不应触发听歌表情");
     h.app.opts.fetch_lyrics=false;
     h.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),duration:120.0,..Default::default()};
-    h.hover(Pos2::new(WIN_W/2.0,12.0),0.5);
+    h.hover_island(0.5);
     h.click(H::local(74.0,118.0));
     assert!(!h.app.show_lyrics,"回到歌曲时应恢复原来的词按钮");
 }
@@ -2215,7 +2222,7 @@ fn music_volume_popup_opens_and_mute_restores_the_selected_players_level(){
     let mut h=H::new();
     h.media=crate::smtc::NowPlaying{source:"QQMusic.exe".into(),title:"Track".into(),artist:"Artist".into(),duration:120.0,volume:Some((60,false)),..Default::default()};
     h.app.volume_ui=Some((45,false));
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    h.hover_island(1.0);
     h.click(H::local(367.0,118.0));
     assert!(h.app.music_volume_open);
     assert!(h.cmds.is_empty(),"打开浮条不应改变音量或静音");
@@ -2233,7 +2240,7 @@ fn music_volume_popup_opens_and_mute_restores_the_selected_players_level(){
 fn music_volume_popup_slider_unmutes_and_scrolls_without_changing_pages(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.media=crate::smtc::NowPlaying{source:"QQMusic.exe".into(),title:"Track".into(),artist:"Artist".into(),volume:Some((60,true)),..Default::default()};
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.click(H::local(367.0,118.0));h.hover(H::local(367.0,53.5),0.2);
+    h.hover_island(1.0);h.click(H::local(367.0,118.0));h.hover(H::local(367.0,53.5),0.2);
     h.click(H::local(367.0,53.5));
     assert_eq!(h.app.music_volume_ui,Some((50,false)));
     assert!(h.cmds.contains(&crate::app::Cmd::MusicVolume(crate::smtc::Transport::SetVolume(50),"QQMusic.exe".into())));
@@ -2248,7 +2255,7 @@ fn music_volume_popup_slider_unmutes_and_scrolls_without_changing_pages(){
 fn music_volume_popup_closes_on_escape_outside_click_source_change_and_collapse(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.media=crate::smtc::NowPlaying{source:"QQMusic.exe".into(),title:"Track".into(),artist:"Artist".into(),volume:Some((60,false)),..Default::default()};
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.click(H::local(367.0,118.0));
+    h.hover_island(1.0);h.click(H::local(367.0,118.0));
     h.frame(vec![egui::Event::Key{key:egui::Key::Escape,physical_key:None,pressed:true,repeat:false,modifiers:Default::default()}]);
     assert!(!h.app.music_volume_open);assert!(h.app.open,"Esc 只关闭浮条，保留音乐面板");
     h.click(H::local(367.0,118.0));h.click(H::local(180.0,45.0));assert!(!h.app.music_volume_open);
@@ -2266,7 +2273,7 @@ fn music_volume_popup_gallery(){
     for (name,muted,lyrics) in [("volume",false,false),("muted",true,false),("lyrics",false,true)] {
         let mut h=H::new();h.ctx.set_pixels_per_point(2.0);h.app.settings.pet=false;h.app.show_lyrics=lyrics;
         h.media=crate::smtc::NowPlaying{source:"cloudmusic.exe".into(),title:"晴天".into(),artist:"周杰伦".into(),position:92.0,duration:269.0,volume:Some((62,muted)),..Default::default()};
-        h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+        h.hover_island(1.0);
         if lyrics{h.app.set_lyrics("晴天","周杰伦",269.0,crate::lyrics::parse_lrc("[00:00]午后的阳光落在窗边\n[01:30]风把回忆吹向远方\n[01:40]慢慢走过这段时光"));}
         h.click(H::local(367.0,118.0));h.hover(H::local(330.0,112.0),0.25);
         let ppp=h.ctx.pixels_per_point();let mut raster=crate::preview_raster::Raster::new((crate::app::CANVAS_W*ppp) as usize,(WIN_H*ppp) as usize);
@@ -2282,7 +2289,7 @@ fn music_volume_popup_gallery(){
 fn music_volume_wheel_and_player_switch_keep_system_volume_untouched(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.media=crate::smtc::NowPlaying{source:"QQMusic.exe".into(),title:"Track".into(),artist:"Artist".into(),volume:Some((60,true)),..Default::default()};
-    h.app.volume_ui=Some((45,false));h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.hover(H::local(367.0,118.0),0.2);h.wheel(120.0);
+    h.app.volume_ui=Some((45,false));h.hover_island(1.0);h.hover(H::local(367.0,118.0),0.2);h.wheel(120.0);
     assert!(h.cmds.contains(&crate::app::Cmd::MusicVolume(crate::smtc::Transport::SetVolume(64),"QQMusic.exe".into())),"音量={:?} 命令={:?} 页={} 指针={:?}",h.app.music_volume_ui,h.cmds,h.app.page,h.cursor);
     assert_eq!(h.app.music_volume_ui,Some((64,false)));
     h.media.source="cloudmusic.exe".into();h.media.volume=Some((22,false));h.frame(vec![]);
@@ -2298,7 +2305,7 @@ fn music_uses_system_artwork_and_clears_it_when_the_next_song_has_none(){
     let mut h=H::new();
     let image=std::sync::Arc::new(egui::ColorImage::new([32,32],egui::Color32::BLUE));
     h.media=crate::smtc::NowPlaying{title:"First".into(),artist:"Artist".into(),artwork:Some(image.clone()),..Default::default()};
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    h.hover_island(1.0);
     let (cached,texture)=h.app.music_artwork.as_ref().expect("播放页应使用系统封面");
     assert!(std::sync::Arc::ptr_eq(cached,&image));
     let texture_id=texture.id();
@@ -2317,7 +2324,7 @@ fn failed_lyrics_can_be_retried_from_the_music_page(){
     h.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),duration:120.0,..Default::default()};
     h.app.ly.key="Track|Artist|120".into();
     h.app.ly.error=Some(crate::lyrics::FetchError::Unavailable("HTTP 502".into()));
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    h.hover_island(1.0);
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="暂未获取歌词，请重试")),"展开内应保留歌词错误提示");
     h.click(H::local(310.0,68.0));
     assert!(h.app.ly.key.is_empty(),"点击错误提示后应允许重新请求当前歌曲");
@@ -2348,7 +2355,7 @@ fn music_lyrics_show_in_a_separate_right_column() {
     let mut h=H::new();
     h.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),position:7.0,duration:120.0,..Default::default()};
     h.app.set_lyrics("Track","Artist",120.0,crate::lyrics::parse_lrc("[00:01]上一句\n[00:05]当前歌词\n[00:10]下一句"));
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    h.hover_island(1.0);
     let current=h.shapes.iter().find_map(|shape|match &shape.shape {
         egui::Shape::Text(text) if text.galley.text()=="当前歌词"=>Some(text.pos),_=>None,
     }).expect("展开页应显示同步歌词");
@@ -2480,7 +2487,7 @@ fn music_lyrics_island_toggle_is_independent_and_persistent() {
     h.app.show_lyrics=false;h.app.settings.lyrics_enabled=false;
     h.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),position:7.0,duration:120.0,playing:true,..Default::default()};
     h.app.set_lyrics("Track","Artist",120.0,crate::lyrics::parse_lrc("[00:05]当前歌词\n[00:10]下一句"));
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    h.hover_island(1.0);
     h.click(H::local(313.0,118.0));
     assert!(h.app.settings.island_lyrics);
     assert!(!h.app.show_lyrics && !h.app.settings.lyrics_enabled);
@@ -2508,7 +2515,7 @@ fn music_lyric_timing_follows_saved_delay_and_preserves_playback_position(){
         h.media.position=position;h.frame(vec![]);
         assert_eq!(h.app.island_lyric().map(|(_,line)|line),expected,"延时 {delay} ms，播放位置 {position}");
         assert!((h.app.media.position-position).abs()<0.001,"调整歌词不应改变播放进度");
-        h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+        h.hover_island(1.0);
         for text in ["第一句","当前歌词","下一句"]{
             let active=h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(t) if t.galley.text()==text && t.galley.job.sections[0].format.font_id.size==12.0));
             assert_eq!(active,expected==Some(text),"展开歌词也应使用相同的显示时间");
@@ -2602,7 +2609,7 @@ fn expanded_and_segmented_lyrics_share_the_early_display_time(){
     let mut h=H::new();h.app.settings.island_lyrics=true;
     h.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),position:9.8,duration:120.0,playing:true,..Default::default()};
     h.app.set_lyrics("Track","Artist",120.0,crate::lyrics::parse_lrc("[00:05]当前歌词\n[00:10]下一句"));
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    h.hover_island(1.0);
     let next=h.shapes.iter().find_map(|shape|match &shape.shape{egui::Shape::Text(text)if text.galley.text()=="下一句"=>Some(text),_=>None}).unwrap();
     assert_eq!(next.galley.job.sections[0].format.font_id.size,12.0,"展开歌词也应在开唱前高亮下一句");
     h.hover(Pos2::new(WIN_W/2.0,PH+30.0),1.0);
@@ -2840,11 +2847,11 @@ fn music_lyrics_respect_the_switch_and_do_not_show_stale_or_unsynced_lines() {
 fn hover_expands_with_overshoot_and_leave_collapses() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut h = H::new();
-    h.hover(Pos2::new(WIN_W / 2.0, 12.0), 0.1);
+    h.hover_island(0.1);
     assert!(h.app.progress() < 0.1, "意图缓冲期内不应展开");
     let mut peak: f32 = 0.0;
     for _ in 0..60 {
-        h.hover(Pos2::new(WIN_W / 2.0, 12.0), 1.0 / 60.0);
+        h.hover_island(1.0 / 60.0);
         peak = peak.max(h.app.progress());
     }
     assert!(peak > 1.01 && peak < 1.12, "展开应有轻微过冲, peak={peak}");
@@ -2959,7 +2966,7 @@ fn hold_open_shelf_tabs_and_all_page_exit() {
         let pin_id=egui::Id::new(("card",true,"hold-open"));
         h.app.settings.visible_pages.fill(true);
         h.app.go(3,1.0);
-        h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+        h.hover_island(1.0);
         h.app.shelf_tab=tab;
         h.frame(vec![]);
         let pin=h.ctx.read_response(pin_id).expect("置物架和剪贴板都应提供图钉").rect.center();
@@ -3041,7 +3048,7 @@ fn hold_open_header_controls_do_not_overlap_during_page_transitions() {
 fn music_header_shortcut_returns_from_every_page_without_controlling_playback() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     for playing in [true,false] {
-        let mut h=H::new();h.app.settings.page_order=[5,2,0,1,3,4,6,7,8,9,10];
+        let mut h=H::new();h.app.settings.page_order=[5,2,0,1,3,4,6,7,8,9,10,11];
         h.media=crate::smtc::NowPlaying{source:"cloudmusic.exe".into(),title:"Track".into(),artist:"Artist".into(),playing,duration:120.0,..Default::default()};
         h.app.set_page_visible(crate::app::PERFORMANCE_PAGE,true);
         for page in 1..crate::app::PAGE_NAMES.len() {
@@ -3086,7 +3093,7 @@ fn music_header_shortcut_is_absent_without_music_and_keeps_settings_clickable() 
 fn arrows_and_dots_switch_pages() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut h = H::new();
-    h.hover(Pos2::new(WIN_W / 2.0, 12.0), 1.0);
+    h.hover_island(1.0);
     h.click(H::local(398.0, 68.0));
     assert_eq!(h.app.page, 1);
     h.hover(H::local(300.0, 60.0), 0.8);
@@ -3103,9 +3110,12 @@ fn arrows_and_dots_switch_pages() {
 fn wheel_navigation_reaches_every_page_in_both_directions(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.app.shelf.items.clear();h.app.todos.items.clear();
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    h.hover_island(1.0);
     h.hover(H::local(210.0,18.0),0.3);
-    for (delta,pages) in [(-40.0,[1,2,3,4,5,6,7,8,10,0]),(40.0,[10,8,7,6,5,4,3,2,1,0])] {
+    let enabled:Vec<_>=h.app.settings.page_order.into_iter().filter(|&page|h.app.module_on(page)).collect();
+    let forward:Vec<_>=enabled.iter().skip(1).chain(enabled.first()).copied().collect();
+    let backward:Vec<_>=enabled.iter().skip(1).rev().chain(enabled.first()).copied().collect();
+    for (delta,pages) in [(-40.0,forward),(40.0,backward)] {
         for page in pages {
             h.wheel(delta);
             assert_eq!(h.app.page,page,"滚轮翻页不能被空的置物架或待办卡住");
@@ -3121,7 +3131,7 @@ fn wheel_from_tall_page_allows_movement_in_previous_page_bounds() {
     h.app.settings.show_page_shortcuts=false;
     let edge=H::local(70.0,165.0);
     let inner=H::local(70.0,80.0);
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    h.hover_island(1.0);
     h.app.go(6,1.0);
     h.hover(edge,0.8);
     h.wheel(40.0);
@@ -3141,7 +3151,7 @@ fn wheel_from_tall_page_allows_movement_in_previous_page_bounds() {
     h.hover(edge,0.5);
     assert!(!h.app.open,"重新移出新页应正常收起");
 
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    h.hover_island(1.0);
     h.app.go(6,1.0);
     h.hover(H::local(70.0,PH-1.0),0.8);
     h.wheel(40.0);
@@ -3296,7 +3306,7 @@ fn collapse_readback_covers_the_returning_pet_then_goes_idle() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
     h.app.set_pet(true);
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.5);
+    h.hover_island(1.5);
     assert!(h.app.debug_state().1);
     h.cursor=None;
     for _ in 0..60 {
@@ -3320,7 +3330,7 @@ fn wheel_between_different_heights_keeps_the_unread_bubble_in_place() {
     h.app.alerts.clear();
     h.app.notice=None;
     h.app.show_page(crate::app::QUOTA_PAGE);
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.2);
+    h.hover_island(1.2);
     h.hover(H::local(210.0,18.0),0.4);
     let id=egui::Id::new(("card",true,"微信"));
     let center=h.ctx.read_response(id).unwrap().rect.center();
@@ -3348,7 +3358,7 @@ fn page_turn_fades_old_content_in_place_and_slides_new_content_without_rebound()
             =>Some((text.pos.x,text.fallback_color.a())),
         _=>None,
     });
-    h.hover(H::local(210.0,18.0),1.2);
+    h.hover_island(1.2);
 
     for (wheel,target,direction) in [(false,1,1.0),(false,0,-1.0),(true,1,1.0),(true,0,-1.0)] {
         let previous=h.app.page();
@@ -3406,7 +3416,7 @@ fn page_turn_fades_old_content_in_place_and_slides_new_content_without_rebound()
 fn wheel_page_transition_keeps_interactive_frames_after_input_stops() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    h.hover_island(1.0);
     h.hover(H::local(210.0,18.0),0.3);
     assert!(!h.interactive_transition);
     h.wheel(-40.0);
@@ -3423,7 +3433,7 @@ fn wheel_page_transition_keeps_interactive_frames_after_input_stops() {
 #[test]
 fn wheel_handles_small_deltas_without_skipping_pages_on_bursts(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.hover(H::local(210.0,18.0),0.3);
+    h.hover_island(1.0);h.hover(H::local(210.0,18.0),0.3);
     for _ in 0..16 {h.wheel(-0.5);}
     assert_eq!(h.app.page,1,"高精度滚轮的小幅输入应能累积成一次翻页");
     h.hover(H::local(210.0,18.0),0.3);
@@ -3432,9 +3442,10 @@ fn wheel_handles_small_deltas_without_skipping_pages_on_bursts(){
 }
 
 #[test]
-fn navigation_wraps_between_ten_pages_and_notification_settings_remain_accessible() {
+fn navigation_wraps_between_builtin_pages_and_notification_settings_remain_accessible() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.click(H::local(21.0,68.0));assert_eq!(h.app.page,crate::app::BLUETOOTH_PAGE);
+    let last=h.app.settings.page_order.into_iter().rev().find(|&page|h.app.module_on(page)).unwrap();
+    h.hover_island(1.0);h.click(H::local(21.0,68.0));assert_eq!(h.app.page,last);
     h.hover(H::local(300.0,60.0),0.8);h.click(H::local(398.0,68.0));assert_eq!(h.app.page,0);
     h.app.open_settings_category(3);assert!(h.app.settings_open);assert_eq!(h.app.settings_tab,6);
 }
@@ -4013,7 +4024,7 @@ fn quota_accounts_switch_independently_and_hide_with_the_page() {
     h.app.quota_event(crate::quota::Event{id:"work".into(),result:Err("登录已失效".into())});
     assert_eq!(h.app.quota.rows["personal"].as_ref().unwrap().windows[0].remaining,80.0);
     assert!(h.app.quota.rows["work"].is_err());assert_eq!(h.app.quota_bar_indices().len(),2);
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.app.show_page(6);h.hover(H::local(300.0,60.0),0.7);
+    h.hover_island(1.0);h.app.show_page(6);h.hover(H::local(300.0,60.0),0.7);
     h.click(H::local(202.0,39.0));assert_eq!(h.app.quota.config.selected,"work");
     assert_eq!(crate::quota::Config::load().selected,"work");
     h.app.set_page_visible(6,false);assert!(h.app.quota_bar_indices().is_empty());assert_ne!(h.app.page,6);
@@ -4025,7 +4036,7 @@ fn quota_accounts_switch_independently_and_hide_with_the_page() {
 fn page_visibility_is_saved_and_sets_the_starting_page() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    assert_eq!(h.app.settings.visible_pages,[true,true,true,true,true,true,true,true,true,false,true]);
+    assert_eq!(h.app.settings.visible_pages,[true,true,true,true,true,true,true,true,true,false,true,true]);
     assert!(h.app.settings.show_battery);
     h.app.settings.show_battery=false;
     h.app.set_page_visible(0,false);
@@ -4033,19 +4044,19 @@ fn page_visibility_is_saved_and_sets_the_starting_page() {
     h.app.settings.save();
     let settings=crate::model::Settings::load();
     assert!(!settings.show_battery);
-    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true,true,false,true]);
+    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true,true,false,true,true]);
     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
     assert_eq!(restarted.page(),1);
     assert_eq!(restarted.settings.visible_pages,settings.visible_pages);
     assert!(!restarted.settings.show_battery);
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=000000\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[false,false,false,false,false,false,false,false,false,false,true],"旧版存档全关时，新增的无线设备页按默认开启，已有页面可见");
+    assert_eq!(crate::model::Settings::load().visible_pages,[false,false,false,false,false,false,false,false,false,false,true,true],"旧版存档全关时，新增的无线设备页按默认开启，已有页面可见");
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=1000000\n").unwrap();
     let legacy=crate::model::Settings::load();
-    assert_eq!(legacy.visible_pages,[true,false,false,false,false,false,false,true,true,false,true],"旧版页面开关应保留，并开启新增的日程页与天气页");
-    assert_eq!(legacy.hidden_settings_pages,[false;11],"旧版关闭的页面应保留设置入口");
+    assert_eq!(legacy.visible_pages,[true,false,false,false,false,false,false,true,true,false,true,true],"旧版页面开关应保留，并开启新增的日程页与天气页");
+    assert_eq!(legacy.hidden_settings_pages,[false;crate::app::PAGE_NAMES.len()],"旧版关闭的页面应保留设置入口");
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=invalid\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true,true,true,true,true,true,true,true,true,false,true]);
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,true,true,true,true,true,true,true,true,false,true,true]);
 }
 
 #[test]
@@ -4055,7 +4066,7 @@ fn battery_module_hides_power_in_collapsed_and_expanded_headers() {
         let mut h=H::new();
         h.app.settings.pet=false;
         h.app.settings.show_battery=false;
-        if expanded {h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);} else {h.frame(vec![]);}
+        if expanded {h.hover_island(1.0);} else {h.frame(vec![]);}
         let baseline=h.shapes.clone();
         h.power=(Some(80),true);
         h.t-=1.0/60.0;h.frame(vec![]);
@@ -4085,8 +4096,8 @@ fn battery_module_can_disable_only_the_power_warning() {
 fn page_visibility_skips_hidden_pages_in_every_navigation_control() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    for page in [1,3,4,6,7,8,9,10] {h.app.set_page_visible(page,false);}
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    for page in 0..crate::app::PAGE_NAMES.len() {if ![0,2,5].contains(&page) {h.app.set_page_visible(page,false);}}
+    h.hover_island(1.0);
     for expected in [2,5,0] {
         h.click(H::local(398.0,68.0));
         assert_eq!(h.app.page,expected);
@@ -4115,11 +4126,11 @@ fn page_visibility_moves_away_from_hidden_page_and_keeps_one_page() {
     h.app.set_page_visible(4,false);
     assert_eq!(h.app.page,0);
     assert!(!h.app.is_editing());
-    for page in [0,1,3,5,6,7,8,9,10] {h.app.set_page_visible(page,false);}
+    for page in 0..crate::app::PAGE_NAMES.len() {if page!=2 {h.app.set_page_visible(page,false);}}
     assert_eq!(h.app.page,2);
     h.app.set_page_visible(2,false);
     assert!(h.app.settings.visible_pages[2],"不能关闭最后一个页面");
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    h.hover_island(1.0);
     h.click(H::local(398.0,68.0));
     h.click(H::local(21.0,68.0));
     assert_eq!(h.app.page,2);
@@ -4311,7 +4322,7 @@ fn mail_page_shows_code_and_copies_on_click() {
     assert!(h.app.notification_bell().is_some(), "新邮件应点亮铃铛");
     assert!(h.app.alerts.iter().any(|a|a.title=="新邮件"&&a.page==5),"新邮件应进入通知队列，不能只有收起时才可见的铃铛");
     h.app.show_page(5);
-    h.hover(Pos2::new(WIN_W / 2.0, 12.0), 0.6);
+    h.hover_island(0.6);
     h.hover(H::local(300.0, 60.0), 0.4);
     h.click(H::local(60.0, 70.0));
     assert!(
@@ -4463,7 +4474,7 @@ fn mail_row_opens_summary_and_back_returns() {
         new: true,
     });
     h.app.show_page(5);
-    h.hover(Pos2::new(WIN_W / 2.0, 12.0), 0.6);
+    h.hover_island(0.6);
     h.hover(H::local(300.0, 50.0), 0.4);
     h.click(H::local(300.0, 50.0));
     assert_eq!(h.app.mail.open_uid, Some(("a@qq.com".to_string(), 42)), "点邮件行应展开摘要");
@@ -4624,7 +4635,7 @@ fn switching_apps_cancels_only_empty_new_todos(){
 fn drink_adds_water_and_todo_can_be_added() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut h = H::new();
-    h.hover(Pos2::new(WIN_W / 2.0, 12.0), 1.0);
+    h.hover_island(1.0);
     h.app.go(2, 1.0);
     h.hover(H::local(300.0, 60.0), 0.8);
     h.click(H::local(70.0, 110.0));
@@ -4659,7 +4670,7 @@ fn timer_counts_elapsed_time_after_sleep() {
 fn shelf_remove_keeps_original_file() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     let file=crate::model::config_dir().join("保留文件.txt");std::fs::create_dir_all(file.parent().unwrap()).unwrap();std::fs::write(&file,"内容").unwrap();
-    h.app.shelf.add(&file).unwrap();h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.app.go(3,1.0);h.hover(H::local(300.0,60.0),0.8);
+    h.app.shelf.add(&file).unwrap();h.hover_island(1.0);h.app.go(3,1.0);h.hover(H::local(300.0,60.0),0.8);
     h.click(H::local(233.0,39.0));assert!(h.app.shelf.items.is_empty());assert!(file.exists());assert!(crate::model::Shelf::load().items.is_empty());
 }
 
@@ -4668,7 +4679,7 @@ fn shelf_duplicate_drop_reports_existing_files_and_preserves_the_current_page() 
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     let dir=crate::model::config_dir();std::fs::create_dir_all(&dir).unwrap();
     let files:Vec<_>=(0..7).map(|i|{let path=dir.join(format!("文件-{i}.txt"));std::fs::write(&path,"内容").unwrap();path}).collect();
-    h.app.on_drop(files.clone());h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.app.shelf_first=0;
+    h.app.on_drop(files.clone());h.hover_island(1.0);h.app.shelf_first=0;
     h.app.on_drop(vec![files[0].clone()]);h.hover(H::local(300.0,60.0),0.3);
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="该文件已在置物架中")));
     h.app.on_drop(vec![files[0].clone(),files[1].clone()]);h.hover(H::local(300.0,60.0),0.3);
@@ -4684,7 +4695,7 @@ fn shelf_drop_distinguishes_new_duplicate_and_missing_files() {
     let old=dir.join("已添加.txt");let new=dir.join("新文件.txt");let missing=dir.join("已移动.txt");
     for file in [&old,&new]{std::fs::write(file,"内容").unwrap();}
     h.app.on_drop(vec![old.clone()]);h.app.on_drop(vec![old.clone(),new.clone(),new.clone(),missing.clone()]);
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    h.hover_island(1.0);
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="已添加 1 个文件，2 个已存在，1 个无法添加")));
     assert_eq!(h.app.shelf.items,vec![old.clone(),new]);
     std::fs::remove_file(&old).unwrap();h.app.on_drop(vec![old]);h.hover(H::local(300.0,60.0),0.3);
@@ -4721,7 +4732,7 @@ fn water_view_transition_keeps_repainting_after_the_click() {
 
 #[test]
 fn water_serving_and_undo_are_consistent(){
-    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.app.go(2,1.0);h.hover(H::local(300.0,60.0),0.8);
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.hover_island(1.0);h.app.go(2,1.0);h.hover(H::local(300.0,60.0),0.8);
     h.app.settings.serving_ml=350;h.click(H::local(70.0,110.0));assert_eq!(h.app.water.drunk_ml,350);assert_eq!(h.app.water.hours[9],350);
     h.click(H::local(191.0,110.0));assert_eq!(h.app.water.drunk_ml,0);assert_eq!(h.app.water.hours[9],0);
 }
@@ -4868,7 +4879,7 @@ fn mascot_reacts_to_music_and_respects_focus(){
 fn mascot_keeps_task_celebration_until_panel_closes(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.frame(vec![]);
     h.app.todos.items.push(crate::model::TodoItem{text:"完成测试任务".into(),done_on:None,due:None,reminded:false,..Default::default()});
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.app.go(4,1.0);h.hover(H::local(300.0,60.0),1.0);h.click(H::local(250.0,47.0));
+    h.hover_island(1.0);h.app.go(4,1.0);h.hover(H::local(300.0,60.0),1.0);h.click(H::local(250.0,47.0));
     assert!(h.app.todos.items[0].done_on.is_some());
     h.hover(H::local(300.0,60.0),4.0);assert_eq!(format!("{:?}",h.app.pet_state()),"Happy");
     h.cursor=None;for _ in 0..240 {h.frame(vec![]);}
@@ -5117,7 +5128,7 @@ fn minimal_takes_precedence_over_mascot(){
 }
 #[test]
 fn water_settings_are_in_the_island_and_editable(){
-    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.hover_island(1.0);
     h.app.go(2,1.0);h.hover(H::local(300.0,60.0),0.8);h.click(H::local(145.0,110.0));assert_eq!(h.app.page,2);assert_eq!(h.app.subpage,Some(2));assert_eq!(h.app.settings_category,1);
     h.hover(H::local(300.0,60.0),0.8);h.click(H::local(357.0,69.0));assert_eq!(h.app.settings.serving_ml,300);
     // 标题旁的切换在设置子页同样可用：切到久坐后第一行就是久坐时长，最后一行时段两边共用。
@@ -5143,7 +5154,7 @@ fn lunch_break_silences_water_and_sit_reminders(){
 }
 #[test]
 fn health_time_subpage_edits_lunch_and_backs_out_one_level(){
-    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.hover_island(1.0);
     h.app.open_settings_category(1);for _ in 0..30{h.frame(vec![]);}
     h.hover(H::local(300.0,60.0),0.3);h.click(H::local(200.0,113.0));assert!(h.app.health_time,"点提醒时段行进入二级页");
     let start=h.app.settings.lunch_start;h.hover(H::local(300.0,60.0),0.3);h.click(H::local(225.0,91.0));assert_eq!(h.app.settings.lunch_start,start+15);
@@ -5187,7 +5198,7 @@ fn sit_notice_and_page_buttons_reset_the_timer(){
     h.click_text("起身了");assert!(h.app.notice.is_none());assert_eq!(h.app.sat_minutes(),0);assert_eq!(h.app.water.drunk_ml,0);
     // 健康页：点「久坐」分段切换，同一位置的主按钮变成「起身了」、开关管久坐；点「喝水」切回
     h.app.sit_start=h.t-30.0*60.0;
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.app.go(2,1.0);h.hover(H::local(300.0,60.0),0.8);
+    h.hover_island(1.0);h.app.go(2,1.0);h.hover(H::local(300.0,60.0),0.8);
     h.click(H::local(124.0,22.0));assert!(h.app.sit_mode);h.hover(H::local(300.0,90.0),0.8);
     h.click(H::local(70.0,110.0));assert_eq!(h.app.sat_minutes(),0);assert_eq!(h.app.water.drunk_ml,0);
     let water_remind=h.app.water.remind;
@@ -5279,7 +5290,7 @@ fn todo_edit_choice_gallery(){
 
 #[test]
 fn task_editor_saves_and_cancels_inside_island(){
-    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.hover_island(1.0);
     h.app.todos.items.push(crate::model::TodoItem{text:"准备会议".into(),done_on:None,due:None,reminded:false,..Default::default()});h.app.go(4,1.0);h.hover(H::local(300.0,60.0),0.8);h.app.open_task_dialog(0);
     h.hover(H::local(300.0,60.0),0.2);assert!(h.app.is_editing());h.click(H::local(326.0,110.0));assert!(!h.app.is_editing());assert_eq!(h.app.todos.items[0].text,"准备会议");
     h.app.open_task_dialog(0);h.frame(vec![egui::Event::Key{key:egui::Key::Escape,physical_key:None,pressed:true,repeat:false,modifiers:Default::default()}]);assert!(!h.app.is_editing());
@@ -5294,7 +5305,7 @@ fn focus_timer_gets_room_in_the_collapsed_island(){
 #[test]
 fn switching_to_rest_waits_for_the_start_button(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.app.go(1,1.0);h.hover(H::local(260.0,70.0),1.0);
+    h.hover_island(1.0);h.app.go(1,1.0);h.hover(H::local(260.0,70.0),1.0);
     h.click(H::local(296.0,106.5));
     assert!(h.app.pomo.phase==crate::app::Phase::Rest);
     assert!(!h.app.pomo.running,"切换阶段应等待用户点击开始");
@@ -5357,7 +5368,7 @@ fn focus_page_selects_stopped_phases_and_starts_only_from_play(){
     use crate::app::Phase;
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.app.settings.focus_minutes=30;h.app.settings.rest_minutes=7;
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.app.go(1,1.0);h.hover(H::local(260.0,70.0),1.0);
+    h.hover_island(1.0);h.app.go(1,1.0);h.hover(H::local(260.0,70.0),1.0);
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="休息")));
     h.click(H::local(336.0,106.5));
     assert!(h.app.pomo.phase==Phase::Rest && !h.app.pomo.running);
@@ -5453,7 +5464,7 @@ fn fluid_music_seek_draws_solid_played_segment(){
         h.app.settings.skin=crate::model::Skin::Fluid;
         h.app.show_lyrics=lyrics;
         h.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),position:30.0,duration:120.0,..Default::default()};
-        h.hover(Pos2::new(WIN_W/2.0,12.0),1.2);
+        h.hover_island(1.2);
         let (x,w,y)=if lyrics{(44.0,176.0,82.0)}else{(96.0,221.0,92.6)};
         let start=H::local(x,y);
         assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Rect(r)
@@ -5468,7 +5479,7 @@ fn music_seek_drag_previews_and_commits_on_release(){
     for (source,lyrics) in [("",false),("",true),("cloudmusic.exe",false),("cloudmusic.exe",true),("bodian_pc.exe",false),("bodian_pc.exe",true),("kwmusic.exe",false),("kwmusic.exe",true)] {
         let mut h=H::new();h.app.show_lyrics=lyrics;
         h.media=crate::smtc::NowPlaying{source:source.into(),title:"Track".into(),artist:"Artist".into(),position:12.0,duration:120.0,..Default::default()};
-        h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+        h.hover_island(1.0);
         let (x,w,y)=if lyrics{(44.0,176.0,82.0)}else{(96.0,221.0,92.6)};
         let press=H::local(x+w*0.1,y);h.cursor=Some(press);
         h.frame(vec![egui::Event::PointerMoved(press)]);
@@ -5488,7 +5499,7 @@ fn old_and_new_qqmusic_seek_and_hold_the_target_after_release(){
     for source in ["QQMusic.exe","Tencent.QQMusic"] {
         let mut h=H::new();h.app.show_lyrics=false;
         h.media=crate::smtc::NowPlaying{source:source.into(),title:"Track".into(),artist:"Artist".into(),position:12.0,duration:120.0,playback_type:crate::smtc::MediaKind::Music,..Default::default()};
-        h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+        h.hover_island(1.0);
         let (x,w,y)=(96.0,221.0,92.6);
         let press=H::local(x+w*0.1,y);h.cursor=Some(press);
         h.frame(vec![egui::Event::PointerMoved(press)]);
@@ -5913,7 +5924,7 @@ fn an_open_page_and_lyrics_can_coexist_with_notifications_and_the_bell(){
     for _ in 0..90{h.frame(vec![]);}
     h.app.notification_apps.items.push(("mail.test".into(),"邮件".into(),true));h.app.settings.read_notifications=true;h.app.receive_notification("邮件".into(),"mail.test".into(),"收到新邮件".into());h.frame(vec![]);
     assert!(h.app.island_lyric().is_some(),"通知铃铛不能关闭岛上歌词");
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.hover(H::local(300.0,60.0),0.5);assert!(h.app.open);
+    h.hover_island(1.0);h.hover(H::local(300.0,60.0),0.5);assert!(h.app.open);
     h.app.alert("键盘输入语言","中文",5,false);for _ in 0..60{h.frame(vec![]);}
     assert!(h.app.open);
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="Track")),"展开页面保留歌曲信息");
@@ -6018,7 +6029,7 @@ fn bluetooth_badge_follows_connect_and_disconnect(){
 
 #[test]
 fn focus_settings_are_inside_focus_page(){
-    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.app.go(1,1.0);h.hover(H::local(300.0,60.0),0.8);h.click(H::local(110.0,18.0));assert_eq!(h.app.page,1);assert_eq!(h.app.subpage,Some(1));
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.hover_island(1.0);h.app.go(1,1.0);h.hover(H::local(300.0,60.0),0.8);h.click(H::local(110.0,18.0));assert_eq!(h.app.page,1);assert_eq!(h.app.subpage,Some(1));
 }
 
 #[test]
@@ -6256,7 +6267,7 @@ fn calendar_island_collapses_and_reopens_on_the_same_page() {
     assert_eq!(h.app.page,7);assert!(h.app.open);
     assert!(h.hit.bottom()>=crate::app::CALENDAR_H,"月历最后一行必须位于可操作区域内");
     h.hover(Pos2::new(600.0,WIN_H+30.0),5.0);assert!(!h.app.open);
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);assert!(h.app.open);
+    h.hover_island(1.0);assert!(h.app.open);
     assert_eq!(h.app.page,7);assert!(!h.app.settings_open);
 }
 
@@ -6409,7 +6420,7 @@ fn calendar_setup_does_not_overlay_music() {
     let mut h = H::new();
     h.app.settings.calendar_prompt = true;
     h.app.calendar.config = None;
-    h.hover(Pos2::new(WIN_W / 2.0, 12.0), 1.0);
+    h.hover_island(1.0);
     h.hover(H::local(300.0, 60.0), 0.6);
     h.click(H::local(40.0, 16.0));
     assert!(!h.app.settings_open, "音乐页不应出现日历接入悬浮入口");
@@ -6452,7 +6463,7 @@ fn frame_control_draw(h:&mut H,cursor:Option<Pos2>,events:Vec<egui::Event>) {
     let ppp=1.25*h.app.settings.island_scale();
     h.t+=1.0/120.0;
     let env=Env{t:h.t,clock:"09:41:00".into(),today:"2026-10-28".into(),cursor,media:h.media.clone(),
-        opaque_surface:true,..Default::default()};
+        battery:h.power.0,charging:h.power.1,opaque_surface:true,..Default::default()};
     let win=Rect::from_min_size(Pos2::ZERO,size);
     let raw=egui::RawInput{screen_rect:Some(win),time:Some(h.t),events,focused:true,
         viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{
@@ -6623,7 +6634,7 @@ fn bottom_page_shortcuts_fit_the_performance_panel_with_all_pages_enabled() {
 
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     for dock in [Dock::Top,Dock::Bottom] {
-        let mut h=H::new();
+        let mut h=H::new();h.power=(Some(76),true);
         install_page_shortcuts_fixture(&mut h);
         h.app.plugins.enable(SHORTCUT_FIXTURE_ID,true).unwrap();
         h.app.settings.dock=dock;
@@ -7608,7 +7619,7 @@ fn draw_page_management(h:&mut H,events:Vec<egui::Event>){
     let output=std::sync::Arc::new(Mutex::new(None));let capture=output.clone();h.t+=0.02;let time=h.t;
     egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
         let id=viewport.ids.this;
-        let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(690.0,1500.0))),time:Some(time),events:events.clone(),viewports:std::iter::once((id,egui::ViewportInfo::default())).collect(),..Default::default()};
+        let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(690.0,1700.0))),time:Some(time),events:events.clone(),viewports:std::iter::once((id,egui::ViewportInfo::default())).collect(),..Default::default()};
         *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
     });
     let _=h.ctx.run(Default::default(),|ctx|h.app.settings_ui(ctx,false));
@@ -7804,7 +7815,7 @@ fn page_management_resident_switches_follow_their_modules(){
     h.app.settings.show_clock=true;
     h.app.settings.show_battery=true;
     h.app.settings.show_weather=true;
-    h.app.settings.visible_pages=[true;11];
+    h.app.settings.visible_pages=[true;crate::app::PAGE_NAMES.len()];
     h.app.settings.show_bluetooth=false;
     h.app.quota.config.compact=true;
     h.app.quota.config.save();
@@ -8046,14 +8057,14 @@ fn calendar_sync_result_does_not_enqueue_another_sync() {
 fn page_order_persists_and_controls_navigation() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    h.app.settings.page_order=[5,2,0,1,3,4,6,7,8,9,10];
+    h.app.settings.page_order=[5,2,0,1,3,4,6,7,8,9,10,11];
     h.app.settings.save();
     let settings=crate::model::Settings::load();
-    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7,8,9,10]);
+    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7,8,9,10,11]);
     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
     assert_eq!(restarted.page(),5);
-    for page in [1,3,4,6,7,8,9,10] {h.app.set_page_visible(page,false);}
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    for page in 0..crate::app::PAGE_NAMES.len() {if ![0,2,5].contains(&page) {h.app.set_page_visible(page,false);}}
+    h.hover_island(1.0);
     for expected in [5,2,0] {
         h.click(H::local(398.0,68.0));
         assert_eq!(h.app.page,expected);
@@ -8065,7 +8076,7 @@ fn page_order_persists_and_controls_navigation() {
     assert_eq!(h.app.page,5);
     for invalid in ["0,0,1,2,3,4,5,6","8,1,2,3,4,5,6,7","0,1","invalid"] {
         std::fs::write(crate::model::config_dir().join("settings.txt"),format!("page_order={invalid}\n")).unwrap();
-        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7,8,9,10]);
+        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7,8,9,10,11]);
     }
 }
 
@@ -8092,9 +8103,9 @@ fn page_order_drag_applies_on_release_and_saves() {
     draw(&mut h,vec![egui::Event::PointerMoved(from),button(from,true)]);
     draw(&mut h,vec![egui::Event::PointerMoved(from+egui::vec2(0.0,10.0))]);
     draw(&mut h,vec![egui::Event::PointerMoved(to)]);
-    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7,8,9,10]);
+    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7,8,9,10,11]);
     draw(&mut h,vec![button(to,false)]);
-    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7,8,9,10]);
+    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7,8,9,10,11]);
     assert_eq!(crate::model::Settings::load().page_order,h.app.settings.page_order);
 }
 
@@ -8969,7 +8980,7 @@ fn mailbox_compact_third_row_stays_visible_below_the_toolbar(){
 #[test]
 fn bluetooth_switch_clears_notices_and_restarts_with_fresh_baseline(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    h.hover_island(1.0);
     let device=crate::bt::Device{id:"keyboard".into(),name:"Keyboard".into(),battery:None,kind:crate::bt::DeviceKind::Keyboard,..Default::default()};
     h.app.bluetooth_alert(&device,true);h.frame(vec![]);
     h.app.bluetooth_alert(&device,false);
@@ -10064,7 +10075,7 @@ fn qq_unknown_reminders_are_not_numbered_as_another_known_account(){
         h.app.receive_notification_from("QQ".into(),"QQ".into(),"有新消息".into(),(pid!=0).then_some(Unread{source:Messenger::Qq,pid,window}));
     }
     assert_eq!((h.app.unread_tag(0),h.app.unread_tag(1),h.app.unread_tag(2)),(Some(1),None,Some(2)));
-    h.app.alerts.clear();h.app.notice=None;h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    h.app.alerts.clear();h.app.notice=None;h.hover_island(1.0);
     assert!(h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(text)if text.galley.text()=="?")));
 }
 
@@ -10220,7 +10231,7 @@ fn messenger_accounts_get_number_tags_and_clear_one_by_one(){
     assert_eq!(h.app.pending_messengers,[Unread{source:Messenger::Wechat,pid:100,window:12},Unread{source:Messenger::Wechat,pid:200,window:22},Unread::of(Messenger::Qq)]);
     assert_eq!((h.app.unread_tag(0),h.app.unread_tag(1),h.app.unread_tag(2)),(Some(1),Some(2),None),"只有同一来源多个账号才编号");
     h.app.alerts.clear();h.app.notice=None;
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.5);
+    h.hover_island(1.5);
     let rect=|h:&H,name:&str|h.ctx.read_response(egui::Id::new(("card",true,name.to_string()))).unwrap_or_else(||panic!("{name}")).rect;
     let panel=h.app.island_rect(Rect::from_min_size(Pos2::ZERO,Vec2::new(WIN_W,WIN_H)),crate::app::PW,h.app.expanded_height());
     let (a,b,q)=(rect(&h,"微信"),rect(&h,"微信2"),rect(&h,"QQ"));
@@ -10238,7 +10249,7 @@ fn messenger_accounts_get_number_tags_and_clear_one_by_one(){
     assert_eq!(h.app.pending_messengers,[Unread{source:Messenger::Wechat,pid:100,window:12}]);
     // 四个以上：胶囊仍与面板等高，滚轮翻到后面的图标。
     for pid in [300,400,500]{h.app.receive_wechat_reminder_from(pid,0);}
-    h.hover(Pos2::new(WIN_W/2.0,12.0),0.2);
+    h.hover_island(0.2);
     let capsule=rect(&h,"微信");
     let last=|h:&H|rect(h,"微信4");
     let before=last(&h);
@@ -10289,7 +10300,7 @@ fn messenger_notifications_stay_right_and_move_outside_expanded_panel(){
     for _ in 0..360{h.frame(vec![]);}
     let badge=|h:&H|h.ctx.read_response(egui::Id::new(("card",true,"微信"))).unwrap().rect;
     assert!(badge(&h).left()>WIN_W/2.0);
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.5);
+    h.hover_island(1.5);
     assert!(h.app.open && badge(&h).left()>WIN_W/2.0);
     assert!((badge(&h).left()-(WIN_W/2.0+crate::app::PW/2.0+crate::app::UNREAD_GAP)).abs()<1.0,"展开后与面板留一小段间距 {:?}",badge(&h));
     let center=badge(&h).center();
@@ -11432,27 +11443,27 @@ fn every_module_settings_tab_maps_to_its_page(){
     for tab in 0..titles.len() {
         if let Some(page)=crate::extras::settings_tab_module(tab) {assert!(crate::app::PAGE_NAMES[page].chars().next()==titles[tab].chars().next(),"{} ↔ {}",titles[tab],crate::app::PAGE_NAMES[page]);}
     }
-    pages.sort();assert_eq!(pages,(0..crate::app::PAGE_NAMES.len()).collect::<Vec<_>>(),"每个功能页面各有一个设置分页");
+    pages.sort();assert_eq!(pages,(0..crate::app::PAGE_NAMES.len()).filter(|&page|page!=crate::app::BATTERY_PAGE).collect::<Vec<_>>(),"功能页面各有设置分页，本机电量复用外观设置");
     assert_eq!(crate::app::PAGE_SETTINGS_TABS[crate::app::BLUETOOTH_PAGE],crate::extras::SETTINGS_TAB_WIRELESS);
 }
 
 
 #[test]
-fn performance_badge_opens_overview_and_drills_into_details() {
-    use crate::{app::PERFORMANCE_PAGE,bar_layout::PERFORMANCE,performance::{BarStyle,View},performance_ui::{overview_card_center,view_tab_center,BACK}};
+fn performance_badge_opens_matching_detail_and_drills_into_details() {
+    use crate::{app::PERFORMANCE_PAGE,bar_layout::PERFORMANCE,performance::{BarStyle,View},performance_ui::{view_tab_center,BACK}};
     let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
     h.app.set_page_visible(PERFORMANCE_PAGE,true);
     h.app.settings.performance_bar=BarStyle::Pulse;
     for _ in 0..40 {h.frame(vec![]);}
-    let badge=h.ctx.read_response(egui::Id::new(("card",true,"performance-open"))).expect("应绘制可交互的性能徽标");
+    let badge=h.ctx.read_response(egui::Id::new(("card",true,"performance-pulse"))).expect("应绘制可交互的性能徽标");
     assert!(badge.rect.is_positive(),"{:?}",badge.rect);
     h.click(badge.rect.center());
     assert_eq!(h.app.debug_state(),(PERFORMANCE_PAGE,true));
-    assert_eq!(h.app.performance.view,None,"展开先显示设置里的总览");
+    assert_eq!(h.app.performance.view,Some(View::Cpu),"CPU 常驻指标应直达 CPU 详情");
     let tap=|h:&mut H,(x,y):(f32,f32)|{h.hover(H::local(x,y),0.8);h.click(H::local(x,y));};
-    tap(&mut h,overview_card_center(View::Gpu));
-    assert_eq!(h.app.performance.view,Some(View::Gpu),"点总览卡片进入对应详情");
+    tap(&mut h,view_tab_center(1));
+    assert_eq!(h.app.performance.view,Some(View::Gpu),"详情页签切换到显卡详情");
     tap(&mut h,view_tab_center(3));
     assert_eq!(h.app.performance.view,Some(View::Disk),"详情页签可以横向切换");
     tap(&mut h,(BACK[0]+BACK[2]/2.,BACK[1]+BACK[3]/2.));

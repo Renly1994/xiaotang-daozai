@@ -37,6 +37,13 @@ impl Metric {
             _ => None,
         }
     }
+    pub(crate) fn view(self) -> View {
+        match self {
+            Self::Cpu=>View::Cpu, Self::Gpu|Self::Vram|Self::GpuTemp=>View::Gpu,
+            Self::Ram=>View::Memory, Self::Download|Self::Upload=>View::Network,
+            Self::Read|Self::Write=>View::Disk,
+        }
+    }
     fn width(self) -> f32 {
         match self {
             Self::Cpu | Self::Gpu | Self::Ram => 52.,

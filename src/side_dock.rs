@@ -5,6 +5,7 @@
 //! AI 额度竖排：环形额度一行一个，余额类图标在上、金额在下。
 //! 吉祥物和岛上歌词是横向内容，侧边停靠时不显示。
 
+use crate::app::resident_navigation::Destination;
 use crate::app::{App, Env, Phase, BAR_H_MIN, BAR_W_MIN, PILL_GAP, PW};
 use crate::model::{Dock, IslandShape, ResidentDate};
 use crate::paint::{self, Card, H};
@@ -167,13 +168,9 @@ impl App {
                 SideItem::Quota(index, h) => self.draw_quota_side(c, cx, mid, h, index),
                 #[cfg(feature="sdk-js")]
                 SideItem::Pinned(index) => if let Some(display) = self.pinned_displays.get(index) {
-                    let (click, repaint_after, animating) =
+                    let (_, repaint_after, animating) =
                         display.draw(c, cx, mid, display.width(width), true, self.pinned_canvas_theme());
                     self.pinned_frame.include(repaint_after, animating);
-                    if click {
-                        let id=display.plugin.clone();
-                        self.show_status_page(&id);
-                    }
                 },
                 SideItem::Bell => {
                     if let Some(at)=self.notification_bell(){
@@ -182,6 +179,15 @@ impl App {
                     }
                 }
             }
+            let page=match item {
+                SideItem::Clock | SideItem::Date(_)=>Some(crate::app::CALENDAR_PAGE),
+                SideItem::Battery=>Some(crate::app::BATTERY_PAGE),
+                SideItem::Music=>Some(crate::app::MUSIC_PAGE),
+                SideItem::Focus=>Some(crate::app::FOCUS_PAGE),
+                SideItem::Bell=>Some(crate::app::MAIL_PAGE),
+                _=>None,
+            };
+            if let Some(page)=page {c.page_link(cx-17.0,y,34.0,h,("side-page",page,std::mem::discriminant(&item)),Destination::Page(page));}
             y += h;
         }
     }

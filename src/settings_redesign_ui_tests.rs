@@ -40,7 +40,7 @@ fn merged_switches_keep_enabled_users_unchanged(){
 #[test]
 fn merged_mail_switch_keeps_last_page_behavior(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.frame(vec![]);
-    h.app.settings.visible_pages=[false;11];h.app.settings.visible_pages[crate::app::MAIL_PAGE]=true;
+    h.app.settings.visible_pages=[false;crate::app::PAGE_NAMES.len()];h.app.settings.visible_pages[crate::app::MAIL_PAGE]=true;
     h.app.settings.mail_enabled=false;
     h.app.migrate_merged_switches();
     assert!(h.app.settings.visible_pages[crate::app::MAIL_PAGE]);

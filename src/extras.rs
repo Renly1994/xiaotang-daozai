@@ -2099,7 +2099,7 @@ impl App {
                             if self.plugins.page_shortcut_settings(ui,&mut self.settings.show_page_shortcuts,&mut self.settings.hide_page_arrows) {
                                 ui.separator();
                             }
-                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","喝水与久坐提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","当地天气与七日预报","处理器、显卡、内存、网络与磁盘","蓝牙设备连接状态与多来源电量"];
+                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","喝水与久坐提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","当地天气与七日预报","处理器、显卡、内存、网络与磁盘","蓝牙设备连接状态与多来源电量","本机电池电量与供电状态"];
                             settings_hint(ui,"拖动左侧手柄调整岛上顺序。关闭后暂停后台运行，保留已有数据。选择「关闭并隐藏」可从设置左栏收起入口，合并入口需隐藏组内所有功能。");
                             use crate::model::OrderedPage;
                             #[derive(Clone)]
@@ -2340,6 +2340,10 @@ impl App {
                             settings_hint(ui,"只影响岛体，放大后文字和图标依旧清晰。");
                         });
                         settings_label(ui,"岛体显示");
+                        settings_card(ui,|ui|{
+                            settings_control_row(ui,"悬停打开",80.0,|ui|ui.add(egui::Slider::new(&mut self.settings.hover_page_delay_ms,200..=1500).step_by(100.0).suffix(" 毫秒")));
+                            settings_hint(ui,"在常驻组件上停留后打开对应详情，移到其他组件会重新计时。");
+                        });
                         settings_card(ui,|ui|{
                             let mut minimal=self.settings.minimal;
                             setting_row(ui,"极简刘海","收起时显示一条细线",&mut minimal);

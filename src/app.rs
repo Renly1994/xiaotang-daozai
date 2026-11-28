@@ -3,6 +3,10 @@
 //!
 //! 时间一律来自 `Env::t`（秒），不直接读系统时钟，所以录屏可逐帧复现。
 
+#[path="resident_navigation.rs"]
+pub(crate) mod resident_navigation;
+use resident_navigation::Destination;
+
 use crate::extras::{Alert, HealthReminder, PetState};
 use crate::anim::{self, lerp, smoothstep, Spring};
 use crate::bar_layout::{self as bar, Layout};
@@ -40,6 +44,7 @@ pub const CALENDAR_PAGE: usize = 7;
 pub const WEATHER_PAGE: usize = 8;
 pub const PERFORMANCE_PAGE: usize = 9;
 pub const BLUETOOTH_PAGE: usize = 10;
+pub const BATTERY_PAGE: usize = 11;
 pub(crate) const WEATHER_H: f32 = 232.0;
 pub(crate) const CALENDAR_H: f32 = 216.0;
 pub const BAR_W: f32 = 163.0; // 收起药丸宽
@@ -84,12 +89,12 @@ fn pill_shadow(painter:&egui::Painter,rect:Rect,radius:f32,strength:f32){
         painter.rect_filled(r,radius+grow*0.8,Color32::from_black_alpha((255.0*a*strength) as u8));
     }
 }
-pub(crate) const PAGE_NAMES: [&str; 11] = ["音乐", "专注", "健康", "置物架", "待办", "邮箱", "AI 额度", "日程", "天气", "系统性能", "无线设备"];
+pub(crate) const PAGE_NAMES: [&str; 12] = ["音乐", "专注", "健康", "置物架", "待办", "邮箱", "AI 额度", "日程", "天气", "系统性能", "无线设备", "本机电量"];
 pub(crate) const PAGE_SHORTCUT_KEYS: [&str; PAGE_NAMES.len()] = [
     "music", "focus", "health", "shelf", "tasks", "mail", "quota", "calendar", "weather",
-    "performance", "wireless",
+    "performance", "wireless", "battery",
 ];
-pub(crate) const PAGE_SETTINGS_TABS: [usize; 11] = [1,2,3,5,4,7,11,8,12,15,crate::extras::SETTINGS_TAB_WIRELESS];
+pub(crate) const PAGE_SETTINGS_TABS: [usize; 12] = [1,2,3,5,4,7,11,8,12,15,crate::extras::SETTINGS_TAB_WIRELESS,crate::extras::SETTINGS_TAB_APPEARANCE];
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
@@ -836,6 +841,7 @@ pub struct App {
     hold_open: bool,
     /// 顶栏为图钉让位的动画进度。
     pub(crate) hold_slot: f32,
+    resident_navigation: resident_navigation::Navigation,
     hover_since: Option<f64>,
     leave_since: Option<f64>,
     /// 本次展开前的悬停范围，以画布中心为原点。
@@ -872,7 +878,7 @@ pub struct App {
     page_scroll_area: Option<Rect>,
     page_dir: f32,
     page_t0: f64,
-    dots: [Spring; 11],
+    dots: [Spring; 12],
     wheel_delta: f32,
     pub(crate) content_scroll: Option<(egui::Id, f32)>,
     wheel_at: f64,
@@ -1099,6 +1105,7 @@ impl App {
             h: Spring::new(bh, CLOSE.0, CLOSE.1),
             page_height: Spring::new(PH, OPEN_H.0, OPEN_H.1),
             open: false,
+            resident_navigation: Default::default(),
             hover_since: None,
             leave_since: None,
             hover_open_area: None,
@@ -2510,6 +2517,7 @@ impl App {
             && !env.fullscreen_hidden && !env.screen_locked && env.cursor.is_some_and(|c|area.contains(c))
             && !ctx.input(|i|i.pointer.any_pressed() || i.key_pressed(egui::Key::Escape)));
         let page_hover=inside || self.page_scroll_area.is_some();
+        self.hover_module(&ctx,env,inside);
         // 展开时，穿过面板到通知图标之间的空隙也算悬停；按钮仍只在图标本身响应点击。
         let on_notice=env.cursor.is_some_and(|c|badge.into_iter().chain(notice).any(|mut r|{
             if self.open {
@@ -2614,7 +2622,8 @@ impl App {
             self.hover_lock = true;
         }
         let hover_wants_open = (page_hover || self.open && opening_area_hovered) && !self.hover_lock
-            && (self.compact_notices() || self.notice.is_none() || self.open);
+            && (self.compact_notices() || self.notice.is_none() || self.open)
+            && (self.open || !env.primary_down.unwrap_or(false) && !ctx.input(|i|i.pointer.any_down()));
         let want = plugin_notice_detail || self.hold_open || hover_wants_open || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || volume_dragging || (self.is_editing() && self.open);
         let was_open = self.open;
         self.morph(want, inside, env.t, dt);
@@ -2927,6 +2936,7 @@ impl App {
             // 点击在本帧推进弹簧之后处理，先识别尚未同步的目标。
             && (self.water_view_t.target != self.water_view as f32 || !self.water_view_t.settled(1.0));
         let scrolling=previous_scroll.zip(self.content_scroll).is_some_and(|((old_id,old_y),(id,y))| old_id==id && old_y!=y);
+        self.clicked_module(&ctx);
         let resizing=!self.w.settled(PW) || !self.h.settled(self.expanded_height());
         let shelf_scrolling=self.open && self.page==3 && self.shelf_tab==0 && !self.shelf.items.is_empty()
             && (self.shelf_scroll.target!=self.shelf_first as f32 || !self.shelf_scroll.settled(1.0)
@@ -3699,7 +3709,7 @@ impl App {
             self.leave_since = None;
             let since = *self.hover_since.get_or_insert(t);
             let intent=if self.effective_minimal() {MINIMAL_HOVER_INTENT}else{HOVER_INTENT};
-            if !self.open && (self.drag_hot || t - since >= intent) {
+            if !self.open && (self.drag_hot || t - since >= intent && self.module_hover_ready(t)) {
                 self.open = true;
                 self.w.tune(OPEN_W.0, OPEN_W.1);
                 self.h.tune(OPEN_H.0, OPEN_H.1);
@@ -3808,9 +3818,11 @@ impl App {
             let position=c.pos(left+content_width-LYRIC_BAR_W/2.0,center_y-galley.size().y/2.0+(1.0-fade)*3.0);
             c.painter.galley(position,galley,if lyric.is_some(){theme::WHITE}else{theme::GRAY});
             paint::playback_bars(&c,left+content_width-21.0,center_y,self.t,self.media.playing,theme::WHITE);
+            if lyric_alpha>0.8 {c.page_link(left+10.0,center_y-14.0,content_width-20.0,28.0,"resident-lyric",Destination::Page(MUSIC_PAGE));}
             if self.pomo.running {
                 let alpha=smoothstep(0.88,1.0,(width-content_width)/self.lyric_focus_space());
                 crate::focus_bar::draw(&c.faded(alpha),left+width-14.0-crate::focus_bar::LYRIC_WIDTH/2.0,center_y,self.t,&self.pomo,self.phase_secs(self.pomo.phase),true);
+                if lyric_alpha>0.8 && alpha>0.8 {c.page_link(left+width-14.0-crate::focus_bar::LYRIC_WIDTH,center_y-14.0,crate::focus_bar::LYRIC_WIDTH,28.0,"resident-lyric-focus",Destination::Page(FOCUS_PAGE));}
             }
         }
         if lyric_alpha>=0.997 {return;}
@@ -3852,7 +3864,10 @@ impl App {
         // 电池：位置/大小连续插值
         let bk = lerp(1.0, 0.8*fit, m);
         let bpos = (lerp(pb.0, hb.0, m), lerp(pb.1, hb.1, m));
-        if show_battery {paint::battery(&base.faded(lerp(layout.clearance(bar::BATTERY),1.0,m)), bpos.0, bpos.1, env.battery, env.charging, bk);}
+        if show_battery {
+            paint::battery(&base.faded(lerp(layout.clearance(bar::BATTERY),1.0,m)), bpos.0, bpos.1, env.battery, env.charging, bk);
+            if p<0.1 && layout.clearance(bar::BATTERY)>0.8 {base.page_link(bpos.0-10.0,bpos.1-13.0,20.0,26.0,"resident-battery",Destination::Page(BATTERY_PAGE));}
+        }
 
         // 时钟：两个字号沿同一路径交叉淡化，避免逐帧换字号
         let cpos = (lerp(pcx, hc, m), lerp(21.0, 23.0, m));
@@ -3911,6 +3926,12 @@ impl App {
         }
         let compact_alpha=1.0-smoothstep(0.0,0.22,p);
         let date_alpha=compact_alpha*clock_clearance;
+        if compact_alpha>0.8 {
+            if let Some(x)=layout.x[bar::CLOCK].filter(|_|clock_clearance>0.8) {
+                base.page_link(local_cx+x-layout.widths[bar::CLOCK]/2.0,0.0,layout.widths[bar::CLOCK],30.0,"resident-clock",Destination::Page(CALENDAR_PAGE));
+            }
+            if has_music {if let Some(x)=layout.x[bar::MUSIC] {base.page_link(local_cx+x-12.0,1.0,24.0,28.0,"resident-music",Destination::Page(MUSIC_PAGE));}}
+        }
         if date_alpha>0.004 {
             if let Some(day)=resident_day {
                 day.draw_after_clock(&base.faded(date_alpha),pcx,self.settings.show_clock.then_some(clock.as_str()));
@@ -3920,7 +3941,7 @@ impl App {
             if let (Some(at),Some(x))=(self.notification_bell(),layout.x[bar::BELL]){
                 let x=local_cx+x;paint::bell(&base.scaled(x,14.0,1.2),x,14.0,theme::WHITE,paint::bell_swing(self.t-at));
                 base.circle(x+4.0,9.5,2.0,Color32::from_rgb(255,72,72));
-                if self.module_on(MAIL_PAGE)&&base.hit(x-14.0,3.0,28.0,25.0,"bell-mail").clicked(){self.show_page(MAIL_PAGE);}
+                if self.module_on(MAIL_PAGE){base.page_link(x-14.0,3.0,28.0,25.0,"bell-mail",Destination::Page(MAIL_PAGE));}
             }
         }
         if compact_alpha>0.004 {
@@ -3932,24 +3953,19 @@ impl App {
             #[cfg(feature="sdk-js")]
             {
                 let theme = self.pinned_canvas_theme();
-                let mut clicked = None;
                 for (slot, display) in layout.pinned_slots().zip(&self.pinned_displays) {
                     if let Some(x) = layout.x[slot] {
-                        let (click, repaint_after, animating) =
+                        let (_, repaint_after, animating) =
                             display.draw(&c, local_cx + x, 15.0, layout.widths[slot], false, theme);
                         self.pinned_frame.include(repaint_after, animating);
-                        if click {
-                            clicked = Some(display.plugin.clone());
-                        }
                     }
-                }
-                if let Some(id) = clicked {
-                    self.show_status_page(&id);
                 }
             }
         }
         if self.pomo.running && compact_alpha>0.004 {
-            crate::focus_bar::draw(&base.faded(compact_alpha),local_cx+layout.x[bar::FOCUS].unwrap(),15.0,self.t,&self.pomo,self.phase_secs(self.pomo.phase),false);
+            let x=local_cx+layout.x[bar::FOCUS].unwrap();
+            crate::focus_bar::draw(&base.faded(compact_alpha),x,15.0,self.t,&self.pomo,self.phase_secs(self.pomo.phase),false);
+            if compact_alpha>0.8 {base.page_link(x-crate::focus_bar::WIDTH/2.0,0.0,crate::focus_bar::WIDTH,30.0,"resident-focus",Destination::Page(FOCUS_PAGE));}
         }
     }
 
@@ -4123,6 +4139,7 @@ impl App {
             // 详情页的标题带返回箭头，由页面自己画。
             BLUETOOTH_PAGE if self.wireless_focus.is_some() && self.wireless_devices.len()>1 => return,
             BLUETOOTH_PAGE => ("无线", "设备", theme::CYAN),
+            BATTERY_PAGE => ("本机", "电量", theme::SOFT_GREEN),
             _ => ("岛仔", "设置", theme::WHITE),
         };
         let wa = c.text(15.0, base, a, size::TITLE, W::Bold, theme::WHITE, H::Left);
@@ -4309,6 +4326,7 @@ impl App {
             PERFORMANCE_PAGE => self.page_performance(c),
             8 => self.page_weather(c,&actions,env,cmds),
             BLUETOOTH_PAGE => self.page_wireless(c,env),
+            BATTERY_PAGE => self.page_battery(c,env),
             CALENDAR_PAGE => self.page_calendar(c,header,env),
             _ => self.page_settings(c),
         }
