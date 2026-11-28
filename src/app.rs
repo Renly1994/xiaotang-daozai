@@ -1752,11 +1752,17 @@ impl App {
     /// v0.5.4：把系统音量与蓝牙设备状态同步进界面；只在连接/断开时提示一次。
     fn sync_device(&mut self, env: &Env) {
         if !(self.open&&self.page==BLUETOOTH_PAGE) {self.wireless_enter_at=None;}
-        self.track_wireless_changes(&env.bt);
         self.wireless_devices=env.bt.clone();
         if self.module_on(BLUETOOTH_PAGE) {
             self.wireless_devices.extend(env.receivers.iter().cloned());
+            #[cfg(all(windows,feature="sdk-js"))]
+            {
+                let now=std::time::Instant::now();
+                let instances=self.plugins.wireless_store().usb_instances_at(now);
+                crate::bt::plugin::merge(&mut self.wireless_devices,self.plugins.wireless_sources(),&instances,chrono::Utc::now(),now);
+            }
         }
+        self.track_wireless_changes(&self.wireless_devices.clone());
         if self.wireless_focus.as_ref().is_some_and(|id|!self.wireless_devices.iter().any(|d|&d.id==id)) {
             self.wireless_focus=None;
         }
@@ -2245,16 +2251,20 @@ impl App {
 
     fn resident_fit(&self) -> f32 {
         #[cfg(feature = "sdk-js")]
-        if !self.pinned_displays.is_empty() { return 1.0; }
+        if !self.pinned_displays.is_empty() && self.resident.target.width<=self.resident_limit() { return 1.0; }
         if self.island_lyrics_active() { return 1.0; }
         (self.resident_limit() / self.resident.target.width).min(1.0) * self.resident_squeeze()
     }
 
     pub fn requested_horizontal_width(&self) -> f32 {
+        let native=if !self.side()&&!self.wireless_resident().is_empty() {
+            (self.resident.target.width+32.0+self.unread_stack_len(true)).max(WIN_W)
+        } else {WIN_W};
         #[cfg(feature = "sdk-js")]
-        return self.pinned_horizontal_width;
+        let wanted=self.pinned_horizontal_width.max(native);
         #[cfg(not(feature = "sdk-js"))]
-        WIN_W
+        let wanted=native;
+        self.screen.map_or(wanted,|screen|wanted.min(screen.width().max(1.0)))
     }
 
     /// 0 = 药丸，1 = 完整面板（展开时可略超过 1）。
@@ -2413,9 +2423,14 @@ impl App {
         if let Some(extra)=self.weather_pill_extra(&ctx){ layout.widen(bar::WEATHER,extra); }
         if resident_day.is_none() && !self.settings.show_clock {layout.hide_clock();}
         let wireless=self.wireless_resident();
-        // 放不下整组时不挤压其他常驻项，整组隐藏。
+        // Selected wireless devices participate in the transparent-window width request.
         let wireless_w=self.wireless_bar_width();
-        if !wireless.is_empty()&&wireless_w<=self.resident_limit()-layout.width-12.0 {layout.append_bluetooth(wireless_w);}
+        if !wireless.is_empty(){
+            layout.append_bluetooth(wireless_w);
+            let needed=(layout.width+32.0+self.unread_stack_len(true))
+                .min(self.screen.map_or(f32::INFINITY,|screen|screen.width().max(1.0)));
+            if !self.side()&&needed>self.horizontal_width {ctx.request_repaint();}
+        }
         #[cfg(feature="sdk-js")]
         {
             let suppress = self.effective_minimal() || self.notice.is_some() || self.hud_alpha > 0.003
@@ -4392,6 +4407,7 @@ impl App {
             let plugin_start=std::time::Instant::now();
             let calendar_on=self.module_on(CALENDAR_PAGE);
             let quota_on=self.quota_active();
+            self.plugins.set_wireless_enabled(self.module_on(BLUETOOTH_PAGE));
             self.plugins.tick_features(todo_on,calendar_on,quota_on,&env.today);
             if let Some(minutes)=focus_finished {
                 self.plugins.focus_finished(chrono::Utc::now().timestamp(),minutes,todo_on,calendar_on,quota_on);

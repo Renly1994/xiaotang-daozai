@@ -227,6 +227,7 @@ impl Record {
             "tasks" => tasks_on && !package.manifest.is_retired_lunar_preview(),
             "calendar" => calendar_on,
             "quota" => quota_on,
+            "wireless" => self.source_grant().is_some(),
             "status" => {
                 !self.status_page_disabled
                     && (self.source_kind().is_none() || self.source_grant().is_some())

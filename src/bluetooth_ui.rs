@@ -186,7 +186,8 @@ fn reading(c:&Card,x:f32,cy:f32,size:f32,device:&Device,fx:Option<&WirelessFx>,t
             }
             let progress=if device.kind==DeviceKind::Receiver24G {1.0} else {anim::ease_out_cubic(enter)};
             let marker=if device.reading.as_ref().is_some_and(|reading| reading.approximate) {"≈"} else {""};
-            format!("{marker}{}%",(shown*progress).round() as u8)
+            let cached=if device.reading.as_ref().is_some_and(|r|r.source==BatterySource::Plugin)&&stale(device){"旧 "}else{""};
+            format!("{cached}{marker}{}%",(shown*progress).round() as u8)
         }
     };
     let weight=if device.battery.is_some()&&!stale(device) {W::Bold} else {W::Semibold};
@@ -211,13 +212,14 @@ fn reading_age(device:&Device)->Option<String> {
     let reading=device.reading.as_ref()?;
     let secs=match reading.source {
         BatterySource::Windows=>reading.observed.saturating_duration_since(reading.value_since).as_secs(),
-        BatterySource::Gatt|BatterySource::UsbReceiver=>reading.observed.elapsed().as_secs(),
+        BatterySource::Gatt|BatterySource::UsbReceiver|BatterySource::Plugin=>reading.observed.elapsed().as_secs(),
     };
     let age=duration_text(secs);
     Some(match reading.source {
         BatterySource::Windows if secs==0=>"刚读到".into(),
         BatterySource::Windows=>format!("读数已保持 {age}"),
         BatterySource::Gatt|BatterySource::UsbReceiver=>format!("{age}前读取"),
+        BatterySource::Plugin=>format!("{}{age}前读取",if stale(device){"缓存 · "}else{""}),
     })
 }
 
@@ -289,7 +291,7 @@ impl App {
         let Some(level)=device.battery else {return};
         self.enqueue_alert(crate::extras::Alert{
             source:crate::extras::AlertSource::Internal,title:"蓝牙设备".into(),
-            body:format!("{} · {event} · {level}%",device.name),page:BLUETOOTH_PAGE,at:self.t,duration:2.6,
+            body:format!("{} · {event} · {}{level}%",device.name,if device.reading.as_ref().is_some_and(|r|r.approximate){"≈"}else{""}),page:BLUETOOTH_PAGE,at:self.t,duration:2.6,
             bluetooth:Some((device.kind,true)),meeting:None,unread:None,
         },false);
     }
@@ -299,7 +301,9 @@ impl App {
         if !self.settings.show_bluetooth||!self.module_on(BLUETOOTH_PAGE){return vec![];}
         let custom=self.settings.bluetooth_resident_custom;
         let mut devices:Vec<_>=self.wireless_devices.iter().filter(|d|d.connected&&d.kind!=DeviceKind::Receiver24G)
-            .filter(|d|if custom {self.settings.bluetooth_pinned.contains(&d.id)} else {d.battery.is_some()}).cloned().collect();
+            .filter(|d|if custom {self.settings.bluetooth_pinned.contains(&d.id)} else {
+                d.battery.is_some()&&d.reading.as_ref().is_none_or(|r|r.source!=BatterySource::Plugin||!stale(d))
+            }).cloned().collect();
         devices.sort_by_key(|d|(stale(d),d.battery.unwrap_or(101)));
         devices.truncate(2);devices
     }
@@ -310,7 +314,9 @@ impl App {
     fn resident_slot(&self,device:&Device)->f32 {
         if !self.resident_value(device) {return 18.0;}
         let digits=device.battery.map_or(1,|b|b.to_string().len()) as f32;
-        18.0+3.0+if charging(device,self.wireless_fx.get(&device.id)){8.0}else{0.0}+digits*5.8+8.0
+        let prefix=if device.reading.as_ref().is_some_and(|r|r.source==BatterySource::Plugin)&&stale(device){14.0}else{0.0}
+            +if device.reading.as_ref().is_some_and(|r|r.approximate){8.0}else{0.0};
+        18.0+3.0+if charging(device,self.wireless_fx.get(&device.id)){8.0}else{0.0}+digits*5.8+8.0+prefix
     }
     /// 常驻条上无线设备一组的宽度（含设备之间 8 的间距）。
     pub(crate) fn wireless_bar_width(&self)->f32 {
@@ -328,7 +334,7 @@ impl App {
             let fx=self.wireless_fx.get(&device.id);
             ring(c,left+9.0,15.0,&spec,device,fx,self.t);
             if self.resident_value(device) {reading(c,left+21.0+(w-21.0)/2.0,15.5,9.5,device,fx,self.t,false,1.0,true,false);}
-            let tip=format!("{} · {}",device.name,device.battery.map_or("未上报电量".into(),|b|format!("{b}%")));
+            let tip=format!("{} · {}",device.name,device.battery.map_or("未上报电量".into(),|b|format!("{}{}{b}%",if stale(device){"缓存 "}else{""},if device.reading.as_ref().is_some_and(|r|r.approximate){"≈"}else{""})));
             let hit=c.hit(left-2.0,2.0,w+4.0,26.0,("wireless-resident",&device.id));
             if crate::quota_ui::bar_tooltip(hit,tip).clicked(){self.wireless_focus=Some(device.id.clone());self.show_page(BLUETOOTH_PAGE);}
             left+=w+8.0;
@@ -376,8 +382,8 @@ impl App {
             let x=start+index as f32*(col_w+gap);let cx=x+col_w/2.0;
             let linked=self.wireless_linked(device);
             let details=if device.kind==DeviceKind::Receiver24G&&device.reading.is_none() {format!("{}\n{RECEIVER_NOTE}",device.name)}
-                else if linked {format!("{}\n{LINKED} · {NO_BATTERY_NOTE}",device.name)} else {
-                device.reading.as_ref().map(|r|format!("{}\n{} · {}",device.name,r.source.label(),reading_age(device).unwrap_or_default())).unwrap_or_else(||format!("{}\n正在读取电量",device.name))
+                else if linked {format!("{}\n{LINKED} · {}",device.name,if device.id.starts_with("plugin:"){"等待插件更新电量"}else{NO_BATTERY_NOTE})} else {
+                device.reading.as_ref().map(|r|format!("{}\n{} · {}",device.name,r.label(),reading_age(device).unwrap_or_default())).unwrap_or_else(||format!("{}\n正在读取电量",device.name))
             };
             let tile_top=ring_y-r-6.0;
             let tile_bottom=name_y+8.0;
@@ -425,14 +431,23 @@ impl App {
         let mut mx=x;
         match charge_state(device,fx.as_ref()) {
             Some(true)=>{mx+=c.text(mx,140.0,"充电中",10.5,W::Semibold,color(device,fx.as_ref()),H::Left)+10.0;}
-            None if device.reading.is_some()&&!stale(device)=>{
+            None if device.reading.as_ref().is_some_and(|r|r.source!=BatterySource::Plugin)&&!stale(device)=>{
                 c.text(x,126.0,"充电状态未知",10.5,W::Regular,theme::DIM,H::Left);
             }
             _=>{}
         }
-        let source=device.reading.as_ref().map_or(if linked {NO_BATTERY_NOTE} else {"正在读取电量"},|r|r.source.label());
-        mx+=c.text(mx,140.0,source,10.5,W::Regular,theme::DIM,H::Left)+10.0;
-        if let Some(ago)=reading_age(device) {c.text(mx,140.0,&ago,10.5,W::Regular,theme::DIM,H::Left);}
+        let source=device.reading.as_ref().map_or_else(||if device.id.starts_with("plugin:"){"插件未提供有效电量".to_owned()} else if linked {NO_BATTERY_NOTE.to_owned()} else {"正在读取电量".to_owned()},|r|{
+            if r.source==BatterySource::Plugin&&charge_state(device,fx.as_ref()).is_none()&&!stale(device) {
+                format!("{} · 充电未知",r.label())
+            } else {r.label().to_owned()}
+        });
+        let source=c.fit(&source,10.5,W::Regular,(380.0-mx).max(24.0));
+        mx+=c.text(mx,140.0,&source,10.5,W::Regular,theme::DIM,H::Left)+10.0;
+        if let Some(ago)=reading_age(device) {
+            if device.reading.as_ref().is_some_and(|r|r.source==BatterySource::Plugin) {
+                c.text(x,126.0,&ago,10.5,W::Regular,theme::DIM,H::Left);
+            } else {c.text(mx,140.0,&ago,10.5,W::Regular,theme::DIM,H::Left);}
+        }
         if device.kind==DeviceKind::Receiver24G {return;}
         let automatic=(!self.settings.bluetooth_resident_custom).then(||self.wireless_resident());
         let selected=automatic.as_ref().map_or_else(

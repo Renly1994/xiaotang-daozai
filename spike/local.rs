@@ -33,6 +33,9 @@ mod market_state;
 mod source_https;
 #[path = "source_read.rs"]
 mod source_read;
+#[path = "wireless.rs"]
+mod wireless_output;
+pub(crate) use wireless_output::PluginWirelessDevice;
 #[path = "script_settings.rs"]
 mod script_settings;
 #[path = "package_data.rs"]
@@ -377,6 +380,8 @@ struct Output {
     #[serde(default)]
     quota: Option<PluginQuota>,
     #[serde(default)]
+    wireless: Option<Vec<PluginWirelessDevice>>,
+    #[serde(default)]
     status: Option<PluginStatus>,
     #[serde(default)]
     canvas: Option<Value>,
@@ -556,6 +561,10 @@ impl Manifest {
             return Err(fail("请核对插件 ID、作者、版本和 API 版本"));
         }
         capabilities::check(&m.runtime, &m.owner, &m.capabilities).map_err(|e| fail(&e))?;
+        if m.has_capability("wireless.devices") && (m.permissions.len() != 1
+            || !matches!(m.permissions.get(SOURCE_PERMISSION).and_then(Value::as_str), Some("file" | "loopback"))) {
+            return Err(fail("无线设备来源需要用户授权的 file 或 loopback 只读数据源"));
+        }
         if m.navigation_icon.is_some() && (m.owner != "status" || !m.has_capability("status.page")) {
             return Err(fail("navigationIcon 只适用于声明了 status.page 的独立功能插件"));
         }
@@ -1078,6 +1087,12 @@ impl Package {
                 return Err(fail("额度来源需要返回格式有效的 quota 或 null"));
             }
         }
+        if let Some(devices) = &output.wireless {
+            if !has(Surface::WirelessDevices) {
+                return Err(fail("此插件未声明 wireless.devices 能力"));
+            }
+            wireless_output::validate(devices, now).map_err(fail)?;
+        }
         if output.notice.as_ref().is_some_and(|notice| {
             !self.manifest.has_capability("notice") || !notice.valid()
         }) {
@@ -1093,6 +1108,7 @@ impl Package {
             output.status = None;
             output.quota = None;
             output.pinned = None;
+            output.wireless = None;
         }
         if has(Surface::TasksCard) {
             // 只有卡片一种输出时必须有字；同时有其他输出时，空字表示这次不显示卡片。
@@ -1161,6 +1177,7 @@ pub struct LocalPlugins {
     /// 上一轮开着的输出位置。模块重新打开时，让其他归属的插件立刻补算这个位置的内容。
     live: Vec<Surface>,
     quota: BTreeMap<String, PluginQuota>,
+    wireless_outputs: BTreeMap<String, Vec<PluginWirelessDevice>>,
     status: BTreeMap<String, std::result::Result<(u64, PluginStatus), StatusHealth>>,
     interactions: InteractionState,
     calendar_day: String,
@@ -1205,6 +1222,7 @@ impl LocalPlugins {
             markers: BTreeMap::new(),
             live: Vec::new(),
             quota: BTreeMap::new(),
+            wireless_outputs: BTreeMap::new(),
             status: BTreeMap::new(),
             interactions: InteractionState::default(),
             calendar_day: String::new(),
@@ -1459,6 +1477,7 @@ impl LocalPlugins {
         self.cards.remove(id);
         self.markers.remove(id);
         self.quota.remove(id);
+        self.wireless_outputs.remove(id);
         self.status.remove(id);
         self.interactions.forget(id);
         self.pinned.set_output(id, None);
@@ -1726,6 +1745,7 @@ impl LocalPlugins {
             "tasks" => self.cards.clear(),
             "calendar" => self.markers.clear(),
             "quota" => self.quota.clear(),
+            "wireless" => self.wireless_outputs.clear(),
             "status" => self.status.clear(),
             _ => {}
         }
@@ -1745,6 +1765,20 @@ impl LocalPlugins {
     #[cfg(test)]
     fn tick(&mut self, tasks_on: bool, calendar_on: bool, today: &str) {
         self.tick_features(tasks_on, calendar_on, false, today);
+    }
+
+    /// Mirrors the native wireless module. It never grants an external source.
+    pub(crate) fn set_wireless_enabled(&mut self, enabled: bool) {
+        let was_on=self.live.contains(&Surface::WirelessDevices);
+        if !enabled {
+            self.pause_owner("wireless");
+            self.live.retain(|surface| *surface!=Surface::WirelessDevices);
+        } else if !was_on {
+            self.live.push(Surface::WirelessDevices);
+            let records=&self.records;
+            self.next.retain(|id,_| !records.get(id).and_then(|record|record.package.as_ref())
+                .is_some_and(|package|package.manifest.has_surface(Surface::WirelessDevices)));
+        }
     }
 
     pub(crate) fn tick_features(&mut self, tasks_on: bool, calendar_on: bool, quota_on: bool, today: &str) {
@@ -1809,7 +1843,7 @@ impl LocalPlugins {
                     Ok(Some(output))
                 });
             match result {
-                Ok(Some(Output { card, marker, quota, status, notice, next_refresh_at, pinned, .. })) => {
+                Ok(Some(Output { card, marker, quota, wireless, status, notice, next_refresh_at, pinned, .. })) => {
                     self.interactions.forms.remove(&id);
                     #[cfg(windows)]
                     if let Some(notice) = notice {
@@ -1840,6 +1874,10 @@ impl LocalPlugins {
                         // 模块关着时这一位置的结果直接丢掉，重新打开时会补算。
                         let shown = surface == Surface::StatusPage || live.contains(&surface);
                         match surface {
+                            Surface::WirelessDevices => match &wireless {
+                                Some(devices) if shown => { self.wireless_outputs.insert(id.clone(),devices.clone()); }
+                                _ => { self.wireless_outputs.remove(&id); }
+                            },
                             Surface::IslandPinned => self.pinned.set_output(&id, pinned.as_ref()),
                             Surface::StatusPage => match &status {
                                 Some(status) => {
@@ -1876,6 +1914,7 @@ impl LocalPlugins {
                     }
                 }
                 Ok(None) => {
+                    self.wireless_outputs.remove(&id);
                     self.errors.remove(&id);
                     self.interactions.forms.remove(&id);
                     self.pinned.set_output(&id, None);
@@ -1885,6 +1924,7 @@ impl LocalPlugins {
                     self.cards.remove(&id);
                     self.markers.remove(&id);
                     self.quota.remove(&id);
+                    self.wireless_outputs.remove(&id);
                     self.status.remove(&id);
                     self.interactions.forms.remove(&id);
                     self.pinned.set_output(&id, None);
@@ -1905,6 +1945,8 @@ impl LocalPlugins {
                     && r.enabled
                     && r.package.as_ref().is_some_and(|pkg| {
                         r.owner_on(tasks_on, calendar_on, quota_on)
+                            && (!pkg.manifest.has_surface(Surface::WirelessDevices)
+                                || self.live.contains(&Surface::WirelessDevices))
                             && (self.interactions.has_call(id) || self.next.get(*id).is_none_or(|t| {
                                 *t <= now && pkg.manifest.has_capability("timer")
                             }))
@@ -2017,6 +2059,7 @@ impl LocalPlugins {
                     });
                 }
                 Err(_) => {
+                    self.wireless_outputs.remove(&id);
                     self.status.remove(&id);
                     self.errors.insert(id, "暂时无法启动插件刷新，请稍后重试".into());
                 }
@@ -2049,6 +2092,15 @@ impl LocalPlugins {
             let record = self.records.get(id).filter(|record| record.enabled)?;
             let package = record.package.as_ref()?;
             Some((id.as_str(), package.manifest.name.as_str(), quota))
+        })
+    }
+
+    pub(crate) fn wireless_sources(&self) -> impl Iterator<Item = (&str, &str, &[PluginWirelessDevice])> {
+        self.wireless_outputs.iter().filter_map(|(id,devices)| {
+            if !self.live.contains(&Surface::WirelessDevices) { return None; }
+            let record=self.records.get(id).filter(|record|record.enabled && record.source_grant().is_some())?;
+            let package=record.package.as_ref().filter(|package|package.manifest.has_surface(Surface::WirelessDevices))?;
+            Some((id.as_str(),package.manifest.name.as_str(),devices.as_slice()))
         })
     }
 
@@ -2181,6 +2233,9 @@ mod quota_source_tests;
 #[cfg(all(test, windows))]
 #[path = "status_source_tests.rs"]
 mod status_source_tests;
+#[cfg(all(test, windows))]
+#[path = "wireless_source_tests.rs"]
+pub(crate) mod wireless_source_tests;
 #[cfg(test)]
 #[path = "script_input_tests.rs"]
 mod script_input_tests;

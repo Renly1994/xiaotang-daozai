@@ -196,33 +196,47 @@ fn valid_text(text: &str, max: usize) -> bool {
 
 /// 供 USB 枚举线程读取当前启用的插件数据。安装状态由集市保存。
 #[derive(Clone, Default)]
-pub struct Store(
-    Arc<Mutex<Option<Arc<Package>>>>,
-    #[cfg(windows)] Option<super::halo_component::Component>,
-);
+pub struct Store {
+    package: Arc<Mutex<Option<Arc<Package>>>>,
+    #[cfg(windows)] component: Option<super::halo_component::Component>,
+    usb: Arc<Mutex<Option<(std::time::Instant, Vec<String>)>>>,
+}
 
 impl Store {
     #[cfg(windows)]
     pub(crate) fn with_component(mut self, component: super::halo_component::Component) -> Self {
-        self.1 = Some(component);
+        self.component = Some(component);
         self
     }
 
     #[cfg(windows)]
     pub(super) fn component(&self) -> Option<&super::halo_component::Component> {
-        self.1.as_ref()
+        self.component.as_ref()
     }
 
     #[cfg(any(test, all(windows, feature = "sdk-js")))]
     pub(crate) fn set(&self, package: Option<Package>) {
-        *self.0.lock().unwrap_or_else(|error| error.into_inner()) = package.map(Arc::new);
+        *self.package.lock().unwrap_or_else(|error| error.into_inner()) = package.map(Arc::new);
     }
 
     pub(crate) fn package(&self) -> Option<Arc<Package>> {
-        self.0
+        self.package
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
+    }
+
+    /// Reuse the USB worker's complete inventory; plugins do not enumerate hardware on UI frames.
+    pub(crate) fn set_usb_instances(&self, instances: Vec<String>, now: std::time::Instant) {
+        *self.usb.lock().unwrap_or_else(|error|error.into_inner())=Some((now,instances));
+    }
+    pub(crate) fn usb_instances_at(&self, now: std::time::Instant)->Vec<String> {
+        self.usb.lock().unwrap_or_else(|error|error.into_inner()).as_ref()
+            .filter(|(at,_)|now.saturating_duration_since(*at)<=std::time::Duration::from_secs(6))
+            .map(|(_,instances)|instances.clone()).unwrap_or_default()
+    }
+    pub(crate) fn clear_usb_instances(&self) {
+        *self.usb.lock().unwrap_or_else(|error|error.into_inner())=None;
     }
 }
 

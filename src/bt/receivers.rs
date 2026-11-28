@@ -396,6 +396,7 @@ fn run_scans(
             let found = scan();
             let scanned = found.is_some();
             if let Some(found) = found {
+                store.set_usb_instances(found.clone(),now);
                 instances = Some(found);
             }
             // 启停和更新按最新识别表重算，刚好枚举失败时也能移除已停用的扩展项。
@@ -471,6 +472,7 @@ fn run_scans(
             next_scan = Instant::now();
         }
     }
+    store.clear_usb_instances();
 }
 
 #[cfg(test)]

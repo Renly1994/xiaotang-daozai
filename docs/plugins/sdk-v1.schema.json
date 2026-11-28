@@ -105,6 +105,7 @@
           "navigation.shortcuts",
           "mail.view",
           "wireless.receivers",
+          "wireless.devices",
           "storage",
           "timer",
           "action",
@@ -373,6 +374,28 @@
   ],
   "additionalProperties": false,
   "$defs": {
+    "wirelessDeviceOutput": {
+      "description": "实验宿主扩展：wireless.devices 输出中的单台设备。宿主另核对来源时间及实际 USB 存在。",
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "name", "kind", "vendorId", "productId"],
+      "properties": {
+        "id": {"type":"string","minLength":1,"maxLength":128},
+        "name": {"type":"string","minLength":1,"maxLength":80},
+        "kind": {"enum":["mouse","keyboard","gamepad","headset"]},
+        "vendorId": {"type":"integer","minimum":1,"maximum":65535},
+        "productId": {"type":"integer","minimum":1,"maximum":65535},
+        "usbInstance": {"type":["string","null"],"maxLength":512},
+        "percent": {"type":["integer","null"],"minimum":0,"maximum":100},
+        "charging": {"type":["boolean","null"]},
+        "approximate": {"type":"boolean","default":false},
+        "online": {"type":"boolean","default":false},
+        "fresh": {"type":"boolean","default":false},
+        "measuredAtUtc": {"type":["string","null"],"format":"date-time","maxLength":64},
+        "connectionCheckedAtUtc": {"type":["string","null"],"format":"date-time","maxLength":64},
+        "chargingCheckedAtUtc": {"type":["string","null"],"format":"date-time","maxLength":64},
+        "freshForSeconds": {"type":"integer","minimum":30,"maximum":180,"default":90}
+      }
+    },
     "fontPackEntry": {
       "type": "object", "required": ["fonts"], "additionalProperties": false,
       "properties": {
@@ -1000,7 +1023,6 @@
       "if": {
         "anyOf": [
           {"properties": {"id": {"const": "daozai.wireless-receivers"}}},
-          {"properties": {"owner": {"const": "wireless"}}},
           {"properties": {"capabilities": {"contains": {"const": "wireless.receivers"}}}}
         ]
       },
@@ -1019,6 +1041,22 @@
         },
         "not": {"anyOf": [{"required": ["assets"]}, {"required": ["actions"]}]}
       }
+    },
+    {
+      "if": {"properties": {"capabilities": {"contains": {"const": "wireless.devices"}}}},
+      "then": {
+        "required": ["entry", "settings"],
+        "properties": {
+          "runtime": {"const":"js"}, "owner": {"const":"wireless"},
+          "entry": {"pattern":"^(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\\.js$"},
+          "capabilities": {"contains":{"const":"wireless.devices"},"items":{"enum":["wireless.devices","timer","settings","storage"]}},
+          "permissions": {"required":["source.read"],"properties":{"source.read":{"enum":["file","loopback"]}},"additionalProperties":false}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"runtime":{"const":"js"},"owner":{"const":"wireless"}}},
+      "then": {"properties":{"capabilities":{"contains":{"const":"wireless.devices"}}}}
     },
     {
       "if": {"properties": {"capabilities": {"contains": {"const": "status.page"}}}},

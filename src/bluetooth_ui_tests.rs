@@ -22,6 +22,162 @@ fn texts(h:&H)->Vec<String> {h.shapes.iter().filter_map(|s|if let egui::Shape::T
 fn open_page(h:&mut H) {h.app.show_page(BLUETOOTH_PAGE);h.hover(H::local(200.0,100.0),1.0);}
 fn set_level(d:&mut Device,level:u8) {d.battery=Some(level);d.reading.as_mut().unwrap().percent=level;}
 
+#[cfg(all(windows,feature="sdk-js"))]
+fn plugin_fixture(h:&mut H,cached:bool) {
+    let now=chrono::Utc::now().to_rfc3339();
+    crate::sdk_spike::local::wireless_source_tests::ui_provider(&mut h.app.plugins,serde_json::json!([
+        {"id":"controller-1","name":"Test controller","kind":"gamepad","vendorId":1,"productId":2,
+        "percent":83,"fresh":!cached,"online":true,"approximate":true,
+        "measuredAtUtc":now,"connectionCheckedAtUtc":now}
+    ])).unwrap();
+}
+
+#[test]
+#[cfg(all(windows,feature="sdk-js"))]
+fn plugin_wireless_uses_native_page_source_cache_and_custom_resident() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.bluetooth_notifications=false;h.app.settings.bluetooth_battery_notifications=false;
+    plugin_fixture(&mut h,false);open_page(&mut h);
+    assert_eq!(h.app.wireless_devices[0].id,"plugin:test.battery:controller-1");
+    assert!(texts(&h).iter().any(|text|text=="≈83%"));
+    assert!(texts(&h).iter().any(|text|text.contains("Test external source")));
+    h.app.settings.bluetooth_resident_custom=true;h.app.settings.bluetooth_pinned=vec![h.app.wireless_devices[0].id.clone()];
+    plugin_fixture(&mut h,true);h.frame(vec![]);
+    assert!(texts(&h).iter().any(|text|text=="旧 ≈83%"));
+    assert!(texts(&h).iter().any(|text|text.starts_with("缓存 · ")));
+    assert_eq!(h.app.wireless_resident().len(),1,"explicit selections retain marked cache while connected");
+    h.app.settings.bluetooth_resident_custom=false;
+    assert!(h.app.wireless_resident().is_empty(),"automatic selection omits cached external values");
+    crate::sdk_spike::local::wireless_source_tests::ui_provider(&mut h.app.plugins,serde_json::json!([])).unwrap();h.frame(vec![]);
+    assert!(h.app.wireless_devices.is_empty());assert!(h.app.wireless_resident().is_empty());
+}
+
+#[cfg(all(windows,feature="sdk-js"))]
+fn congested_wireless_fixture(cached:bool)->H {
+    let mut h=H::new();
+    h.app.settings.visible_pages.fill(true);
+    h.app.settings.show_clock=true;
+    h.app.settings.clock_period=2;
+    h.app.settings.clock_seconds=true;
+    h.app.settings.show_weather=true;
+    h.app.settings.show_performance=true;
+    h.app.settings.performance_bar=crate::performance::BarStyle::Gauges;
+    h.app.settings.pet=true;
+    h.app.settings.browser_minimal=true;
+    h.app.settings.bluetooth_notifications=false;
+    h.app.settings.bluetooth_battery_notifications=false;
+    h.app.settings.bluetooth_resident_custom=true;
+    h.app.settings.bluetooth_resident_style=0;
+    h.app.settings.show_bluetooth=true;
+    h.app.water.remind=true;
+    h.app.settings.sit_remind=true;
+    h.app.health_pending=[true,true];
+    h.app.weather.snapshot=Some(crate::weather::Snapshot{
+        place:"深圳".into(),temp:16.0,day:true,at:chrono::Utc::now().timestamp(),..Default::default()
+    });
+    h.app.quota.config.enabled=true;
+    h.app.quota.config.compact=true;
+    h.quota_accounts(2);
+    h.app.quota.config.accounts[1].provider=crate::quota::Provider::DeepSeek;
+    h.app.quota_event(crate::quota::Event{id:"preview-1".into(),result:Ok(crate::quota::parse(
+        crate::quota::Provider::DeepSeek,&serde_json::json!({"is_available":true,"balance_infos":[{
+            "currency":"CNY","total_balance":"3.8","granted_balance":"0","topped_up_balance":"3.8"
+        }]})).unwrap())});
+    let now=chrono::Utc::now().to_rfc3339();
+    let records:Vec<_>=[("mouse","Test Wireless Mouse","mouse",84),
+        ("keyboard","Test Wireless Keyboard","keyboard",97)]
+        .into_iter().map(|(id,name,kind,percent)|{
+            serde_json::json!({"id":id,"name":name,"kind":kind,"vendorId":1,"productId":2,
+                "percent":percent,"online":true,"fresh":!cached,"measuredAtUtc":now,"connectionCheckedAtUtc":now})
+        }).collect();
+    crate::sdk_spike::local::wireless_source_tests::ui_provider(&mut h.app.plugins,serde_json::json!(records)).unwrap();
+    h.app.settings.bluetooth_pinned=vec!["plugin:test.battery:mouse".into(),"plugin:test.battery:keyboard".into()];
+    h
+}
+
+fn congested_wireless_frame(h:&mut H,width:f32,monitor_width:f32)->Rect {
+    congested_wireless_frame_at_browser(h,width,monitor_width,false)
+}
+
+fn congested_wireless_frame_at_browser(h:&mut H,width:f32,monitor_width:f32,browser_at_top:bool)->Rect {
+    h.t+=1.0/60.0;
+    let screen=Rect::from_min_size(egui::pos2((width-monitor_width)/2.0,0.0),egui::vec2(monitor_width,1080.0));
+    let env=crate::app::Env{t:h.t,clock:"21:48:00".into(),today:"2026-11-25".into(),date:"11月25日 周三".into(),
+        bt_ready:true,receivers:h.receivers.clone(),screen:Some(screen),browser_at_top:Some(browser_at_top),..Default::default()};
+    let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(width+320.0,WIN_H))),time:Some(h.t),focused:true,..Default::default()};
+    let app=&mut h.app;
+    let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{
+        app.frame(ui,Rect::from_min_size(ui.max_rect().min,egui::vec2(width,WIN_H)),&env);
+    });});
+    h.shapes=output.shapes;
+    screen
+}
+
+#[test]
+#[cfg(all(windows,feature="sdk-js"))]
+fn wireless_selected_devices_survive_busy_resident_bar_and_cached_labels() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for cached in [false,true] {
+        let mut h=congested_wireless_fixture(cached);
+        let mut width=WIN_W;
+        let mut screen=Rect::NOTHING;
+        for _ in 0..90 {
+            screen=congested_wireless_frame(&mut h,width,1920.0);
+            width=((h.app.requested_horizontal_width().max(width)/64.0).ceil()*64.0).min(1920.0);
+        }
+        assert!(width>WIN_W,"native wireless selections must request the extra window room they need");
+        assert!(h.app.resident.target.x[crate::bar_layout::BLUETOOTH].is_some(),"a crowded bar must not silently discard the selected device group");
+        for level in [84,97] {
+            let expected=format!("{}{level}%",if cached{"旧 "}else{""});
+            assert!(h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(text)
+                if text.galley.text()==expected&&shape.clip_rect.contains(text.visual_bounding_rect().center())&&screen.contains(text.visual_bounding_rect().center()))),"selected battery must be visible: {expected}");
+        }
+        let layout=&h.app.resident.target;
+        let mut boxes:Vec<_>=layout.x.iter().enumerate().filter_map(|(i,x)|x.map(|x|(x-layout.widths[i]/2.0,x+layout.widths[i]/2.0))).collect();
+        boxes.sort_by(|a,b|a.0.total_cmp(&b.0));
+        assert!(boxes.windows(2).all(|pair|pair[1].0-pair[0].1>=6.9),"wireless, quota, weather and performance slots cannot overlap");
+    }
+}
+
+#[test]
+#[cfg(all(windows,feature="sdk-js"))]
+fn wireless_selected_devices_fit_a_narrow_monitor_without_being_removed() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=congested_wireless_fixture(true);
+    h.app.settings.performance_bar=crate::performance::BarStyle::Dashboard;
+    let mut screen=Rect::NOTHING;
+    for _ in 0..90 {screen=congested_wireless_frame(&mut h,WIN_W,WIN_W);}
+    assert!(h.app.resident.target.width>h.app.resident_limit(),"fixture must exercise the constrained layout");
+    assert!(h.app.requested_horizontal_width()<=WIN_W,"transparent-window expansion stays within the monitor");
+    assert!(h.app.resident.target.x[crate::bar_layout::BLUETOOTH].is_some());
+    for expected in ["旧 84%","旧 97%"] {
+        assert!(h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(text)
+            if text.galley.text()==expected&&shape.clip_rect.contains(text.visual_bounding_rect().center())&&screen.contains(text.visual_bounding_rect().center()))),"fitted selected device must remain visible: {expected}");
+    }
+}
+
+#[test]
+#[cfg(all(windows,feature="sdk-js"))]
+fn wireless_resident_respects_browser_collapse_and_returns_afterward() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=congested_wireless_fixture(false);
+    h.app.health_pending=[false,false];
+    h.app.water.remind=false;
+    h.app.settings.sit_remind=false;
+    let pins=h.app.settings.bluetooth_pinned.clone();
+    for _ in 0..90 {congested_wireless_frame_at_browser(&mut h,960.0,1920.0,true);}
+    assert!(h.app.settings.browser_minimal,"the user's browser preference is preserved");
+    assert!(h.app.effective_minimal(),"a browser at the top still activates the collapsed strip");
+    assert!(!texts(&h).iter().any(|text|text=="84%"||text=="97%"),"the collapsed strip does not draw resident batteries");
+    for _ in 0..90 {congested_wireless_frame_at_browser(&mut h,960.0,1920.0,false);}
+    assert!(!h.app.effective_minimal());
+    assert_eq!(h.app.settings.bluetooth_pinned,pins,"collapse cannot clear selected devices");
+    for expected in ["84%","97%"] {
+        assert!(texts(&h).iter().any(|text|text==expected),"the selected battery returns after leaving the browser: {expected}");
+    }
+}
+
+
 #[test]
 fn wireless_custom_resident_persists_from_detail_toggle(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.bt=fixture();h.app.settings.bluetooth_notifications=false;

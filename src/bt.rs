@@ -1,5 +1,7 @@
 //! 蓝牙设备连接与多来源电量监控。
 mod state;
+#[cfg(feature="sdk-js")]
+pub(crate) mod plugin;
 pub use state::{Device,DeviceKind,BatterySource,BatteryReading,FRESH_FOR};
 
 mod bas;

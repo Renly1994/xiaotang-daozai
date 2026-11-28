@@ -16,9 +16,9 @@ impl DeviceKind {
 }
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
-pub enum BatterySource {Windows,Gatt,UsbReceiver}
+pub enum BatterySource {Windows,Gatt,UsbReceiver,Plugin}
 impl BatterySource {
-    pub fn label(self)->&'static str {match self {Self::Windows=>"Windows 设备电量",Self::Gatt=>"蓝牙电池服务",Self::UsbReceiver=>"2.4G 接收器"}}
+    pub fn label(self)->&'static str {match self {Self::Windows=>"Windows 设备电量",Self::Gatt=>"蓝牙电池服务",Self::UsbReceiver=>"2.4G 接收器",Self::Plugin=>"插件设备电量"}}
 }
 
 #[derive(Clone,Debug,PartialEq,Eq)]
@@ -32,11 +32,17 @@ pub struct BatteryReading {
     /// None 表示来源没有上报充电状态。
     pub charging:Option<bool>,
     pub approximate:bool,
+    /// Explicit source freshness; a recent observation may still be a cached value.
+    pub fresh:bool,
+    pub fresh_for:Duration,
+    /// The host supplies the installed plugin's name, never a source-provided label.
+    pub plugin_label:Option<String>,
 }
 impl BatteryReading {
     pub(crate) fn new(percent:u8,source:BatterySource,observed:Instant,charging:Option<bool>)->Self {
-        Self{percent,source,observed,value_since:observed,charging,approximate:false}
+        Self{percent,source,observed,value_since:observed,charging,approximate:false,fresh:true,fresh_for:FRESH_FOR,plugin_label:None}
     }
+    pub fn label(&self)->&str {self.plugin_label.as_deref().unwrap_or_else(||self.source.label())}
 }
 
 #[derive(Clone,Debug,PartialEq,Eq)]
@@ -53,8 +59,8 @@ impl Default for Device {
     fn default()->Self {Self{id:String::new(),name:String::new(),battery:None,kind:DeviceKind::Other,reading:None,charging_only:None,connected:true}}
 }
 impl Device {
-    pub fn stale_at(&self,now:Instant)->bool {!self.connected||self.reading.as_ref().is_some_and(|r|now.saturating_duration_since(r.observed)>FRESH_FOR)}
-    pub fn summary(&self)->String {match self.battery.filter(|_|!self.stale_at(Instant::now())) {Some(b)=>format!("{} · 电量 {b}%",self.name),None=>self.name.clone()}}
+    pub fn stale_at(&self,now:Instant)->bool {!self.connected||self.reading.as_ref().is_some_and(|r|!r.fresh||now.saturating_duration_since(r.observed)>r.fresh_for)}
+    pub fn summary(&self)->String {match self.battery.filter(|_|!self.stale_at(Instant::now())) {Some(b)=>format!("{} · 电量 {}{b}%",self.name,if self.reading.as_ref().is_some_and(|r|r.approximate){"约 "}else{""}),None=>self.name.clone()}}
 }
 
 #[derive(Clone,Debug)]
@@ -129,7 +135,7 @@ impl State {
     pub fn devices(&self,now:Instant)->Vec<Device> {
         let mut devices:Vec<_>=self.entries.iter().map(|e|{
             let reading=e.readings.iter().filter(|r|r.active).map(|r|&r.value).max_by_key(|r|{
-                let fresh=now.saturating_duration_since(r.observed)<=FRESH_FOR;
+                let fresh=r.fresh&&now.saturating_duration_since(r.observed)<=r.fresh_for;
                 (fresh,fresh&&r.source==BatterySource::Gatt,r.observed)
             }).cloned();
             Device{id:e.key.clone(),name:e.name.clone(),kind:e.kind,battery:reading.as_ref().map(|r|r.percent),reading,charging_only:None,connected:e.connected}
