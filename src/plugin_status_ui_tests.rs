@@ -245,7 +245,7 @@ fn plugin_page_order_drag_persists_across_restart_and_visibility() {
     h.app.settings_tab = crate::extras::SETTINGS_TAB_PAGES;
     h.app.open_settings();
 
-    let size = egui::vec2(690.0, 1500.0);
+    let size = egui::vec2(690.0, 1700.0);
     for _ in 0..2 {
         render_settings(&mut h, size, vec![]);
     }
@@ -278,7 +278,7 @@ fn plugin_page_order_drag_persists_across_restart_and_visibility() {
     let assert_sidebar_sorted = |output: &egui::FullOutput| {
         let music = sidebar_y(output, "音乐").expect("左栏应显示音乐");
         let plugin = sidebar_y(output, name).expect("左栏应显示已启用的插件");
-        let focus = sidebar_y(output, "专注与健康").expect("左栏应显示专注与健康");
+        let focus = sidebar_y(output, "专注").expect("左栏应显示专注与健康");
         assert!(music < plugin && plugin < focus, "左栏应与页面管理使用同一顺序");
     };
     let original = render_settings(&mut h, size, vec![]);
@@ -322,7 +322,7 @@ fn plugin_page_order_drag_persists_across_restart_and_visibility() {
     h.app.open_settings();
     assert_sidebar_sorted(&render_settings(&mut h, size, vec![]));
     h.app.plugins.set_status_page_enabled(id, false).unwrap();
-    assert_sidebar_sorted(&render_settings(&mut h, size, vec![]));
+    assert!(sidebar_y(&render_settings(&mut h,size,vec![]),name).is_none(),"关闭后台会隐藏入口，但保留排序");
     h.app.plugins.enable(id, false).unwrap();
     assert!(sidebar_y(&render_settings(&mut h, size, vec![]), name).is_none());
     h.app.plugins.enable(id, true).unwrap();
@@ -359,27 +359,16 @@ fn plugin_page_management_controls_fit_one_row_at_minimum_width() {
         }).unwrap_or_else(|| panic!("页面管理没有完整显示 {labels:?}"))
     };
     let title = text_rect(&[name], None);
-    let open = text_rect(&["打开"], Some(title.center().y));
-    let settings = text_rect(&["设置 ›", "设置"], Some(open.center().y));
-    let switch = output.shapes.iter().find_map(|shape| match &shape.shape {
-        egui::Shape::Rect(fill) => {
-            let rect = fill.rect;
-            ((rect.size() - egui::vec2(crate::extras::SETTINGS_SWITCH_W, 20.0)).length() < 0.2 && rect.left() > title.right()
-                && (rect.center().y - open.center().y).abs() < 5.0
-                && shape.clip_rect.contains_rect(rect)).then_some(rect)
-        }
-        _ => None,
-    }).expect("插件开关应与按钮同行且完整可见");
-    assert!((settings.center().y - open.center().y).abs() < 5.0, "打开和设置应同行");
-    assert!(title.right() < open.left() && open.right() < switch.left() && switch.right() < settings.left());
-    assert!(settings.right() < size.x - 22.0, "操作控件应位于页面管理内容区内");
-    if let Some(hide) = output.shapes.iter().find_map(|shape| match &shape.shape {
-        egui::Shape::Text(text) if text.galley.text() == "关闭并隐藏" => Some(text.visual_bounding_rect()),
-        _ => None,
-    }) {
-        assert!((hide.center().y - open.center().y).abs() < 5.0, "隐藏按钮应与开关同行");
-        assert!(switch.right() < hide.left() && hide.right() < settings.left());
-    }
+    let settings=text_rect(&["设置 ›","设置"],Some(title.center().y));
+    let switch=output.shapes.iter().find_map(|shape|match &shape.shape {
+        egui::Shape::Rect(fill) if (fill.rect.size()-egui::vec2(crate::extras::SETTINGS_SWITCH_W,20.)).length()<0.2
+            &&fill.rect.left()>title.right()&&(fill.rect.center().y-settings.center().y).abs()<5.
+            &&shape.clip_rect.contains_rect(fill.rect)=>Some(fill.rect),_=>None,
+    }).expect("插件后台开关与设置同行且完整可见");
+    assert!(title.right()<switch.left()&&switch.right()+28.<settings.left(),"为图钉和眼睛保留独立空间");
+    assert!(settings.right()<size.x-22.);
+    assert!(!output.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(t) if ["打开","关闭并隐藏","显示入口","隐藏入口"].contains(&t.galley.text()))));
+
 }
 
 #[test]

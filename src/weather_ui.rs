@@ -1,4 +1,5 @@
 //! 天气页与天气设置：实况、七日预报与日照时段，图标全部用面板矢量绘制。
+use crate::app::resident_navigation::Destination;
 use crate::app::{App, Cmd, Env, WEATHER_PAGE, WEATHER_H};
 use crate::paint::{self, Card, H};
 use crate::theme::{self, W};
@@ -879,18 +880,15 @@ impl App {
         let width = layout.widths[crate::bar_layout::WEATHER];
         let tip = format!("{} · {}\n更新于 {} · {}", snapshot.place, snapshot.description(), weather::clock(snapshot.at),self.weather_source.displayed.name());
         // 用 bar_tooltip：常驻胶囊上的提示不能用 on_hover_text，悬浮层会盖住指针、抢走点击。
-        if crate::quota_ui::bar_tooltip(c.hit(x - width / 2.0, 1.0, width, 28.0, "weather-pill"), tip).clicked() {
-            self.weather.solar_open=false;
-            self.show_page(WEATHER_PAGE);
-        }
+        let _=crate::quota_ui::bar_tooltip(c.page_link(x - width / 2.0, 1.0, width, 28.0, "weather-pill", Destination::Page(WEATHER_PAGE)), tip);
     }
 
     pub(crate) fn draw_side_weather(&mut self,c:&Card,cx:f32,cy:f32) {
         let Some(snapshot)=self.weather_pill() else{return;};
         self.paint_side_weather(c,cx,cy,snapshot);
         let tip=format!("{} · {}\n更新于 {} · {}",snapshot.place,snapshot.description(),weather::clock(snapshot.at),self.weather_source.displayed.name());
-        let response=crate::quota_ui::bar_tooltip(c.hit(cx-17.0,cy-19.0,34.0,38.0,"weather-side"),tip);
-        if response.clicked(){self.weather.solar_open=false;self.show_page(WEATHER_PAGE);}
+        let response=crate::quota_ui::bar_tooltip(c.page_link(cx-17.0,cy-19.0,34.0,38.0,"weather-side",Destination::Page(WEATHER_PAGE)),tip);
+        let _=response;
     }
 
     pub(crate) fn paint_side_weather(&self,c:&Card,cx:f32,cy:f32,snapshot:&weather::Snapshot) {

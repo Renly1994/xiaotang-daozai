@@ -1,5 +1,6 @@
 //! 无线设备电量环：展开页、详情、常驻条和侧边岛。
 //! 动效只在展开时出现（充电流光、低电量呼吸、一次性事件）；常驻条保持静止，不抢注意力。
+use crate::app::resident_navigation::Destination;
 use crate::{anim,app::{App,Env,BLUETOOTH_PAGE},bt::{BatterySource,Device,DeviceKind},paint::{self,Card,H},theme::{self,W},bar_layout};
 use eframe::egui::Color32;
 use std::f32::consts::{PI,TAU};
@@ -329,8 +330,8 @@ impl App {
             ring(c,left+9.0,15.0,&spec,device,fx,self.t);
             if self.resident_value(device) {reading(c,left+21.0+(w-21.0)/2.0,15.5,9.5,device,fx,self.t,false,1.0,true,false);}
             let tip=format!("{} · {}",device.name,device.battery.map_or("未上报电量".into(),|b|format!("{b}%")));
-            let hit=c.hit(left-2.0,2.0,w+4.0,26.0,("wireless-resident",&device.id));
-            if crate::quota_ui::bar_tooltip(hit,tip).clicked(){self.wireless_focus=Some(device.id.clone());self.show_page(BLUETOOTH_PAGE);}
+            let hit=c.page_link(left-2.0,2.0,w+4.0,26.0,("wireless-resident",&device.id),Destination::Wireless(device.id.clone()));
+            let _=crate::quota_ui::bar_tooltip(hit,tip);
             left+=w+8.0;
         }
     }
@@ -342,8 +343,8 @@ impl App {
         let fx=self.wireless_fx.get(&device.id);
         ring(c,cx,ring_y,&spec,&device,fx,self.t);
         if value {reading(c,cx,y+14.0,8.5,&device,fx,self.t,false,1.0,true,false);}
-        let hit=c.hit(cx-17.0,y-18.0,34.0,37.0,"wireless-side");
-        if crate::quota_ui::bar_tooltip(hit,device.name.clone()).clicked(){self.wireless_focus=Some(device.id.clone());self.show_page(BLUETOOTH_PAGE);}
+        let hit=c.page_link(cx-17.0,y-18.0,34.0,37.0,"wireless-side",Destination::Wireless(device.id.clone()));
+        let _=crate::quota_ui::bar_tooltip(hit,device.name.clone());
     }
 
     pub(crate) fn page_wireless(&mut self,c:&Card,env:&Env) {

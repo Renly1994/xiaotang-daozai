@@ -331,7 +331,7 @@ fn structured_status_file_disconnect_and_revoke_are_isolated() -> Result<()> {
 }
 
 #[test]
-fn stopping_only_the_status_page_cancels_an_in_flight_read_and_persists() -> Result<()> {
+fn stopping_the_status_page_cancels_an_in_flight_read_and_persists() -> Result<()> {
     let fixture = Fixture::new()?;
     let mut host = fixture.host();
     host.install(&fixture.plugin(
@@ -398,7 +398,7 @@ fn stopping_only_the_status_page_cancels_an_in_flight_read_and_persists() -> Res
     assert!(host.jobs.contains_key(PRINTER));
     host.set_status_page_enabled(PRINTER, false)?;
     assert!(host.status_page(PRINTER).is_none());
-    assert!(host.records[PRINTER].enabled);
+    assert!(!host.records[PRINTER].enabled);
     assert_eq!(host.status_pages().collect::<Vec<_>>(), [(OTHER, OTHER)]);
     resume.send(())?;
     let listener = server.join().map_err(|_| fail("测试回环服务退出"))??;
@@ -413,7 +413,7 @@ fn stopping_only_the_status_page_cancels_an_in_flight_read_and_persists() -> Res
     drop(host);
     let mut host = fixture.host();
     settle(&mut host, false);
-    assert!(host.records[PRINTER].enabled);
+    assert!(!host.records[PRINTER].enabled);
     assert!(host.status_page(PRINTER).is_none());
     assert_eq!(status(&host, OTHER), (Some(17.0), StatusHealth::Ready));
     assert!(

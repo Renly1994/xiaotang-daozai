@@ -296,8 +296,8 @@ impl PinnedDisplay {
         if width <= 0.0 { return (false, None, false); }
         let payroll = self.payroll_counter(now);
         let height = if vertical && payroll.is_some() { 42.0 } else { 22.0 };
-        let click = card.hit(x - width / 2.0, y - height / 2.0, width, height,
-            ("plugin-pinned", self.plugin.as_str())).clicked();
+        let click = card.page_link(x - width / 2.0, y - height / 2.0, width, height,
+            ("plugin-pinned", self.plugin.as_str()), crate::app::resident_navigation::Destination::Plugin(self.plugin.clone())).clicked();
         if let Some(counter) = payroll {
             let (repaint, animating) = payroll::draw(card, x, y, width, vertical, theme, counter, now);
             return (click, repaint, animating);
@@ -520,7 +520,9 @@ impl LocalPlugins {
             .then_some(package.manifest.name.as_str())
     }
 
-    pub(super) fn set_pinned(&mut self, id: &str, enabled: bool) -> Result<()> {
+    pub(crate) fn has_pinned_surface(&self,id:&str)->bool {self.pinned_name(id).is_some()}
+    pub(crate) fn pinned_enabled(&self,id:&str)->bool {self.pinned.order.iter().any(|item|item==id)}
+    pub(crate) fn set_pinned(&mut self, id: &str, enabled: bool) -> Result<()> {
         let mut order = self.pinned.order.clone();
         if enabled {
             if self.pinned_name(id).is_none() {

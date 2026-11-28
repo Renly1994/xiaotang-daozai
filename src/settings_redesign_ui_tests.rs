@@ -40,7 +40,7 @@ fn merged_switches_keep_enabled_users_unchanged(){
 #[test]
 fn merged_mail_switch_keeps_last_page_behavior(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.frame(vec![]);
-    h.app.settings.visible_pages=[false;11];h.app.settings.visible_pages[crate::app::MAIL_PAGE]=true;
+    h.app.settings.visible_pages=[false;crate::app::PAGE_NAMES.len()];h.app.settings.visible_pages[crate::app::MAIL_PAGE]=true;
     h.app.settings.mail_enabled=false;
     h.app.migrate_merged_switches();
     assert!(h.app.settings.visible_pages[crate::app::MAIL_PAGE]);
@@ -48,12 +48,12 @@ fn merged_mail_switch_keeps_last_page_behavior(){
     assert!(!h.app.mail_active());
 }
 
-/// 旧的分页序号（岛上入口、更新提示等按序号跳转）仍能打开合并后的页面，每个序号只属于一个侧栏项。
+/// 每个功能保留原有设置页序号，并提供独立侧栏入口。
 #[test]
-fn settings_old_tab_numbers_open_merged_pages(){
+fn settings_each_function_has_its_own_sidebar_entry(){
     use crate::extras::settings_tab_group_for_tests as group;
-    assert_eq!(group(2),"专注与健康");assert_eq!(group(3),"专注与健康");
-    assert_eq!(group(4),"待办与置物");assert_eq!(group(5),"待办与置物");
+    assert_eq!(group(2),"专注");assert_eq!(group(3),"健康");
+    assert_eq!(group(4),"待办");assert_eq!(group(5),"置物架");
     assert_eq!(group(6),"消息提醒");assert_eq!(group(7),"邮箱");assert_eq!(group(8),"日程");
     assert_eq!(group(0),"通用");assert_eq!(group(13),"外观");assert_eq!(group(14),"位置");
     assert_eq!(group(10),"页面管理");assert_eq!(group(9),"关于");

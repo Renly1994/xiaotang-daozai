@@ -681,6 +681,7 @@ pub(crate) fn page_shortcut_icon(c: &Card, page: usize, x: f32, y: f32, color: C
     let outline = |x, y, w, h| c.stroke(x, y, w, h, 1.0, stroke, color);
 
     match page {
+        crate::app::BATTERY_PAGE => {outline(-6.0,-3.5,11.0,7.0);line((6.0,-1.5),(6.0,1.5));line((-3.5,0.0),(2.5,0.0));},
         MUSIC_PAGE => note(&c, 0.0, 0.0, 12.0, color),
         FOCUS_PAGE => {
             c.ring(0.0, 1.0, 4.6, stroke, color);

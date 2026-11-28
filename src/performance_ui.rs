@@ -4,6 +4,7 @@
 //! 底部程序区左右两栏并排「CPU 最高」和「内存最多」，只看不点。
 //! 详情页是五个孪生版式：顶部带迷你曲线的页签条，左侧大环与三行读数，右上主视图，右下三行列表。
 //! 质感取自玻璃格：染色的暗底、霓虹描边、底边发亮，格子里的细颗粒随负载闪烁。
+use crate::app::resident_navigation::Destination;
 use crate::{
     app::{App, PERFORMANCE_PAGE},
     paint::{alpha, mix, Card, H},
@@ -726,10 +727,12 @@ impl App {
                     if stacked {
                         // 两行一列；单数时最后一列只占上一行，字号与其它列一致。
                         for (m, y) in std::iter::once((first, 9.5)).chain(second.map(|m| (m, 21.))) {
+                            c.page_link(left,if y<15. {0.}else{15.},width,15.,("performance-metric",m as u8),Destination::Performance(m.view()));
                             c.centered_text(left + 2., y, m.label(), 8., W::Semibold, metric_color(m), H::Left);
                             c.centered_text(left + width - 4., y, &resident_value(m, r), 9., W::Bold, INK, H::Right);
                         }
                     } else {
+                        c.page_link(left,0.,width,30.,("performance-metric",first as u8),Destination::Performance(first.view()));
                         let cx = left + width / 2.;
                         c.centered_text(cx, 8.5, first.label(), 8., W::Semibold, metric_color(first), H::Center);
                         c.centered_text(cx, 20.5, &resident_value(first, r), 12., W::Bold, INK, H::Center);
@@ -737,6 +740,7 @@ impl App {
                     left += width;
                 }
                 for rates in BarStyle::rate_columns(mask) {
+                    c.page_link(left,0.,BarStyle::RATE_WIDTH,30.,("performance-rate",rates[0].or(rates[1]).unwrap() as u8),Destination::Performance(rates[0].or(rates[1]).unwrap().view()));
                     paint_rate_column(c, left + 3., rates, r, left > start);
                     left += BarStyle::RATE_WIDTH;
                 }
@@ -745,14 +749,17 @@ impl App {
                 let dashboard = style == BarStyle::Dashboard;
                 let left_edge = x - style.width(self.settings.performance_metrics) / 2.;
                 if dashboard {
+                    c.page_link(left_edge,0.,30.,30.,"performance-dashboard-cpu",Destination::Performance(View::Cpu));
                     self.plot(c, |s| s.cpu, [left_edge, 8., 26., 14.], 16., 100., CPU_COLOR, 1.4, 0.35, false, false);
                     for (j, rates) in Metric::RATE_PAIRS.into_iter().enumerate() {
                         let left = left_edge + 178. + j as f32 * BarStyle::RATE_WIDTH;
+                        c.page_link(left,0.,BarStyle::RATE_WIDTH,30.,("performance-dashboard-rate",j),Destination::Performance(rates[0].view()));
                         paint_rate_column(c, left, rates.map(Some), r, true);
                     }
                 }
                 for i in 0..3 {
                     let left = left_edge + if dashboard { 30. } else { 1. } + i as f32 * 49.;
+                    c.page_link(left,0.,49.,30.,("performance-gauge",i),Destination::Performance(Metric::ALL[i].view()));
                     let value = metric(r, i);
                     gauge(c, left + 8., 15., 7., 2.2, value, COLORS[i], false);
                     c.centered_text(left + 8., 15., LETTERS[i], 7.5, W::Bold, COLORS[i], H::Center);
@@ -760,12 +767,14 @@ impl App {
                 }
             }
             BarStyle::Cores => {
+                c.page_link(x-52.,0.,104.,30.,"performance-cores",Destination::Performance(View::Cpu));
                 let left = x - BarStyle::Cores.width(0) / 2.;
                 c.centered_text(left + 2., 8.5, "CPU", 8., W::Semibold, CPU_COLOR, H::Left);
                 c.centered_text(left + 2., 20.5, &percent(r.cpu), 12., W::Bold, INK, H::Left);
                 self.core_bars(c, [left + 40., 6., 64., 18.], 16, None);
             }
             BarStyle::Pulse => {
+                c.page_link(x-39.,0.,78.,30.,"performance-pulse",Destination::Performance(View::Cpu));
                 c.centered_text(x - 38., 8.5, "CPU", 8., W::Semibold, CPU_COLOR, H::Left);
                 c.centered_text(x - 38., 20.5, &percent(r.cpu), 12., W::Bold, INK, H::Left);
                 c.seg((x - 3., 22.5), (x + 37., 22.5), 1., GRID);
@@ -774,6 +783,7 @@ impl App {
                 }
             }
             BarStyle::Network => {
+                c.page_link(x-44.,0.,88.,30.,"performance-network",Destination::Performance(View::Network));
                 for (i, (arrow, col)) in [("↓", NET), ("↑", secondary(NET))].into_iter().enumerate() {
                     let cy = 9.5 + i as f32 * 11.5;
                     c.centered_text(x - 40., cy, arrow, 11., W::Bold, col, H::Left);
@@ -784,14 +794,7 @@ impl App {
     }
     pub(crate) fn performance_bar(&mut self, c: &Card, x: f32) {
         self.paint_performance_bar(c, x);
-        let width = self.settings.performance_bar.width(self.settings.performance_metrics);
-        if crate::quota_ui::bar_tooltip(c.hit(x - width / 2., 0., width, 30., "performance-open"), "打开系统性能".into())
-            .clicked()
-        {
-            // 点常驻指标是重新打开：从设置里的起始页开始。
-            self.performance.view = None;
-            self.show_page(PERFORMANCE_PAGE);
-        }
+
     }
 
     // ---------- 常驻：侧边停靠 ----------
@@ -802,6 +805,7 @@ impl App {
         let top = y - height / 2.;
         // 一只小圆环：环里是 C / G / M，下面是百分比。
         let ring = |c: &Card, cy: f32, i: usize| {
+            c.page_link(x-16.,cy-9.,32.,30.,("side-performance-gauge",i),Destination::Performance(Metric::ALL[i].view()));
             let value = metric(&r, i);
             gauge(c, x, cy, 7., 2.2, value, COLORS[i], false);
             c.centered_text(x, cy, LETTERS[i], 7.5, W::Bold, COLORS[i], H::Center);
@@ -812,6 +816,7 @@ impl App {
             for (i, m) in rates.into_iter().enumerate() {
                 let Some(m) = m else { continue };
                 let row = cy + i as f32 * 11.;
+                c.page_link(x-16.,row-5.5,32.,11.,("side-performance-rate",m as u8),Destination::Performance(m.view()));
                 let value = resident_value(m, &r).replace("B/s", "").replace(' ', "");
                 let size = 8.5 * (22. / c.text_w(&value, 8.5, W::Bold)).min(1.);
                 c.centered_text(x - 15., row, m.rate_label().unwrap(), 7.5, W::Bold, metric_color(m), H::Left);
@@ -819,6 +824,7 @@ impl App {
             }
         };
         let cpu_label = |c: &Card, top: f32| {
+            c.page_link(x-16.,top,32.,46.,"side-performance-cpu",Destination::Performance(View::Cpu));
             c.centered_text(x, top + 6., "CPU", 7.5, W::Semibold, CPU_COLOR, H::Center);
             c.centered_text(x, top + 17., &percent(r.cpu), 10., W::Bold, INK, H::Center);
         };
@@ -827,6 +833,7 @@ impl App {
                 let mask = self.settings.performance_metrics;
                 let mut top = top;
                 for m in Metric::ALL.into_iter().filter(|m| mask & m.bit() != 0 && m.rate_label().is_none()) {
+                    c.page_link(x-16.,top,32.,23.,("side-performance-custom",m as u8),Destination::Performance(m.view()));
                     let value = resident_value(m, &r).replace(' ', "");
                     let size = 10. * (30. / c.text_w(&value, 10., W::Bold)).min(1.);
                     c.centered_text(x, top + 6., m.label(), 7.5, W::Semibold, metric_color(m), H::Center);
@@ -844,6 +851,7 @@ impl App {
                 }
             }
             BarStyle::Dashboard => {
+                c.page_link(x-16.,top,32.,22.,"side-performance-dashboard-cpu",Destination::Performance(View::Cpu));
                 self.plot(c, |s| s.cpu, [x - 14., top + 3., 28., 12.], 16., 100., CPU_COLOR, 1.4, 0.35, false, false);
                 c.seg((x - 12., top + 19.), (x + 12., top + 19.), 1., GRID);
                 for i in 0..3 {
@@ -866,13 +874,7 @@ impl App {
             }
             BarStyle::Network => pair(c, top + 11., Metric::RATE_PAIRS[0].map(Some)),
         }
-        if crate::quota_ui::bar_tooltip(c.hit(x - 16., y - height / 2., 32., height, "side-performance"), "打开系统性能".into())
-            .clicked()
-        {
-            // 点常驻指标是重新打开：从设置里的起始页开始。
-            self.performance.view = None;
-            self.show_page(PERFORMANCE_PAGE);
-        }
+
     }
 
     // ---------- 展开页 ----------

@@ -1541,22 +1541,26 @@ impl LocalPlugins {
             return Err(fail("当前版本未启用 GPU 材质支持"));
         }
         r.enabled = on;
+        if r.package.as_ref().is_some_and(|p|p.manifest.is_status_page()) {
+            r.status_page_disabled=!on;r.status_page_settings_hidden=!on;
+        }
         self.put(id, r)?;
         self.forget_view(id);
         Ok(())
     }
 
     pub(crate) fn set_status_page_enabled(&mut self, id: &str, on: bool) -> Result<()> {
-        self.set_status_page_display(id, on, false)
+        self.set_status_page_display(id, on, !on)
     }
 
     pub(crate) fn set_status_page_display(&mut self, id: &str, on: bool, hide_settings: bool) -> Result<()> {
+        let old=self.installed(id)?;
+        if !old.package.as_ref().unwrap().manifest.is_status_page() {return Err(fail("此插件没有独立状态页"));}
+        let reopening=on && (!old.enabled || old.status_page_disabled);
+        if old.enabled!=on {self.enable(id,on)?;}
         let mut record = self.installed(id)?;
-        if !record.package.as_ref().unwrap().manifest.is_status_page() {
-            return Err(fail("此插件没有独立状态页"));
-        }
         let disabled = !on;
-        let settings_hidden = disabled && hide_settings;
+        let settings_hidden = disabled || (!reopening && hide_settings);
         let runtime_changed = record.status_page_disabled != disabled;
         if runtime_changed || record.status_page_settings_hidden != settings_hidden {
             record.status_page_disabled = disabled;
@@ -1569,9 +1573,14 @@ impl LocalPlugins {
         Ok(())
     }
 
+    pub(crate) fn set_status_page_settings_hidden(&mut self,id:&str,hidden:bool)->Result<()> {
+        let mut record=self.installed(id)?;
+        if record.enabled && !record.status_page_disabled {record.status_page_settings_hidden=hidden;self.put(id,record)?;}
+        Ok(())
+    }
     pub(crate) fn status_page_settings_hidden(&self, id: &str) -> bool {
         self.records.get(id).is_some_and(|record| {
-            record.status_page_disabled && record.status_page_settings_hidden
+            !record.enabled || record.status_page_disabled || record.status_page_settings_hidden
         })
     }
 

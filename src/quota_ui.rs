@@ -1,4 +1,5 @@
 //! 同心额度环、账号选择及账号设置。
+use crate::app::resident_navigation::Destination;
 use crate::{app::{App,Cmd},extras::{settings_control_row},paint::{Card,H},quota::{self,Accent,Account,Amount,Config,Provider,RelayIcon,Snapshot},theme::{self,W}};
 #[cfg(all(windows, feature = "sdk-material"))]
 use crate::material::ControlRole;
@@ -515,8 +516,13 @@ impl App {
             Some((position,extra))
         }).collect()
     }
+    pub(crate) fn select_quota_account(&mut self,id:String) {
+        #[cfg(feature="sdk-js")]
+        {self.quota.selected_plugin=None;}
+        if self.quota.config.selected!=id {self.quota.config.selected=id;self.quota.config.save();}
+    }
     pub(crate) fn draw_quota_bar(&mut self,c:&Card,cx:f32,layout:&crate::bar_layout::Layout){
-        let indices=self.quota_bar_indices();let mut chosen=None;
+        let indices=self.quota_bar_indices();
         for (position,i)in indices.iter().enumerate(){
             let alpha=layout.pet_clearance(crate::bar_layout::quota_slot(position));
             let faded=c.faded(alpha);let faded=if alpha<0.8{faded.ghost()}else{faded};let c=&faded;
@@ -541,7 +547,7 @@ impl App {
                         c.ui.ctx().request_repaint_after(std::time::Duration::from_millis(160));
                     }
                 }
-                if c.hit(x-(27.0+extra)/2.0,1.0,27.0+extra,28.0,("quota-pin",&a.id)).clicked(){chosen=Some(a.id.clone());}continue;
+                let _=c.page_link(x-(27.0+extra)/2.0,1.0,27.0+extra,28.0,("quota-pin",&a.id),Destination::Quota(a.id.clone()));continue;
             }
             // 有具体点数的额度（如 Kiro）在环右侧跟一段剩余点数，与余额类的排布一致。
             let extra=(layout.widths[crate::bar_layout::quota_slot(position)]-27.0).max(0.0);
@@ -551,12 +557,7 @@ impl App {
             let mut same=self.quota.config.accounts.iter().filter(|other|other.provider==a.provider && other.enabled);
             if same.clone().count()>1{let n=same.position(|other|other.id==a.id).unwrap_or(0)+1;c.circle(x+10.0,24.0,4.5,Color32::from_gray(225));c.text(x+10.0,26.8,&n.to_string(),6.5,W::Bold,Color32::BLACK,H::Center);}
             let summary=self.quota_ring_summary(a,snapshot);
-            if bar_tooltip(c.hit(x-14.0,1.0,28.0+extra,28.0,("quota-pin",&a.id)),format!("{} · {}\n{}",a.provider.name(),a.alias,summary)).clicked(){chosen=Some(a.id.clone());}
-        }
-        if let Some(id)=chosen{
-            #[cfg(feature = "sdk-js")]
-            {self.quota.selected_plugin=None;}
-            self.quota.config.selected=id;self.quota.config.save();self.show_page(6);
+            let _=bar_tooltip(c.page_link(x-14.0,1.0,28.0+extra,28.0,("quota-pin",&a.id),Destination::Quota(a.id.clone())),format!("{} · {}\n{}",a.provider.name(),a.alias,summary));
         }
     }
     pub(crate) fn page_quota(&mut self,c:&Card,header:&Card){
@@ -1473,12 +1474,8 @@ impl App {
             if same.clone().count()>1{let n=same.position(|other|other.id==a.id).unwrap_or(0)+1;c.circle(cx+10.0,mid+9.0,4.5,Color32::from_gray(225));c.text(cx+10.0,mid+11.8,&n.to_string(),6.5,W::Bold,Color32::BLACK,H::Center);}
             summary=self.quota_ring_summary(&a,snapshot.as_ref());
         }
-        let hit=c.hit(cx-17.0,mid-height/2.0,34.0,height,("quota-side",&a.id));
-        if bar_tooltip(hit,format!("{} · {}\n{}",a.provider.name(),a.alias,summary)).clicked(){
-            #[cfg(feature = "sdk-js")]
-            {self.quota.selected_plugin=None;}
-            self.quota.config.selected=a.id.clone();self.quota.config.save();self.show_page(6);
-        }
+        let hit=c.page_link(cx-17.0,mid-height/2.0,34.0,height,("quota-side",&a.id),Destination::Quota(a.id.clone()));
+        let _=bar_tooltip(hit,format!("{} · {}\n{}",a.provider.name(),a.alias,summary));
     }
 }
 /// 设置页账号折叠行上的一句额度摘要。
