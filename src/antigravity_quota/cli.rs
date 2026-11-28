@@ -21,7 +21,8 @@ use windows::{
         System::{
             JobObjects::{
                 CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
-                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             },
             Pipes::CreatePipe,
             Threading::{
@@ -252,7 +253,10 @@ fn start(
 ) -> windows::core::Result<(OwnedHandle, OwnedHandle, File, File)> {
     let job = unsafe { OwnedHandle::from_raw_handle(CreateJobObjectW(None, PCWSTR::null())?.0) };
     let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // 仅允许 CLI 单进程运行，阻止其在 DETACHED_PROCESS 下派生的 MCP 等控制台孙进程弹出终端窗口。
+    limits.BasicLimitInformation.LimitFlags =
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+    limits.BasicLimitInformation.ActiveProcessLimit = 1;
     unsafe {
         SetInformationJobObject(
             handle(&job),
@@ -465,6 +469,30 @@ mod tests {
             )
         };
         assert!(console_input.is_err(), "后台额度查询不应获得控制台输入");
+    }
+
+    #[test]
+    fn quota_process_cannot_spawn_child_process() {
+        let exe = env::current_exe().unwrap();
+        let module = module_path!().split_once("::").unwrap().1;
+        let args = format!("--exact {module}::quota_no_child_process_fixture --ignored");
+        let output = run(&exe, &args, exe.parent().unwrap(), Duration::from_secs(5))
+            .ok()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.code, 0, "{stdout}");
+        assert!(stdout.contains("1 passed"), "{stdout}");
+    }
+
+    #[test]
+    #[ignore = "供额度子进程测试启动"]
+    fn quota_no_child_process_fixture() {
+        let exe = env::current_exe().unwrap();
+        if let Ok(mut child) = std::process::Command::new(&exe).arg("--list").spawn() {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("后台额度查询不应派生孙进程");
+        }
     }
 
     #[test]
