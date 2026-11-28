@@ -2413,6 +2413,24 @@ impl App {
                     1=>{
                         let on=self.settings_feature_header(ui,crate::app::MUSIC_PAGE,"播放控制与同步歌词",|_,_|{});
                         ui.add_enabled_ui(on,|ui|{
+                            settings_label(ui,"Feishin 接入");
+                            settings_card(ui,|ui|{
+                                setting_row(ui,"连接 Feishin","读取本机 Feishin 播放状态并支持控制",&mut self.settings.feishin_enabled);
+                                settings_control_row_right(ui,"WebSocket 端口",|ui|{ui.add_enabled(self.settings.feishin_enabled,egui::DragValue::new(&mut self.settings.feishin_port).range(1..=65535));});
+                                settings_control_row_right(ui,"用户名",|ui|{ui.add_enabled(self.settings.feishin_enabled,egui::TextEdit::singleline(&mut self.settings.feishin_username).desired_width(180.0));});
+                                let draft_id=ui.make_persistent_id("feishin-password-draft");
+                                let (mut password,username)=match ui.data(|d|d.get_temp::<(String,String)>(draft_id)){
+                                    Some((cached_user,cached_password)) if cached_user==self.settings.feishin_username=>(cached_password,self.settings.feishin_username.clone()),
+                                    _=>(crate::feishin::get_password(&self.settings.feishin_username).unwrap_or_default(),self.settings.feishin_username.clone()),
+                                };
+                                settings_control_row_right(ui,"密码",|ui|{ui.add_enabled(self.settings.feishin_enabled,egui::TextEdit::singleline(&mut password).password(true).desired_width(180.0));});
+                                ui.horizontal(|ui|{
+                                    if ui.add_enabled(self.settings.feishin_enabled,egui::Button::new("保存凭据")).clicked(){self.pending.push(Cmd::FeishinCredential(password.clone()));}
+                                    if ui.add_enabled(self.settings.feishin_enabled,egui::Button::new("清除密码")).clicked(){self.pending.push(Cmd::FeishinForgetPassword);password.clear();}
+                                });
+                                ui.data_mut(|d|d.insert_temp(draft_id,(username,password)));
+                                settings_hint(ui,"默认端口 4333；密码保存在 Windows 凭据管理器中。Feishin 需启用远程控制（WebSocket）。");
+                            });
                             settings_label(ui,"歌词");
                             settings_card(ui,|ui|{
                                 setting_row(ui,"岛上歌词","播放时收起的岛显示当前句，其他常驻图标暂时隐藏；无同步歌词时显示封面和歌名",&mut self.settings.island_lyrics);

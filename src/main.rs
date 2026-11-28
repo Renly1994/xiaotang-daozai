@@ -23,6 +23,10 @@ struct Shell {
     #[cfg(windows)]
     was_interactive_transition: bool,
     media: smtc::Shared,
+    feishin: Option<daozai::feishin::Client>,
+    feishin_user: String,
+    feishin_password: String,
+    feishin_artwork: Option<(std::sync::Arc<Vec<u8>>, Option<std::sync::Arc<egui::ColorImage>>)>,
     seek_rx: Option<(&'static str,std::sync::mpsc::Receiver<bool>)>,
     media_control:Option<smtc::ControlWorker>,
     music_volume_rx:Option<(String,std::sync::mpsc::Receiver<bool>)>,
@@ -275,6 +279,9 @@ impl Shell {
         let media = smtc::shared();
         let media_enabled=smtc::spawn_poller(media.clone(),cc.egui_ctx.clone());
         media_enabled.store(app.settings.visible_pages[0],std::sync::atomic::Ordering::Relaxed);
+        let feishin=daozai::feishin::Client::start();
+        let feishin_user=app.settings.feishin_username.clone();
+        let feishin_password=daozai::feishin::get_password(&feishin_user).unwrap_or_default();
         #[cfg(windows)]
         let autostart = daozai::tray::autostart_enabled();
         #[cfg(windows)]
@@ -357,6 +364,10 @@ impl Shell {
             #[cfg(windows)]
             was_interactive_transition: false,
             media,
+            feishin,
+            feishin_user,
+            feishin_password,
+            feishin_artwork: None,
             seek_rx: None,
             media_control:None,
             music_volume_rx:None,
@@ -609,6 +620,35 @@ impl eframe::App for Shell {
             self.guard_notified=true;self.app.opts.fetch_lyrics=false;
             self.app.alert("岛仔已暂停音乐功能","检测到资源占用异常，已暂停读取音乐信息和歌词。重启岛仔即可恢复；诊断记录在数据目录的 diagnostics 文件夹。",0,false);
         }
+        let feishin_enabled=music_on && self.app.settings.feishin_enabled && !guarded;
+        if let Some(client)=&self.feishin {
+            if self.feishin_user!=self.app.settings.feishin_username {
+                self.feishin_user=self.app.settings.feishin_username.clone();
+                self.feishin_password=daozai::feishin::get_password(&self.feishin_user).unwrap_or_default();
+            }
+            client.set_config(feishin_enabled.then(||daozai::feishin::Config {
+                port:self.app.settings.feishin_port,
+                username:self.feishin_user.clone(),
+                password:self.feishin_password.clone(),
+            }));
+            let snapshot=client.snapshot();
+            if feishin_enabled && snapshot.connected {
+                if let Some(track)=snapshot.now_playing {
+                    let artwork=track.artwork.as_ref().and_then(|bytes| {
+                        if self.feishin_artwork.as_ref().is_none_or(|(cached,_)|!std::sync::Arc::ptr_eq(cached,bytes)) {
+                            self.feishin_artwork=Some((bytes.clone(),smtc::decode_artwork(bytes).map(std::sync::Arc::new)));
+                        }
+                        self.feishin_artwork.as_ref().and_then(|(_,image)|image.clone())
+                    });
+                    smtc::set_external(Some(smtc::NowPlaying {
+                        title:track.name,artist:track.artist,album:track.album,source:"Feishin".into(),song_id:None,
+                        playing:track.playing,position:track.position_s,sampled_at:Some(track.sampled_at),event_time_ms:None,
+                        duration:track.duration_s,artwork,playback_type:smtc::MediaKind::Music,
+                        volume:track.volume.map(|volume|(volume.round().clamp(0.0,100.0) as u32,false)),
+                    }));
+                } else { smtc::set_external(None); }
+            } else { smtc::set_external(None); }
+        } else { smtc::set_external(None); }
         self.media_enabled.store(music_on && !guarded,std::sync::atomic::Ordering::Relaxed);
         if !music_on {
             self.seek_rx=None;
@@ -1049,10 +1089,32 @@ impl eframe::App for Shell {
         }
         for cmd in out.cmds {
             match cmd {
+                Cmd::FeishinCredential(password)=>{
+                    let username=self.app.settings.feishin_username.clone();
+                    if username.is_empty() || username.contains(':') {self.app.say("Feishin 用户名不能为空且不能包含冒号");continue;}
+                    match daozai::feishin::set_password(&username,&password){
+                        Ok(())=>{self.feishin_user=username;self.feishin_password=password;self.app.say("Feishin 凭据已保存");}
+                        Err(_)=>self.app.say("无法保存 Feishin 密码到 Windows 凭据管理器"),
+                    }
+                }
+                Cmd::FeishinForgetPassword=>{
+                    let username=self.app.settings.feishin_username.clone();
+                    if !username.is_empty(){if let Err(_)=daozai::feishin::set_password(&username,""){self.app.say("无法清除 Feishin 密码");continue;}}
+                    if username==self.feishin_user{self.feishin_password.clear();}
+                    self.app.say("Feishin 密码已清除");
+                }
                 Cmd::Media(t) => {
                     if !self.app.module_on(app::MUSIC_PAGE) {continue;}
                     self.media_fast_until=Some(Instant::now()+Duration::from_secs(3));self.media_enabled.set_interval(smtc::POLL_FAST);
                     let source=self.media.lock().map(|media|media.source.clone()).unwrap_or_default();
+                    if source.eq_ignore_ascii_case("Feishin") {
+                        if let Some(client)=&self.feishin {
+                            let command=match t {smtc::Transport::Toggle=>Some(daozai::feishin::Command::Toggle),smtc::Transport::Next=>Some(daozai::feishin::Command::Next),smtc::Transport::Prev=>Some(daozai::feishin::Command::Previous),smtc::Transport::Seek(position)=>Some(daozai::feishin::Command::Seek(position)),_=>None};
+                            if command.is_some_and(|command|client.send(command)){self.media_fast_until=Some(Instant::now()+Duration::from_secs(3));}
+                            else {self.app.say("Feishin 未连接或暂不可控制");}
+                        }
+                        continue;
+                    }
                     let message=if source.eq_ignore_ascii_case("cloudmusic.exe"){"网易云暂未适配进度跳转，请在客户端调整"}
                         else if source.eq_ignore_ascii_case("bodian_pc.exe"){"波点音乐暂未适配进度跳转，请在客户端调整"}
                         else if source.eq_ignore_ascii_case("kwmusic.exe"){"酷我音乐暂未适配进度跳转，请在客户端调整"}
@@ -1064,6 +1126,14 @@ impl eframe::App for Shell {
                 }
                 Cmd::MusicVolume(command,source)=>{
                     if !self.app.module_on(app::MUSIC_PAGE) {continue;}
+                    if source.eq_ignore_ascii_case("Feishin") {
+                        let volume=self.media.lock().ok().and_then(|media|media.volume).map(|(volume,_)|volume).unwrap_or(50);
+                        let target=match command {smtc::Transport::SetVolume(value)=>Some(value as f64),smtc::Transport::SetMute(true)=>Some(0.0),smtc::Transport::SetMute(false) if volume==0=>Some(50.0),_=>None};
+                        if let Some(target)=target {
+                            if !self.feishin.as_ref().is_some_and(|client|client.send(daozai::feishin::Command::SetVolume(target))){self.app.say("Feishin 未连接或暂不可调音量");}
+                        }
+                        continue;
+                    }
                     self.media_fast_until=Some(Instant::now()+Duration::from_secs(3));self.media_enabled.set_interval(smtc::POLL_FAST);
                     if self.media_control.is_none(){self.media_control=smtc::ControlWorker::start(ctx.clone());}
                     match self.media_control.as_ref().ok_or(()).and_then(|worker|worker.submit(command,source.clone())){

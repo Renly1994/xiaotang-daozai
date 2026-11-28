@@ -371,6 +371,9 @@ pub struct Settings {
     pub sound: bool,
     pub lyrics_enabled:bool,
     pub island_lyrics:bool,
+    pub feishin_enabled:bool,
+    pub feishin_port:u16,
+    pub feishin_username:String,
     pub lyric_delay_ms:i32,
     pub hide_fullscreen: bool,
     pub exclude_from_capture: bool,
@@ -420,7 +423,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, oled_shift: false, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true,true,true,true,true,true,true,true,true,false,true], hidden_settings_pages: [false; 11], page_order: [0,1,2,3,4,5,6,7,8,9,10], plugin_page_order: Vec::new(), show_page_shortcuts: true, hide_page_arrows: false, show_clock: true, resident_date: ResidentDate::Off, show_battery: true, show_weather: true, show_performance: true, performance_bar: Default::default(), performance_metrics: 7, performance_view: Default::default(), clock_12h: false, clock_period: 0, clock_seconds: false, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, show_bluetooth:true, bluetooth_pinned:Vec::new(), bluetooth_resident_style:0, bluetooth_resident_custom:false, bluetooth_battery_notifications:true, read_notifications:false, wechat_notifications:false, wecom_notifications:false, feishu_notifications:false, dingtalk_notifications:false, wechat_tray_open:false, wechat_wake_method:Default::default(), wechat_wake_shortcut:String::new(), qq_only:false, notification_preview:false, notifications: true, system_notify: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, exclude_from_capture: false, avoid_top_bar: true, top_bar_on_top: false, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, sit_remind: true, sit_minutes: 60, lunch_rest: true, lunch_start: 720, lunch_end: 810, mail_enabled: true, mail_sync_operations:false, mail_code_only_notifications: false, mail_code: true, mail_code_popup: false, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, weather_city: String::new(), weather_position: None, weather_saved: Vec::new(), render_compat: false, render_compat_reason: String::new() }
+        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, oled_shift: false, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true,true,true,true,true,true,true,true,true,false,true], hidden_settings_pages: [false; 11], page_order: [0,1,2,3,4,5,6,7,8,9,10], plugin_page_order: Vec::new(), show_page_shortcuts: true, hide_page_arrows: false, show_clock: true, resident_date: ResidentDate::Off, show_battery: true, show_weather: true, show_performance: true, performance_bar: Default::default(), performance_metrics: 7, performance_view: Default::default(), clock_12h: false, clock_period: 0, clock_seconds: false, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, show_bluetooth:true, bluetooth_pinned:Vec::new(), bluetooth_resident_style:0, bluetooth_resident_custom:false, bluetooth_battery_notifications:true, read_notifications:false, wechat_notifications:false, wecom_notifications:false, feishu_notifications:false, dingtalk_notifications:false, wechat_tray_open:false, wechat_wake_method:Default::default(), wechat_wake_shortcut:String::new(), qq_only:false, notification_preview:false, notifications: true, system_notify: true, sound: false, lyrics_enabled:true, island_lyrics:false,feishin_enabled:false,feishin_port:4333,feishin_username:String::new(), lyric_delay_ms:-350, hide_fullscreen: true, exclude_from_capture: false, avoid_top_bar: true, top_bar_on_top: false, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, sit_remind: true, sit_minutes: 60, lunch_rest: true, lunch_start: 720, lunch_end: 810, mail_enabled: true, mail_sync_operations:false, mail_code_only_notifications: false, mail_code: true, mail_code_popup: false, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, weather_city: String::new(), weather_position: None, weather_saved: Vec::new(), render_compat: false, render_compat_reason: String::new() }
     }
 }
 
@@ -541,6 +544,9 @@ impl Settings {
                 "sound" => s.sound = v == "1",
                 "lyrics_enabled" => s.lyrics_enabled=v!="0",
                 "island_lyrics" => s.island_lyrics=v=="1",
+                "feishin_enabled" => s.feishin_enabled=v=="1",
+                "feishin_port" => s.feishin_port=v.parse::<u16>().ok().filter(|port|*port>0).unwrap_or(4333),
+                "feishin_username" => s.feishin_username=v.chars().filter(|c|!c.is_control() && *c!=':').take(256).collect(),
                 "lyric_delay_ms" => s.lyric_delay_ms=v.parse::<i32>().unwrap_or(-350).clamp(-5000,5000),
                 "hide_fullscreen" => s.hide_fullscreen = v != "0",
                 "exclude_from_capture" => s.exclude_from_capture = v == "1",
@@ -647,6 +653,9 @@ impl Settings {
                 ("sound".into(), (self.sound as u8).to_string()),
                 ("lyrics_enabled".into(),(self.lyrics_enabled as u8).to_string()),
                 ("island_lyrics".into(),(self.island_lyrics as u8).to_string()),
+                ("feishin_enabled".into(),(self.feishin_enabled as u8).to_string()),
+                ("feishin_port".into(),self.feishin_port.to_string()),
+                ("feishin_username".into(),self.feishin_username.clone()),
                 ("lyric_delay_ms".into(),self.lyric_delay_ms.to_string()),
                 ("hide_fullscreen".into(), (self.hide_fullscreen as u8).to_string()),
                 ("exclude_from_capture".into(), (self.exclude_from_capture as u8).to_string()),

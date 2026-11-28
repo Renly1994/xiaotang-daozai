@@ -248,6 +248,10 @@ pub fn fetch_for_source(source:&str,track:&str,artist:&str,duration:f64,song_id:
     if source.eq_ignore_ascii_case("bodian_pc.exe") {
         if let Some(lyrics)=song_id.and_then(crate::smtc::bodian::read_lyrics){trace(||"波点本地:命中".into());return Ok(lyrics);}
     }
+    if source.eq_ignore_ascii_case("Feishin") {
+        if let Some(lyrics)=feishin_lyrics(track,artist){trace(||"Feishin 歌词源:命中".into());return Ok(lyrics);}
+        trace(||"Feishin 歌词源:无".into());
+    }
     if source.to_ascii_lowercase().contains("qqmusic") {
         let common=cache_path(track,artist,duration);
         let path=common.parent().unwrap().join("qqmusic").join(common.file_name().unwrap());
@@ -301,6 +305,86 @@ pub fn fetch_for_source(source:&str,track:&str,artist:&str,duration:f64,song_id:
         }
     }
     fetch(track,artist,duration)
+}
+
+/// Feishin 能显示的歌词：优先向它播放所用的音乐服务器要同一份歌词（OpenSubsonic），
+/// 其次是 Feishin 歌曲对象里内嵌的歌词。封面地址里已有服务器和凭据，只在内存中使用。
+fn feishin_lyrics(track:&str,artist:&str)->Option<Lyrics> {
+    let current=crate::feishin::track()?;
+    if !same_song(track,artist,&current.name,&current.artist){return None;}
+    if is_subsonic_server(&current.server_type) {
+        if let Some((url,origin))=subsonic_lyrics_url(&current.image_url,&current.id) {
+            if let Ok(value)=request_json(&url,&origin) {
+                if let Some(lyrics)=parse_subsonic_lyrics(&value){return Some(lyrics);}
+            }
+        }
+    }
+    let raw=current.lyrics?;
+    let synced=parse_lrc(&raw);
+    if synced.synced {return Some(synced);}
+    let plain=from_plain(&raw);
+    (!plain.lines.is_empty()).then_some(plain)
+}
+
+fn is_subsonic_server(server_type:&str)->bool {
+    matches!(server_type,"navidrome"|"subsonic"|"opensubsonic"|"airsonic"|"gonic")
+}
+
+/// 从 Feishin 给出的封面地址还原服务器地址和凭据，换成取歌词接口；非 Subsonic 地址返回 `None`。
+fn subsonic_lyrics_url(image_url:&str,id:&str)->Option<(String,String)> {
+    if id.is_empty(){return None;}
+    let url=url::Url::parse(image_url).ok()?;
+    if !matches!(url.scheme(),"http"|"https"){return None;}
+    let (prefix,_)=url.path().split_once("/rest/")?;
+    let origin=url.origin().ascii_serialization();
+    if origin=="null"{return None;}
+    let base=format!("{origin}{prefix}");
+    let mut auth=String::new();
+    for (key,value) in url.query_pairs() {
+        if matches!(key.as_ref(),"id"|"size"|"v"|"c"|"f"|"format"){continue;}
+        if !auth.is_empty(){auth.push('&');}
+        auth.push_str(&urlencode(&key));
+        auth.push('=');
+        auth.push_str(&urlencode(&value));
+    }
+    let mut target=format!("{base}/rest/getLyricsBySongId.view?id={}",urlencode(id));
+    if !auth.is_empty(){target.push('&');target.push_str(&auth);}
+    target.push_str("&v=1.13.0&c=Daozai&f=json");
+    Some((target,base))
+}
+
+/// OpenSubsonic `getLyricsBySongId` 的结构化歌词：与 Feishin 一样优先主歌词的同步版本，其次纯文本。
+fn parse_subsonic_lyrics(value:&serde_json::Value)->Option<Lyrics> {
+    let response=value.get("subsonic-response")?;
+    if response.get("status").and_then(|v|v.as_str())!=Some("ok"){return None;}
+    let entries=response.pointer("/lyricsList/structuredLyrics")?.as_array()?;
+    let mut synced_main=None;
+    let mut synced_any=None;
+    let mut plain=None;
+    for entry in entries {
+        let Some(lines)=entry.get("line").and_then(|v|v.as_array()) else {continue};
+        if entry.get("synced").and_then(|v|v.as_bool()).unwrap_or(false) {
+            let offset=entry.get("offset").and_then(|v|v.as_f64()).filter(|v|v.is_finite()).unwrap_or(0.0);
+            let mut raw=String::new();
+            for line in lines {
+                let start=line.get("start").and_then(|v|v.as_f64()).filter(|v|v.is_finite()).unwrap_or(0.0);
+                let text=line.get("value").and_then(|v|v.as_str()).unwrap_or("");
+                let t=(start-offset).max(0.0)/1000.0;
+                raw.push_str(&format!("[{:02}:{:06.3}]{}\n",(t/60.0) as u32,t%60.0,text));
+                if raw.len()>MAX_TEXT{return None;}
+            }
+            let lyrics=parse_lrc(&raw);
+            if lyrics.synced && !lyrics.lines.is_empty() {
+                let main=entry.get("kind").and_then(|v|v.as_str()).unwrap_or("main")=="main";
+                if main {synced_main.get_or_insert(lyrics);}else{synced_any.get_or_insert(lyrics);}
+            }
+        } else if plain.is_none() {
+            let raw=lines.iter().filter_map(|line|line.get("value").and_then(|v|v.as_str())).collect::<Vec<_>>().join("\n");
+            let lyrics=from_plain(&raw);
+            if !lyrics.lines.is_empty(){plain=Some(lyrics);}
+        }
+    }
+    synced_main.or(synced_any).or(plain)
 }
 
 fn parse_krc(raw:&str)->Lyrics {
@@ -748,6 +832,37 @@ mod tests {
         assert_eq!(bare_title("(没有歌名)"),"(没有歌名)","去掉后为空时保留原样");
         assert_eq!(bare_title("晴天"),"晴天");
     }
+    #[test]
+    fn feishin_server_lyrics_reuse_cover_credentials_and_structured_lines(){
+        let rows=serde_json::json!({"subsonic-response":{"status":"ok","lyricsList":{"structuredLyrics":[
+            {"synced":false,"kind":"main","line":[{"value":"纯文本一"},{"value":"纯文本二"}]},
+            {"synced":true,"kind":"main","offset":1000,"line":[{"start":1000,"value":"第一句"},{"start":5000,"value":"第二句"}]},
+            {"synced":true,"kind":"translation","line":[{"start":1000,"value":"译文"}]}
+        ]}}}).to_string();
+        let (base,worker)=serve(vec![("200 OK",rows)]);
+        let cover=format!("{base}/rest/getCoverArt.view?id=song1&u=user&t=token&s=salt&v=1.13.0&c=Feishin&size=300");
+        let (target,origin)=subsonic_lyrics_url(&cover,"song1").unwrap();
+        assert_eq!(origin,base);
+        assert_eq!(target,format!("{base}/rest/getLyricsBySongId.view?id=song1&u=user&t=token&s=salt&v=1.13.0&c=Daozai&f=json"));
+        let lyrics=parse_subsonic_lyrics(&request_json(&target,&origin).unwrap()).unwrap();
+        worker.join().unwrap();
+        assert!(lyrics.synced,"优先主歌词的同步版本");
+        assert_eq!(lyrics.lines[0].text,"第一句");
+        assert!(lyrics.lines[0].t.abs()<0.01,"offset 校准时间轴");
+        assert!((lyrics.lines[1].t-4.0).abs()<0.01);
+        assert!(subsonic_lyrics_url("https://example.com/cover.jpg","x").is_none());
+        assert!(subsonic_lyrics_url(&cover,"").is_none());
+    }
+    #[test]
+    fn feishin_lyrics_ignore_unsupported_server_responses(){
+        assert!(parse_subsonic_lyrics(&serde_json::json!({"subsonic-response":{"status":"failed"}})).is_none());
+        assert!(parse_subsonic_lyrics(&serde_json::json!({"subsonic-response":{"status":"ok"}})).is_none());
+        let plain=parse_subsonic_lyrics(&serde_json::json!({"subsonic-response":{"status":"ok","lyricsList":{"structuredLyrics":[
+            {"synced":false,"line":[{"value":"第一行"},{"value":"第二行"}]}
+        ]}}})).unwrap();
+        assert!(!plain.synced);assert_eq!(plain.lines.len(),2);
+    }
+
     #[test]
     fn resource_network_and_disk_lyrics_have_input_limits(){
         let oversized="x".repeat(2*1024*1024+1);

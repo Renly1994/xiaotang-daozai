@@ -76,6 +76,7 @@ pub struct NowPlaying {
 impl NowPlaying {
     pub fn kind(&self)->MediaKind {
         if self.title.trim().is_empty(){return MediaKind::Unknown;}
+        if self.source.eq_ignore_ascii_case("Feishin"){return MediaKind::Music;}
         if self.playback_type==MediaKind::Video {return MediaKind::Video;}
         // 部分浏览器把所有媒体都上报为音乐，补充识别明确的视频页面标题。
         let title=self.title.trim().to_lowercase();
@@ -190,7 +191,7 @@ impl ArtworkCache {
     }
 }
 
-fn decode_artwork(bytes:&[u8])->Option<eframe::egui::ColorImage> {
+pub fn decode_artwork(bytes:&[u8])->Option<eframe::egui::ColorImage> {
     let decoded=(||{
         if bytes.len()>8*1024*1024{return None;}
         let mut reader=image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?;
@@ -259,6 +260,11 @@ pub(crate) fn is_qqmusic(source:&str)->bool {
 }
 
 pub type Shared = Arc<Mutex<NowPlaying>>;
+static EXTERNAL:Mutex<Option<NowPlaying>>=Mutex::new(None);
+
+pub fn set_external(media:Option<NowPlaying>){
+    if let Ok(mut current)=EXTERNAL.lock(){*current=media;}
+}
 
 pub fn shared() -> Shared {
     Arc::new(Mutex::new(NowPlaying::default()))
@@ -956,6 +962,7 @@ pub fn spawn_poller(state: Shared,ctx:eframe::egui::Context)->Poller {
         loop {
             if stopped.load(std::sync::atomic::Ordering::Acquire) || Arc::strong_count(&state)==1{break;}
             if !active.load(std::sync::atomic::Ordering::Relaxed){
+                set_external(None);
                 artwork.clear(false);playback_clock=PlaybackClock::default();memory=MediaMemory::default();selected_source.clear();
                 #[cfg(windows)] {netease=netease_playback::Reader::default();bodian=bodian::Reader::default();kuwo=kuwo::Reader::default();}
                 if let Ok(mut current)=state.lock(){if !current.title.is_empty(){*current=NowPlaying::default();ctx.request_repaint();}}
@@ -970,8 +977,10 @@ pub fn spawn_poller(state: Shared,ctx:eframe::egui::Context)->Poller {
             let native=None;
             #[cfg(not(windows))]
             let native_pending=false;
-            let mut np=choose_media_for_source(system,native,&selected_source,native_pending).unwrap_or_default();
-            memory.update(&mut np,std::time::Instant::now());
+            let external=EXTERNAL.lock().ok().and_then(|current|current.clone());
+            let mut np=if let Some(external)=external { external } else {
+                let mut np=choose_media_for_source(system,native,&selected_source,native_pending).unwrap_or_default();
+                memory.update(&mut np,std::time::Instant::now());
             np.volume=volume.poll(&np.source);
             if !np.source.is_empty(){selected_source=np.source.clone();}
             #[cfg(windows)]
@@ -982,6 +991,8 @@ pub fn spawn_poller(state: Shared,ctx:eframe::egui::Context)->Poller {
             playback_clock.update(&mut np);
             #[cfg(windows)]
             if let Some(line)=gaps.observe(&np,std::time::Instant::now()){music_gaps::record(&line,&np.source);}
+                np
+            };
             let idle=np.title.is_empty();
             if idle {
                 artwork.clear(true);

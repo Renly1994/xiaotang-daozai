@@ -32,6 +32,7 @@ pub static CONTROL:Lane=Lane::new("daozai-control",1);
 pub static VOLUME:Lane=Lane::new("daozai-volume",1);
 pub static ASYNC:Lane=Lane::new("winrt-request",4);
 pub static ASYNC_ARTWORK:Lane=Lane::new("winrt-artwork",2);
+pub static FEISHIN:Lane=Lane::new("daozai-feishin",1);
 static MONITOR:Lane=Lane::new("daozai-diagnostics",1);
 pub static TIMEOUTS:AtomicUsize=AtomicUsize::new(0);
 pub static REJECTED_DATA:AtomicUsize=AtomicUsize::new(0);
@@ -147,7 +148,7 @@ fn record(value:Snapshot)->String {
     if timeout+outdated+lost+oom+other+submitted>0 {
         let _=write!(line," wgpu_skipped={} wgpu_surface_timeout={timeout} wgpu_surface_outdated={outdated} wgpu_surface_lost={lost} wgpu_surface_oom={oom} wgpu_surface_other={other} wgpu_skip_submit={submitted}",timeout+outdated+lost+oom+other);
     }
-    for lane in [&POLLER,&ARTWORK,&COVER,&LYRICS,&NATIVE_LYRICS,&CONTROL,&VOLUME,&ASYNC,&ASYNC_ARTWORK,&MONITOR] {
+    for lane in [&POLLER,&ARTWORK,&COVER,&LYRICS,&NATIVE_LYRICS,&CONTROL,&VOLUME,&ASYNC,&ASYNC_ARTWORK,&FEISHIN,&MONITOR] {
         let _=write!(line," {}={}/{}/{}/{}",lane.name,lane.active(),lane.limit,lane.started.load(Ordering::Relaxed),lane.denied.load(Ordering::Relaxed));
     }
     line.push('\n');line
