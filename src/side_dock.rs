@@ -25,7 +25,7 @@ pub const SIDE_HALF_EXTENT: f32 = 150.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum SideItem {
-    Clock, Date(f32), Weather, Battery, Music, Focus, Bell, Wireless, Performance(f32),
+    Clock, Date(f32), Weather, Battery, Music, Focus, Bell, Wireless, Performance(f32), Shortcut(usize),
     #[cfg(feature="sdk-js")]
     Pinned(usize),
     /// AI 额度：账号下标（None 为「+N」）与高度。
@@ -37,6 +37,7 @@ impl SideItem {
         match self {
             #[cfg(feature="sdk-js")]
             Self::Pinned(_) => PINNED_HEIGHT,
+            Self::Shortcut(_)=>28.0,
             Self::Performance(h) | Self::Date(h) => h, Self::Clock => if clock_seconds {46.0}else{32.0}, Self::Weather => 40.0, Self::Wireless=>37.0, Self::Battery => 20.0, Self::Music => 18.0, Self::Focus => 22.0, Self::Bell => 22.0, Self::Quota(_, h) => h }
     }
 }
@@ -48,22 +49,33 @@ impl App {
     /// 竖向胶囊里依次显示的内容。
     pub(crate) fn side_items(&self) -> Vec<SideItem> {
         let mut items = Vec::new();
-        if self.settings.show_clock {items.push(SideItem::Clock);}
-        match self.settings.resident_date {
+        if self.resident_on(crate::app::CALENDAR_PAGE) {items.push(SideItem::Clock);}
+        match if self.resident_on(crate::app::CALENDAR_PAGE){self.settings.resident_date}else{ResidentDate::Off} {
             ResidentDate::Off=>{},
             ResidentDate::Gregorian=>items.push(SideItem::Date(20.0)),
             ResidentDate::LunarOnly | ResidentDate::Lunar=>items.push(SideItem::Date(44.0)),
         }
         if self.weather_pill().is_some() {items.push(SideItem::Weather);}
         if !self.wireless_resident().is_empty(){items.push(SideItem::Wireless);}
-        if self.settings.show_battery && self.resident_power.0.is_some() { items.push(SideItem::Battery); }
+        if self.resident_on(crate::app::BATTERY_PAGE) && self.resident_power.0.is_some() { items.push(SideItem::Battery); }
         if self.performance_on_bar() {items.push(SideItem::Performance(self.settings.performance_bar.side_height(self.settings.performance_metrics)));}
-        if self.media.is_music() { items.push(SideItem::Music); }
-        if self.pomo.running { items.push(SideItem::Focus); }
+        if self.resident_on(crate::app::MUSIC_PAGE)&&self.media.is_music() { items.push(SideItem::Music); }
+        if self.resident_on(crate::app::FOCUS_PAGE)&&self.pomo.running { items.push(SideItem::Focus); }
         items.extend(self.quota_side_items().into_iter().map(|(index, h)| SideItem::Quota(index, h)));
         if self.notification_bell().is_some() { items.push(SideItem::Bell); }
         #[cfg(feature="sdk-js")]
         items.extend((0..self.pinned_displays.len()).map(SideItem::Pinned));
+        let represented=|item:&SideItem| match item {
+            SideItem::Clock|SideItem::Date(_)=>Some(crate::app::CALENDAR_PAGE),SideItem::Weather=>Some(crate::app::WEATHER_PAGE),
+            SideItem::Battery=>Some(crate::app::BATTERY_PAGE),SideItem::Music=>Some(crate::app::MUSIC_PAGE),SideItem::Focus=>Some(crate::app::FOCUS_PAGE),
+            SideItem::Bell=>Some(crate::app::MAIL_PAGE),SideItem::Wireless=>Some(crate::app::BLUETOOTH_PAGE),SideItem::Performance(_)=>Some(crate::app::PERFORMANCE_PAGE),
+            SideItem::Quota(..)=>Some(crate::app::QUOTA_PAGE),SideItem::Shortcut(p)=>Some(*p),
+            #[cfg(feature="sdk-js")] SideItem::Pinned(i)=>self.pinned_displays.get(*i).and_then(|d|self.status_pages.iter().position(|(id,_)|id==&d.plugin)).map(|i|crate::app::PAGE_NAMES.len()+i),
+        };
+        for &page in &self.settings.page_order {if self.resident_on(page)&&!items.iter().any(|item|represented(item)==Some(page)){items.push(SideItem::Shortcut(page));}}
+        #[cfg(feature="sdk-js")]
+        for (i,(id,_)) in self.status_pages.iter().enumerate(){let page=crate::app::PAGE_NAMES.len()+i;if self.plugin_resident(id)&&!items.iter().any(|item|represented(item)==Some(page)){items.push(SideItem::Shortcut(page));}}
+        let order=self.component_keys();items.sort_by_key(|item|represented(item).and_then(|page|order.iter().position(|k|*k==self.component_key(page))).unwrap_or(usize::MAX));
         items
     }
 
@@ -145,6 +157,7 @@ impl App {
             let h = item.height(self.settings.clock_seconds);
             let mid = y + h / 2.0;
             match item {
+                SideItem::Shortcut(page)=>self.resident_shortcut(c,cx,mid,page),
                 SideItem::Clock => {
                     let text=self.settings.clock_text(&env.clock);
                     let (hour, minute) = side_clock(&text);

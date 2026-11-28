@@ -8,7 +8,7 @@ use crate::{
     performance::{BarStyle, View},
 };
 
-fn frame(h: &mut H, dock: Dock, cursor: Option<Pos2>, events: Vec<egui::Event>) {
+pub(super) fn frame(h: &mut H, dock: Dock, cursor: Option<Pos2>, events: Vec<egui::Event>) {
     h.t += 1.0 / 60.0;
     let (w, height) = if dock.is_side() {
         (crate::side_dock::SIDE_W, crate::side_dock::SIDE_H)
@@ -50,7 +50,7 @@ fn frame(h: &mut H, dock: Dock, cursor: Option<Pos2>, events: Vec<egui::Event>) 
         .shapes;
 }
 
-fn fixture(dock: Dock, style: BarStyle) -> H {
+pub(super) fn fixture(dock: Dock, style: BarStyle) -> H {
     let mut h = H::new();
     h.app.settings.dock = dock;
     h.app.settings.pet = false;
@@ -288,48 +288,17 @@ fn hover_module_lyrics_keep_their_music_destination_during_compact_notices() {
 }
 
 #[test]
-fn hover_module_disabled_destination_does_not_open_an_unrelated_previous_page() {
+fn hover_module_disabled_destination_is_removed_from_resident_targets() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut h = fixture(Dock::Top, BarStyle::Gauges);
-    h.app.settings.visible_pages[CALENDAR_PAGE] = false;
-    let point = registered(&h.ctx)
-        .into_iter()
-        .find(|(_, d)| *d == Destination::Page(CALENDAR_PAGE))
-        .unwrap()
-        .0
-        .center();
+    h.app.set_page_visible(CALENDAR_PAGE, false);
     for _ in 0..90 {
-        frame(
-            &mut h,
-            Dock::Top,
-            Some(point),
-            vec![egui::Event::PointerMoved(point)],
-        );
+        frame(&mut h, Dock::Top, None, vec![]);
     }
-    assert!(
-        !h.app.open,
-        "a disabled calendar must not open the previous music page"
-    );
-    for pressed in [true, false] {
-        frame(
-            &mut h,
-            Dock::Top,
-            Some(point),
-            vec![
-                egui::Event::PointerMoved(point),
-                egui::Event::PointerButton {
-                    pos: point,
-                    button: egui::PointerButton::Primary,
-                    pressed,
-                    modifiers: Default::default(),
-                },
-            ],
-        );
-    }
-    assert!(
-        h.app.settings_open,
-        "clicking a disabled module still opens its settings"
-    );
+    assert!(!registered(&h.ctx)
+        .iter()
+        .any(|(_, d)| *d == Destination::Page(CALENDAR_PAGE)));
+    assert!(!h.app.open);
 }
 
 #[test]

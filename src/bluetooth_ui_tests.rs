@@ -281,7 +281,7 @@ fn wireless_device_opens_and_returns_inside_island(){
 
 #[test]
 fn ring_only_resident_shows_numbers_for_low_or_charging(){
-    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.bt=fixture();h.app.settings.bluetooth_notifications=false;
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.bt=fixture();h.app.settings.bluetooth_notifications=false;h.app.settings.bluetooth_battery_notifications=false;
     h.app.settings.bluetooth_resident_custom=true;h.app.settings.bluetooth_pinned=vec!["device-0".into(),"device-1".into()];
     h.app.settings.bluetooth_resident_style=1;set_level(&mut h.bt[1],15);
     h.frame(vec![]);
@@ -441,7 +441,7 @@ fn wireless_settings_controls_are_in_their_own_page() {
     let output=wireless_settings_capture(&mut h,560.0);
     let mut raster=crate::preview_raster::Raster::new(690,560);
     for (tab,name,visible,hidden) in [
-        (10,"wireless-page-management",vec!["无线设备电量"],vec!["常驻样式","常驻设备","电量提醒","安装兼容包…"]),
+        (10,"wireless-page-management",vec!["无线设备"],vec!["常驻样式","常驻设备","电量提醒","安装兼容包…"]),
         (crate::extras::SETTINGS_TAB_WIRELESS,"wireless-settings",vec!["岛上常驻","常驻样式","常驻设备","电量提醒"],vec!["蓝牙设备连接","设备兼容","反馈设备适配","本地插件"]),
         (6,"wireless-notifications",vec!["蓝牙设备连接"],vec!["无线设备电量","电量提醒"]),
     ] {

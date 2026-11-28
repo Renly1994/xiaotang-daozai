@@ -43,6 +43,8 @@ pub(crate) struct Layout {
     pub x: Vec<Option<f32>>,
     pub widths:Vec<f32>,
     quotas:usize,
+    pub(crate) shortcuts:Vec<(usize,usize)>,
+    pinned_range:std::ops::Range<usize>,
 }
 
 impl Layout {
@@ -73,7 +75,7 @@ impl Layout {
         }
         let width=cursor-12.0+16.0;
         for value in x.iter_mut().flatten() {*value-=width/2.0;}
-        Self {width:width.max(96.0),x,widths,quotas}
+        Self {width:width.max(96.0),pinned_range:x.len()..x.len(),shortcuts:Vec::new(),x,widths,quotas}
     }
     pub fn add_performance(&mut self,width:f32) {
         let extra=width+12.0;
@@ -81,6 +83,22 @@ impl Layout {
         self.width+=extra;
         self.widths[PERFORMANCE]=width;
         self.x[PERFORMANCE]=Some(self.width/2.0-16.0-width/2.0);
+    }
+    pub(crate) fn append_page(&mut self,page:usize) {
+        let slot=self.x.len();self.x.push(None);self.widths.push(22.0);
+        self.append_slot(slot,22.0);self.shortcuts.push((slot,page));
+    }
+    pub(crate) fn order_components(&mut self,groups:&[(String,Vec<usize>)],order:&[String]) {
+        let mut groups=groups.to_vec();groups.sort_by_key(|(key,_)|order.iter().position(|k|k==key).unwrap_or(usize::MAX));
+        let original=self.x.clone();let mut spans=Vec::new();
+        for (_,slots) in groups {
+            let left=slots.iter().filter_map(|&i|original[i].map(|x|x-self.widths[i]/2.0)).fold(f32::INFINITY,f32::min);
+            let right=slots.iter().filter_map(|&i|original[i].map(|x|x+self.widths[i]/2.0)).fold(f32::NEG_INFINITY,f32::max);
+            if left.is_finite(){spans.push((slots,left,right-left));}
+        }
+        let content=spans.iter().map(|(_,_,w)|*w).sum::<f32>()+12.0*spans.len().saturating_sub(1)as f32;
+        self.width=(content+32.0).max(96.0);let mut cursor=(self.width-content)/2.0;
+        for (slots,left,width) in spans {for i in slots {if let Some(x)=original[i]{self.x[i]=Some(cursor+x-left-self.width/2.0);}}cursor+=width+12.0;}
     }
     pub fn append_bluetooth(&mut self,width:f32){
         self.append_slot(BLUETOOTH,width);
@@ -94,9 +112,10 @@ impl Layout {
         let minimum: f32 = widths.iter().map(|width| width.min(58.0)).sum();
         let extra = widths.iter().sum::<f32>() - minimum;
         let budget = (limit - self.width - widths.len() as f32 * 12.0).max(0.0);
-        let base_fraction = if minimum > 0.0 { (budget / minimum).min(1.0) } else { 1.0 };
+        let base_fraction = if minimum > 0.0 { (budget / minimum).clamp(0.5, 1.0) } else { 1.0 };
         let room = budget - minimum;
         let fraction = if extra > 0.0 { (room / extra).clamp(0.0, 1.0) } else { 1.0 };
+        self.pinned_range.start=self.x.len();
         for &width in widths {
             let base = width.min(58.0);
             let slot = self.x.len();
@@ -104,10 +123,11 @@ impl Layout {
             self.widths.push(0.0);
             self.append_slot(slot, base * base_fraction + (width - base) * fraction);
         }
+        self.pinned_range.end=self.x.len();
     }
     #[cfg(feature = "sdk-js")]
     pub(crate) fn pinned_slots(&self) -> impl Iterator<Item = usize> {
-        (WIDTHS.len() + self.quotas.saturating_sub(3))..self.x.len()
+        self.pinned_range.clone()
     }
     pub fn quota_slots(&self)->impl Iterator<Item=usize> { (0..self.quotas).map(quota_slot) }
     /// 把某个槽加宽 extra：其余槽对称让位并记入总宽。点数文字、时段时钟、天气温度共用。

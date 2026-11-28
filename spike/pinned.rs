@@ -520,6 +520,8 @@ impl LocalPlugins {
             .then_some(package.manifest.name.as_str())
     }
 
+    pub(crate) fn has_pinned_surface(&self,id:&str)->bool {self.pinned_name(id).is_some()}
+    pub(crate) fn pinned_enabled(&self,id:&str)->bool {self.pinned.order.iter().any(|item|item==id)}
     pub(crate) fn set_pinned(&mut self, id: &str, enabled: bool) -> Result<()> {
         let mut order = self.pinned.order.clone();
         if enabled {

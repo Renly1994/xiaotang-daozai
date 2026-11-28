@@ -5,6 +5,8 @@
 
 #[path="resident_navigation.rs"]
 pub(crate) mod resident_navigation;
+#[path="component_controls.rs"]
+pub(crate) mod component_controls;
 use resident_navigation::Destination;
 
 use crate::extras::{Alert, HealthReminder, PetState};
@@ -94,7 +96,7 @@ pub(crate) const PAGE_SHORTCUT_KEYS: [&str; PAGE_NAMES.len()] = [
     "music", "focus", "health", "shelf", "tasks", "mail", "quota", "calendar", "weather",
     "performance", "wireless", "battery",
 ];
-pub(crate) const PAGE_SETTINGS_TABS: [usize; 12] = [1,2,3,5,4,7,11,8,12,15,crate::extras::SETTINGS_TAB_WIRELESS,crate::extras::SETTINGS_TAB_APPEARANCE];
+pub(crate) const PAGE_SETTINGS_TABS: [usize; 12] = [1,2,3,5,4,7,11,8,12,15,crate::extras::SETTINGS_TAB_WIRELESS,crate::extras::SETTINGS_TAB_BATTERY];
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
@@ -870,7 +872,7 @@ pub struct App {
     pub(crate) page: usize,
     page_from: usize,
     #[cfg(feature="sdk-js")]
-    status_pages: Vec<(String, String)>,
+    pub(crate) status_pages: Vec<(String, String)>,
     #[cfg(feature="sdk-js")]
     plugin_canvas_frame: Option<(usize, crate::plugin_status_ui::InteractionResponse)>,
     page_from_offset: f32,
@@ -1891,7 +1893,7 @@ impl App {
         if !visible && self.settings.visible_pages.iter().filter(|enabled|**enabled).count()==1
             && self.settings.visible_pages[page] { return; }
         self.settings.visible_pages[page]=visible;
-        if visible {self.settings.hidden_settings_pages[page]=false;}
+        self.settings.hidden_settings_pages[page]=!visible;
         #[cfg(feature="sdk-js")]
         if !visible {
             match page {
@@ -1929,8 +1931,7 @@ impl App {
     }
 
     pub(crate) fn set_page_settings_hidden(&mut self,page:usize,hidden:bool) {
-        if hidden && self.module_on(page) {self.set_page_visible(page,false);}
-        self.settings.hidden_settings_pages[page]=hidden && !self.module_on(page);
+        if self.module_on(page) {self.settings.hidden_settings_pages[page]=hidden;}
     }
 
     fn status_page_count(&self) -> usize {
@@ -1961,7 +1962,7 @@ impl App {
             })
     }
 
-    fn navigation_page_name(&self, page: usize) -> &str {
+    pub(crate) fn navigation_page_name(&self, page: usize) -> &str {
         if let Some(name)=PAGE_NAMES.get(page) {return name;}
         #[cfg(feature="sdk-js")]
         if let Some((_,name))=self.status_pages.get(page-PAGE_NAMES.len()) {return name;}
@@ -2251,8 +2252,6 @@ impl App {
     }
 
     fn resident_fit(&self) -> f32 {
-        #[cfg(feature = "sdk-js")]
-        if !self.pinned_displays.is_empty() { return 1.0; }
         if self.island_lyrics_active() { return 1.0; }
         (self.resident_limit() / self.resident.target.width).min(1.0) * self.resident_squeeze()
     }
@@ -2395,7 +2394,7 @@ impl App {
         self.update_media(env,&ctx);
         let bell=self.notification_bell().is_some()&&!self.compact_notices();
         self.resident_power=(env.battery,env.charging);
-        let mut layout=Layout::new(self.settings.show_battery&&env.battery.is_some(),self.quota_bar_indices().len(),self.media.is_music()&&!bell,self.pomo.running,bell,self.pet_enabled(),self.weather_pill().is_some());
+        let mut layout=Layout::new(self.resident_on(BATTERY_PAGE)&&env.battery.is_some(),self.quota_bar_indices().len(),self.resident_on(MUSIC_PAGE)&&self.media.is_music()&&!bell,self.resident_on(FOCUS_PAGE)&&self.pomo.running,bell,self.pet_enabled(),self.weather_pill().is_some());
         let performance_bar=self.performance_on_bar();
         let performance_visible=!env.fullscreen_hidden && !env.screen_locked &&
             (if self.open {self.page==PERFORMANCE_PAGE} else {performance_bar && self.notice.is_none() && !self.island_lyrics_active()});
@@ -2406,7 +2405,7 @@ impl App {
         if performance_bar {layout.add_performance(self.settings.performance_bar.width(self.settings.performance_metrics));}
         layout.reorder(&self.settings.resident_order);
         for (position,extra) in self.quota_balance_layout(&ctx){layout.balance_tail(position,extra);}
-        let resident_day=if self.settings.resident_date==model::ResidentDate::Off {None}else{
+        let resident_day=if !self.resident_on(CALENDAR_PAGE) || self.settings.resident_date==model::ResidentDate::Off {None}else{
             chrono::NaiveDate::parse_from_str(&env.today,"%Y-%m-%d").ok()
                 .and_then(|today|ResidentDay::new(self.settings.resident_date,today))
         };
@@ -2418,17 +2417,19 @@ impl App {
             if self.settings.clock_seconds {layout.widen_clock(24.0);}
         }
         if let Some(extra)=self.weather_pill_extra(&ctx){ layout.widen(bar::WEATHER,extra); }
-        if resident_day.is_none() && !self.settings.show_clock {layout.hide_clock();}
+        if resident_day.is_none() && !self.resident_on(CALENDAR_PAGE) {layout.hide_clock();}
         let wireless=self.wireless_resident();
-        // 放不下整组时不挤压其他常驻项，整组隐藏。
+        // 所有已选择的组件一起适配岛体空间，保留设备的真实状态。
         let wireless_w=self.wireless_bar_width();
-        if !wireless.is_empty()&&wireless_w<=self.resident_limit()-layout.width-12.0 {layout.append_bluetooth(wireless_w);}
+        if !wireless.is_empty() {layout.append_bluetooth(wireless_w);}
+        self.append_resident_fallbacks(&mut layout);
         #[cfg(feature="sdk-js")]
         {
             let suppress = self.effective_minimal() || self.notice.is_some() || self.hud_alpha > 0.003
                 || plugin_notice_detail || self.island_lyrics_active() || env.fullscreen_hidden || env.screen_locked;
             let (mut displays, repaint) = self.plugins.pinned_displays(self.open || suppress);
             self.pinned_frame = PinnedFrame { repaint_after: repaint, animating: false };
+            displays.retain(|display|self.plugin_resident(&display.plugin));
             for display in &mut displays { display.measure_width(ui); }
             let previous_pinned_width = self.pinned_horizontal_width;
             self.pinned_horizontal_width = WIN_W;
@@ -2454,6 +2455,7 @@ impl App {
             }
             self.pinned_displays = displays;
         }
+        self.finish_resident_layout(&mut layout);
         if self.pet_enabled() {
             if let Some(a)=self.notice.as_ref().filter(|_|!self.compact_notices()&&!self.open){layout.x[bar::PET]=Some(22.0-(self.notice_size(a).0+self.pet_space())/2.0);}
             else if self.island_lyrics_active() {layout.x[bar::PET]=Some(60.0-self.lyric_bar_width()/2.0);}
@@ -3760,16 +3762,19 @@ impl App {
         // 常驻条比展开面板还宽时（比如开了综合监测），展开是「由宽变窄」。宽高各走各的弹簧会出现又宽又高的空黑框。
         // 这时宽度不再单独弹，直接跟着高度的进度走：同一个动作里一边往下长一边收窄，收起时反过来，和短岛一样一气呵成。
         if !self.side() && self.position_drag.is_none() && bw > PW + 1.0 {
-            let full = self.expanded_height();
-            // 从悬停微胀的形态起步；收起时回到微胀高度就交还给弹簧，悬停微胀照旧。
-            let start = bh * SWELL.1;
-            let from = if self.open {bw * SWELL.0} else {bw};
-            if self.open || self.h.pos > start + 0.5 {
-                let k = ((self.h.pos - start) / (full - start).max(1.0)).clamp(0.0, 1.0);
-                let ease = 1.0 - (1.0 - k) * (1.0 - k);
-                self.w.pos = lerp(from, PW, ease);
-                self.w.vel = 0.0;
-                self.w.target = if self.open {PW} else {bw};
+            // 页面高度变化属于切页，不要重新走宽常驻条的展开宽度动画。
+            if self.open && self.reveal>0.99 {self.w.snap(PW);}else {
+                let full = self.expanded_height();
+                // 从悬停微胀的形态起步；收起时回到微胀高度就交还给弹簧，悬停微胀照旧。
+                let start = bh * SWELL.1;
+                let from = if self.open {bw * SWELL.0} else {bw};
+                if self.open || self.h.pos > start + 0.5 {
+                    let k = ((self.h.pos - start) / (full - start).max(1.0)).clamp(0.0, 1.0);
+                    let ease = 1.0 - (1.0 - k) * (1.0 - k);
+                    self.w.pos = lerp(from, PW, ease);
+                    self.w.vel = 0.0;
+                    self.w.target = if self.open {PW} else {bw};
+                }
             }
         }
         // 仅在从外侧越过目标时收住，扩展提示条时不强制跳到目标宽度。
@@ -3946,6 +3951,7 @@ impl App {
         }
         if compact_alpha>0.004 {
             let c=base.faded(compact_alpha);let c=if compact_alpha<0.8{c.ghost()}else{c};
+            for &(slot,page) in &layout.shortcuts {if let Some(x)=layout.x[slot] {self.resident_shortcut(&c,local_cx+x,15.0,page);}}
             self.draw_quota_bar(&c,local_cx,&layout);
             if let Some(x)=layout.x[bar::PERFORMANCE] {self.performance_bar(&c,local_cx+x);}
             self.draw_wireless_bar(&c,local_cx,&layout);
@@ -3962,7 +3968,7 @@ impl App {
                 }
             }
         }
-        if self.pomo.running && compact_alpha>0.004 {
+        if self.pomo.running && compact_alpha>0.004 && layout.x[bar::FOCUS].is_some() {
             let x=local_cx+layout.x[bar::FOCUS].unwrap();
             crate::focus_bar::draw(&base.faded(compact_alpha),x,15.0,self.t,&self.pomo,self.phase_secs(self.pomo.phase),false);
             if compact_alpha>0.8 {base.page_link(x-crate::focus_bar::WIDTH/2.0,0.0,crate::focus_bar::WIDTH,30.0,"resident-focus",Destination::Page(FOCUS_PAGE));}

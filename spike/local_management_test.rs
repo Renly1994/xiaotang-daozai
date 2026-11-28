@@ -267,148 +267,38 @@ fn status_page_management_opens_and_switches_independently() -> Result<()> {
             .center();
         click_at(&ctx, switch, |ui| draw(ui, host));
     };
-    let installed = |ui: &mut egui::Ui, host: &mut LocalPlugins| {
-        host.manage(
-            ui,
-            true,
-            true,
-            true,
-            #[cfg(all(windows, feature = "sdk-material"))]
-            None,
-        )
-    };
-    let toggle_installed = |host: &mut LocalPlugins| {
-        let installed_ctx = egui::Context::default();
-        crate::theme::load_fonts(&installed_ctx);
-        for _ in 0..2 {
-            frame(&installed_ctx, vec![], |ui| {
-                let _ = installed(ui, host);
-            });
-        }
-        let switch = installed_ctx
-            .read_response(egui::Id::new(("settings-plugin-switch", ID)))
-            .expect("已安装中的插件开关")
-            .rect
-            .center();
-        click_at(&installed_ctx, switch, |ui| {
-            let _ = installed(ui, host);
-        });
-    };
-
-    assert!(!host.records[ID].enabled);
-    let disabled = frame(&ctx, vec![], |ui| draw(ui, &mut host));
-    assert!(!has_text(&disabled, NAME));
-    assert!(!has_text(&disabled, "独立插件功能"));
-    assert!(!has_text(&disabled, "打开"));
-    assert!(host.standalone_settings_pages().next().is_none());
-    assert!(host.status_pages().next().is_none());
-    assert!(host.settings_destination(ID).is_none());
-    let direct = frame(&ctx, vec![], |ui| host.standalone_settings(ui, ID));
-    assert!(!has_text(&direct, "倒计时名称"));
-
-    let settings_link = format!("设置 › {NAME} ›");
-    let mut route = None;
-    let mut draw_installed = |ui: &mut egui::Ui| {
-        route = installed(ui, &mut host).or(route.take());
-    };
-    frame(&ctx, vec![], &mut draw_installed);
-    let listing = frame(&ctx, vec![], &mut draw_installed);
-    assert!(has_text(&listing, NAME));
-    assert!(!has_text(&listing, &settings_link));
-    let hint = listing
-        .shapes
-        .iter()
-        .find_map(|shape| match &shape.shape {
-            egui::Shape::Text(text) if text.galley.text() == "启用后显示功能页" => {
-                Some(text.visual_bounding_rect().center())
-            }
-            _ => None,
-        })
-        .expect("停用的插件应提示启用后显示功能页");
-    click_at(&ctx, hint, draw_installed);
-    assert_eq!(route, None);
-
-    toggle_installed(&mut host);
-    assert!(host.records[ID].enabled);
-    assert_eq!(host.standalone_settings_pages().next(), Some((ID, NAME)));
-    assert_eq!(host.status_pages().next(), Some((ID, NAME)));
-    click(&ctx, &settings_link, |ui| {
-        route = installed(ui, &mut host).or(route.take());
-    });
-    assert_eq!(route, Some(SettingsNavigation::Plugin(ID.into())));
-    let standalone = frame(&ctx, vec![], |ui| host.standalone_settings(ui, ID));
-    assert!(has_text(&standalone, &format!("启用{NAME}")));
-    let mut opened = None;
-    click(&ctx, "打开", |ui| {
-        opened = host.status_page_settings(ui, ID).or(opened.take());
-    });
-    assert_eq!(opened, Some(SettingsNavigation::OpenStatus(ID.into())));
-    let mut settings = None;
-    click(&ctx, "设置 ›", |ui| {
-        settings = host.status_page_settings(ui, ID).or(settings.take());
-    });
-    assert_eq!(settings, Some(SettingsNavigation::Plugin(ID.into())));
-    frame(&ctx, vec![], |ui| host.standalone_settings(ui, ID));
-    host.drafts.get_mut(ID).unwrap().insert("title".into(), "未保存的设置".into());
-    let switch = ctx
-        .read_response(egui::Id::new(("settings-plugin-switch", format!("{ID}:status-page"))))
-        .expect("独立设置页开关")
-        .rect
-        .center();
-    click_at(&ctx, switch, |ui| host.standalone_settings(ui, ID));
-    assert!(host.records[ID].enabled);
-    assert!(host.status_pages().next().is_none());
-    assert!(!host.status_page_settings_hidden(ID), "普通关闭应保留左栏入口");
-    assert_eq!(host.drafts[ID]["title"], "未保存的设置");
-    assert!(!has_text(&frame(&ctx, vec![], |ui| draw(ui, &mut host)), "打开"));
-    assert_eq!(host.standalone_settings_pages().next(), Some((ID, NAME)));
     assert!(has_text(&frame(&ctx, vec![], |ui| draw(ui, &mut host)), NAME));
-
-    click(&ctx, "隐藏入口", |ui| draw(ui, &mut host));
-    assert!(host.status_pages().next().is_none());
+    assert!(host.status_pages().all(|(id,_)|id!=ID));
     assert!(host.status_page_settings_hidden(ID));
-    click(&ctx, "显示入口", |ui| draw(ui, &mut host));
-    assert!(host.status_pages().next().is_none());
+    host.set_status_page_settings_hidden(ID,false)?;
+    assert!(host.status_page_settings_hidden(ID), "关闭时眼睛不可修改入口");
+    toggle_page(&mut host);
+    assert!(host.records[ID].enabled);
+    assert!(host.status_pages().any(|(id,_)|id==ID));
     assert!(!host.status_page_settings_hidden(ID));
-    toggle_page(&mut host);
-    assert_eq!(host.status_pages().next(), Some((ID, NAME)));
-    click(&ctx, "关闭并隐藏", |ui| draw(ui, &mut host));
-    assert!(host.status_pages().next().is_none());
-    assert!(host.status_page_settings_hidden(ID));
-    assert_eq!(host.standalone_settings_pages().next(), Some((ID, NAME)));
-    let mut hidden_route = None;
-    click(&ctx, "设置 ›", |ui| {
-        hidden_route = host.status_page_settings(ui, ID).or(hidden_route.take());
-    });
-    assert_eq!(hidden_route, Some(SettingsNavigation::Plugin(ID.into())));
-
-    toggle_installed(&mut host);
-    assert!(!host.records[ID].enabled);
-    assert!(host.standalone_settings_pages().next().is_none());
-    assert!(host.status_pages().next().is_none());
-    assert!(host.settings_destination(ID).is_none());
-    assert!(!has_text(&frame(&ctx, vec![], |ui| draw(ui, &mut host)), NAME));
-
+    host.set_status_page_settings_hidden(ID,true)?;
+    assert!(host.status_pages().any(|(id,_)|id==ID), "眼睛不影响后台");
     drop(host);
-    let mut host = LocalPlugins::open(dir.clone());
-    assert!(host.standalone_settings_pages().next().is_none());
-    host.enable(ID, true)?;
-    assert_eq!(host.status_page_preferences().next(), Some((ID, NAME, true, false)));
-    assert!(host.status_page_settings_hidden(ID), "左栏隐藏偏好应持久化");
+    let mut host=LocalPlugins::open(dir.clone());
+    assert!(host.records[ID].enabled && host.status_page_settings_hidden(ID));
+    host.set_status_page_settings_hidden(ID,false)?;
     toggle_page(&mut host);
-    assert_eq!(host.status_pages().next(), Some((ID, NAME)));
-    assert!(!host.status_page_settings_hidden(ID), "开启页面时应恢复左栏入口");
-    let mut record = host.records[ID].clone();
-    record.package.as_mut().unwrap().manifest.name = "独立功能模块".repeat(13);
-    host.put(ID, record)?;
-    let size = egui::vec2(310.0, 550.0);
-    frame_in(&ctx, size, vec![], |ui| host.standalone_settings(ui, ID));
-    let switch = ctx
-        .read_response(egui::Id::new(("settings-plugin-switch", format!("{ID}:status-page"))))
-        .expect("长名称的独立设置页开关");
-    assert!(switch.rect.right() <= size.x, "插件名不能把开关挤出页面");
+    assert!(!host.records[ID].enabled && host.status_page_settings_hidden(ID));
+    assert!(host.status_pages().all(|(id,_)|id!=ID));
+    let mut route=None;
+    click(&ctx,"设置 ›",|ui|route=host.status_page_settings(ui,ID).or(route.take()));
+    assert_eq!(route,Some(SettingsNavigation::Plugin(ID.into())));
+    host.set_status_page_enabled(ID,true)?;
+    assert!(!host.status_page_settings_hidden(ID), "重新开启自动显示入口");
+    let mut record=host.records[ID].clone();
+    record.package.as_mut().unwrap().manifest.name="独立功能模块".repeat(13);
+    host.put(ID,record)?;
+    let size=egui::vec2(310.0,550.0);
+    frame_in(&ctx,size,vec![],|ui|host.standalone_settings(ui,ID));
+    let switch=ctx.read_response(egui::Id::new(("settings-plugin-switch",format!("{ID}:status-page")))).unwrap();
+    assert!(switch.rect.right()<=size.x);
     drop(host);
-    let _ = fs::remove_dir_all(dir);
+    let _=fs::remove_dir_all(dir);
     Ok(())
 }
 

@@ -2,6 +2,8 @@
 use crate::app::{App, Env, Options, PH, PW, WIN_H, WIN_W};
 #[path="resident_navigation_tests.rs"]
 mod resident_navigation;
+#[path="component_controls_tests.rs"]
+mod component_controls;
 #[path="messenger/ui_tests.rs"]
 mod enterprise_messenger;
 #[path="calendar/ui_compatibility_tests.rs"]
@@ -3451,21 +3453,21 @@ fn navigation_wraps_between_builtin_pages_and_notification_settings_remain_acces
 }
 
 #[test]
-fn resident_quota_moves_left_and_releases_battery_space(){
-    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.app.settings.pet=false;
+fn resident_quota_order_survives_battery_visibility_changes(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.app.settings.pet=false;h.app.settings.system_hud=false;
     h.power=(Some(80),true);h.quota_accounts(1);
     for _ in 0..90 {h.frame(vec![]);}
-    let before=h.quota_centers()[0];let width=h.app.current_width();assert!(before>WIN_W/2.0);
+    let width=h.app.current_width();
     h.app.settings.show_battery=false;for _ in 0..90 {h.frame(vec![]);}
-    let after=h.quota_centers()[0];assert!(after<WIN_W/2.0,"关闭电量后，额度应补到时间左侧");
-    assert!(h.app.current_width()<width-20.0,"关闭组件后应释放实际占位");
+    assert!(h.app.current_width()<width-20.0,"取消常驻后释放电量组件占位");
+    let quota=h.quota_centers()[0];h.click(Pos2::new(quota,15.0));assert_eq!(h.app.page(),6,"补位后点击仍打开额度页");
+    h.cursor=None;h.t+=5.0;for _ in 0..90 {h.frame(vec![egui::Event::PointerGone]);}
     h.app.settings.show_battery=true;h.power=(None,false);for _ in 0..90 {h.frame(vec![]);}
-    assert!((h.quota_centers()[0]-after).abs()<0.2,"无电池设备应采用相同补位布局");
-    h.click(Pos2::new(after,15.0));assert_eq!(h.app.page(),6,"补位后仍可点击额度圆环");
+    assert!(crate::app::resident_navigation::registered(&h.ctx).iter().any(|(_,d)|*d==crate::app::resident_navigation::Destination::Page(crate::app::BATTERY_PAGE)),"无电池时保留已常驻的供电页面图标");
 }
 
 #[test]
-fn resident_date_modes_are_independent_of_the_clock() {
+fn resident_date_modes_follow_calendar_residency() {
     let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
     h.app.settings.pet=false;
@@ -3503,8 +3505,8 @@ fn resident_date_modes_are_independent_of_the_clock() {
         let gregorian=text(&h,date);
         let lunar_text=text(&h,&lunar);
         assert_eq!(clock.is_some(),show_clock);
-        assert_eq!(gregorian.is_some(),matches!(mode,ResidentDate::Gregorian|ResidentDate::Lunar));
-        assert_eq!(lunar_text.is_some(),matches!(mode,ResidentDate::LunarOnly|ResidentDate::Lunar));
+        assert_eq!(gregorian.is_some(),show_clock&&matches!(mode,ResidentDate::Gregorian|ResidentDate::Lunar));
+        assert_eq!(lunar_text.is_some(),show_clock&&matches!(mode,ResidentDate::LunarOnly|ResidentDate::Lunar));
         if let (Some((clock,_)),Some((first,_)))=(clock,gregorian.or(lunar_text)) {
             assert!(clock.right()<first.left(),"日期应位于时间右侧");
         }
@@ -3566,9 +3568,10 @@ fn resident_fifth_account_stays_clear_of_clock_and_opens(){
     let text_rect=|label:&str|h.shapes.iter().find_map(|shape|match &shape.shape{
         egui::Shape::Text(text) if text.galley.text()==label=>Some(text.visual_bounding_rect()),_=>None,
     }).expect("常驻文字应可见");
-    let last=h.app.resident.current().x[crate::bar_layout::quota_slot(4)].unwrap()+WIN_W/2.0;
-    assert!(last+13.5+8.0<text_rect("09:41").left());
-    h.click(Pos2::new(last,h.region.center().y));assert_eq!(h.app.page(),6);
+    let id=&h.app.quota.config.accounts[4].id;
+    let target=crate::app::resident_navigation::registered(&h.ctx).into_iter().find(|(_,d)|*d==crate::app::resident_navigation::Destination::Quota(id.clone())).expect("第五个账号应有实际命中区域").0;
+    let clock=text_rect("09:41");assert!(target.right()+4.<clock.left()||target.left()-4.>clock.right(),"额度与时间不得重叠");
+    h.click(target.center());assert_eq!(h.app.page(),6);
 }
 
 #[test]
@@ -4054,7 +4057,7 @@ fn page_visibility_is_saved_and_sets_the_starting_page() {
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=1000000\n").unwrap();
     let legacy=crate::model::Settings::load();
     assert_eq!(legacy.visible_pages,[true,false,false,false,false,false,false,true,true,false,true,true],"旧版页面开关应保留，并开启新增的日程页与天气页");
-    assert_eq!(legacy.hidden_settings_pages,[false;crate::app::PAGE_NAMES.len()],"旧版关闭的页面应保留设置入口");
+    assert_eq!(legacy.hidden_settings_pages,legacy.visible_pages.map(|on|!on),"关闭的页面自动隐藏设置入口");
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=invalid\n").unwrap();
     assert_eq!(crate::model::Settings::load().visible_pages,[true,true,true,true,true,true,true,true,true,false,true,true]);
 }
@@ -4076,7 +4079,8 @@ fn battery_module_hides_power_in_collapsed_and_expanded_headers() {
         assert!(h.shapes!=baseline,"开启后应显示电量");
         h.power=(None,true);
         h.t-=1.0/60.0;h.frame(vec![]);
-        assert!(h.shapes==baseline,"没有电池的设备应自动隐藏电量并释放占位");
+        if expanded {assert!(h.shapes==baseline,"没有电池时展开顶栏不显示电量");}
+        else {assert!(crate::app::resident_navigation::registered(&h.ctx).iter().any(|(_,d)|*d==crate::app::resident_navigation::Destination::Page(crate::app::BATTERY_PAGE)),"常驻开启时保留供电页面入口");}
     }
 }
 
@@ -7575,7 +7579,7 @@ fn resident_components_can_be_dragged_saved_and_reset(){
     fn draw(h:&mut H,events:Vec<egui::Event>,slot:usize)->[Pos2;2]{
         let mut points=[Pos2::ZERO;2];
         h.t+=0.02;
-        let out=h.ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(600.0,300.0))),time:Some(h.t),events,..Default::default()},|ctx|{egui::CentralPanel::default().show(ctx,|ui|{h.app.resident_order_settings(ui);for (index,slot) in [slot,BATTERY].into_iter().enumerate(){points[index]=ui.ctx().read_response(ui.id().with(("resident-icon",slot))).expect("暂未显示的组件也应可以独立拖动").rect.center();}});});
+        let out=h.ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(600.0,300.0))),time:Some(h.t),events,..Default::default()},|ctx|{egui::CentralPanel::default().show(ctx,|ui|{h.app.resident_order_settings(ui);for (index,slot) in [slot,BATTERY].into_iter().enumerate(){points[index]=ui.ctx().read_response(egui::Id::new(("component-order",crate::app::component_controls::page_key(if slot==CLOCK {crate::app::CALENDAR_PAGE}else if slot==WEATHER{crate::app::WEATHER_PAGE}else{crate::app::BATTERY_PAGE})))).expect("暂未显示的组件也应可以独立拖动").rect.center();}});});
         h.shapes=out.shapes;points
     }
     fn point(h:&H,label:&str)->Pos2{h.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t) if t.galley.text()==label=>Some(t.visual_bounding_rect().center()),_=>None}).unwrap()}
@@ -7588,9 +7592,9 @@ fn resident_components_can_be_dragged_saved_and_reset(){
     draw(&mut h,vec![egui::Event::PointerMoved(to)],slot);
     for _ in 0..3{draw(&mut h,vec![],slot);}
     draw(&mut h,vec![button(to,false)],slot);
-    assert_eq!(h.app.settings.resident_order.first(),Some(&slot));
-    assert!(h.app.settings.resident_order.contains(&BATTERY));
-    h.app.settings.save();assert_eq!(crate::model::Settings::load().resident_order,h.app.settings.resident_order);
+    assert_eq!(h.app.settings.island_order.first(),Some(&crate::app::component_controls::page_key(if slot==CLOCK {crate::app::CALENDAR_PAGE}else{crate::app::WEATHER_PAGE})));
+    assert!(h.app.settings.island_order.contains(&crate::app::component_controls::page_key(crate::app::BATTERY_PAGE)));
+    h.app.settings.save();assert_eq!(crate::model::Settings::load().island_order,h.app.settings.island_order);
     let reset=point(&h,"恢复默认");draw(&mut h,vec![egui::Event::PointerMoved(reset),button(reset,true)],slot);draw(&mut h,vec![button(reset,false)],slot);
     assert!(h.app.settings.resident_order.is_empty());
     }
@@ -7661,71 +7665,6 @@ fn page_management_switch(h:&H,label:&str,module:bool)->(Rect,egui::Color32){
     }).unwrap_or_else(||panic!("找不到 {label} 开关"))
 }
 
-#[test]
-fn page_management_hiding_controls_sidebar_and_persists(){
-    use crate::app::{FOCUS_PAGE,MUSIC_PAGE,WATER_PAGE};
-    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-    let mut h=H::new();
-    h.app.settings_tab=crate::extras::SETTINGS_TAB_PAGES;
-    h.app.open_settings();
-    h.ctx.set_embed_viewports(false);
-    for _ in 0..3 {draw_page_management(&mut h,vec![]);}
-    let sidebar_has=|h:&H,label:&str|page_management_text_rects(h,label).any(|rect|rect.right()<180.0);
-    let toggle=|h:&mut H,page:&str|{
-        let point=page_management_switch(h,page,true).0.center();
-        click_page_management(h,point);
-        draw_page_management(h,vec![]);
-    };
-    let act=|h:&mut H,page:&str,action:&str|{
-        let title=page_management_row_title(h,page,true);
-        let point=page_management_text_rects(h,action)
-            .find(|rect|rect.left()>title.right() && (rect.center().y-title.center().y).abs()<24.0)
-            .unwrap_or_else(||panic!("找不到 {page} 的操作 {action}")).center();
-        click_page_management(h,point);
-        draw_page_management(h,vec![]);
-    };
-
-    toggle(&mut h,"音乐");
-    assert!(!h.app.module_on(MUSIC_PAGE));
-    assert!(sidebar_has(&h,"音乐"),"普通关闭应保留设置入口");
-    act(&mut h,"音乐","隐藏入口");
-    assert!(!sidebar_has(&h,"音乐"));
-    act(&mut h,"音乐","显示入口");
-    assert!(!h.app.module_on(MUSIC_PAGE));
-    assert!(sidebar_has(&h,"音乐"));
-
-    toggle(&mut h,"音乐");
-    h.app.show_page(MUSIC_PAGE);
-    act(&mut h,"音乐","关闭并隐藏");
-    assert!(!h.app.module_on(MUSIC_PAGE));
-    assert_ne!(h.app.page(),MUSIC_PAGE);
-    h.app.settings=crate::model::Settings::load();
-    assert!(h.app.settings.hidden_settings_pages[MUSIC_PAGE]);
-    assert!(!h.app.module_on(MUSIC_PAGE));
-    draw_page_management(&mut h,vec![]);
-    assert!(!sidebar_has(&h,"音乐"));
-    assert!(sidebar_has(&h,"页面管理") && sidebar_has(&h,"功能") && sidebar_has(&h,"系统性能"));
-    toggle(&mut h,"音乐");
-    assert!(h.app.module_on(MUSIC_PAGE));
-    assert!(!crate::model::Settings::load().hidden_settings_pages[MUSIC_PAGE]);
-    assert!(sidebar_has(&h,"音乐"));
-
-    act(&mut h,"专注","关闭并隐藏");
-    assert!(h.app.settings.hidden_settings_pages[FOCUS_PAGE]);
-    assert!(sidebar_has(&h,"专注与健康"),"健康仍需要共用入口");
-    act(&mut h,"健康","关闭并隐藏");
-    assert!(h.app.settings.hidden_settings_pages[WATER_PAGE]);
-    assert!(!sidebar_has(&h,"专注与健康"));
-    act(&mut h,"健康","显示入口");
-    assert!(!h.app.module_on(WATER_PAGE) && !h.app.settings.hidden_settings_pages[WATER_PAGE]);
-    assert!(sidebar_has(&h,"专注与健康"));
-
-    h.app.settings.visible_pages.fill(false);
-    h.app.set_page_visible(MUSIC_PAGE,true);
-    h.app.set_page_settings_hidden(MUSIC_PAGE,true);
-    assert!(h.app.module_on(MUSIC_PAGE) && !h.app.settings.hidden_settings_pages[MUSIC_PAGE]);
-}
-
 #[cfg(feature = "sdk-js")]
 #[test]
 fn page_management_page_shortcuts_use_plugin_controls() {
@@ -7791,95 +7730,15 @@ fn weather_status_switch_controls_the_badge_and_keeps_the_page_available(){
         let mut h=H::new();h.app.settings.settings_theme=theme;h.app.settings_tab=10;h.app.open_settings();h.ctx.set_embed_viewports(false);
         h.app.weather.snapshot=Some(crate::weather::Snapshot{temp:9.0,..Default::default()});
         for _ in 0..3 {draw_page_management(&mut h,vec![]);}
-        let text_rect=|h:&H,label:&str|h.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t) if t.galley.text()==label=>Some(t.visual_bounding_rect()),_=>None}).unwrap();
-        let heading=text_rect(&h,"岛上显示");let bottom=text_rect(&h,"功能页面").top();
-        let title=h.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t) if t.galley.text()=="天气"&&t.pos.x>=heading.left()&&t.pos.y>heading.bottom()&&t.pos.y<bottom=>Some(t.visual_bounding_rect()),_=>None}).expect("岛上显示应有独立的天气开关");
-        let point=h.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Rect(r) if (r.rect.width()-34.0).abs()<0.01&&(r.rect.height()-20.0).abs()<0.01&&r.rect.center().y>title.top()&&r.rect.center().y<title.bottom()+24.0=>Some(r.rect.center()),_=>None}).unwrap();
+        let switch=page_management_switch(&h,"天气",true).0;
+        let pin=Pos2::new(switch.left()-22.,switch.center().y);
         for expected in [false,true] {
-            for pressed in [true,false] {draw_page_management(&mut h,vec![egui::Event::PointerMoved(point),egui::Event::PointerButton{pos:point,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()}]);}
+            click_page_management(&mut h,pin);draw_page_management(&mut h,vec![]);
             assert_eq!(h.app.weather_pill().is_some(),expected);
-            assert_eq!(h.app.side_items().contains(&crate::side_dock::SideItem::Weather),expected);
-            assert!(h.app.module_on(8),"关闭状态组件后天气页仍可使用");
-            h.app.settings=crate::model::Settings::load();assert_eq!(h.app.weather_pill().is_some(),expected,"天气开关应自动保存");
+            assert!(h.app.module_on(crate::app::WEATHER_PAGE),"图钉不影响天气后台");
+            h.app.settings=crate::model::Settings::load();assert_eq!(h.app.weather_pill().is_some(),expected,"常驻偏好自动保存");
         }
     }
-}
-
-#[test]
-fn page_management_resident_switches_follow_their_modules(){
-    use crate::app::{BLUETOOTH_PAGE,PAGE_NAMES,QUOTA_PAGE,WEATHER_PAGE};
-    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-    let mut h=H::new();
-    h.app.settings.settings_theme=crate::settings_theme::SettingsTheme::Dark;
-    h.app.settings_tab=10;h.app.open_settings();h.ctx.set_embed_viewports(false);
-    h.app.settings.show_clock=true;
-    h.app.settings.show_battery=true;
-    h.app.settings.show_weather=true;
-    h.app.settings.visible_pages=[true;crate::app::PAGE_NAMES.len()];
-    h.app.settings.show_bluetooth=false;
-    h.app.quota.config.compact=true;
-    h.app.quota.config.save();
-    for _ in 0..3 {draw_page_management(&mut h,vec![]);}
-
-    let selected=|h:&H,rect:Rect|{
-        h.shapes.iter().find_map(|s|match &s.shape{
-            egui::Shape::Circle(c) if c.radius==7.0&&c.center.y==rect.center().y&&rect.contains(c.center)
-                =>Some(c.center.x>rect.center().x),
-            _=>None,
-        }).expect("找不到开关圆点")
-    };
-
-    // 逐项使用页面管理的开关，检查退出当前页面、保存以及重新进入。
-    for (page,name) in PAGE_NAMES.iter().enumerate() {
-        h.app.show_page(page);
-        draw_page_management(&mut h,vec![]);
-        let point=page_management_switch(&h,name,true).0.center();
-        click_page_management(&mut h,point);
-        assert!(!h.app.module_on(page),"{name} 应可关闭");
-        assert_ne!(h.app.page(),page,"关闭 {name} 时应退出当前页");
-        assert!(!crate::model::Settings::load().visible_pages[page]);
-        click_page_management(&mut h,point);
-        assert!(h.app.module_on(page),"{name} 应可重新开启");
-        assert!(crate::model::Settings::load().visible_pages[page]);
-        h.app.show_page(page);
-        assert_eq!(h.app.page(),page,"重新开启后应能进入 {name}");
-    }
-
-    let residents=[(WEATHER_PAGE,"天气",true),(BLUETOOTH_PAGE,"无线设备电量",false),(QUOTA_PAGE,"AI 额度",true)];
-    draw_page_management(&mut h,vec![]);
-    let active_fills=residents.map(|(_,label,_)|page_management_switch(&h,label,false).1);
-    for (page,_,_) in residents {
-        let point=page_management_switch(&h,PAGE_NAMES[page],true).0.center();
-        click_page_management(&mut h,point);
-        assert!(!h.app.module_on(page));
-    }
-    for ((_,label,preferred),active_fill) in residents.into_iter().zip(active_fills) {
-        let (rect,fill)=page_management_switch(&h,label,false);
-        assert_eq!(selected(&h,rect),preferred,"{label} 功能关闭后应保留开关圆点位置");
-        assert_eq!(fill,egui::Visuals::dark().gray_out(active_fill),"{label} 应按原轨道颜色淡化");
-        click_page_management(&mut h,rect.center());
-        assert_eq!(selected(&h,page_management_switch(&h,label,false).0),preferred,"{label} 置灰后应无法切换");
-    }
-    let saved=crate::model::Settings::load();
-    assert!(saved.show_weather && !saved.show_bluetooth && crate::quota::Config::load().compact);
-    assert!(h.app.settings.show_weather && !h.app.settings.show_bluetooth && h.app.quota.config.compact);
-    for label in ["时间","电量"] {
-        let rect=page_management_switch(&h,label,false).0;
-        click_page_management(&mut h,rect.center());
-    }
-    assert!(!h.app.settings.show_clock && !h.app.settings.show_battery,"系统组件应独立于功能页");
-
-    for (page,label,preferred) in residents {
-        let point=page_management_switch(&h,PAGE_NAMES[page],true).0.center();
-        click_page_management(&mut h,point);
-        assert!(h.app.module_on(page));
-        draw_page_management(&mut h,vec![]);
-        let rect=page_management_switch(&h,label,false).0;
-        assert_eq!(selected(&h,rect),preferred,"{label} 重新开启功能后应恢复原有常驻偏好");
-        click_page_management(&mut h,rect.center());
-    }
-    let saved=crate::model::Settings::load();
-    assert!(!saved.show_weather && saved.show_bluetooth && !crate::quota::Config::load().compact);
 }
 
 #[test]
@@ -8467,34 +8326,17 @@ fn clock_residency_only_hides_the_collapsed_clock(){
 #[test]
 fn clock_residency_switch_in_page_management_saves(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-    fn draw(h:&mut H,raster:&mut crate::preview_raster::Raster,events:Vec<egui::Event>){
-        let output=std::sync::Arc::new(Mutex::new(None));let capture=output.clone();h.t+=0.02;let time=h.t;
-        egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
-            let id=viewport.ids.this;
-            *capture.lock().unwrap()=Some(ctx.run(egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(780.0,1400.0))),time:Some(time),events:events.clone(),viewports:std::iter::once((id,egui::ViewportInfo::default())).collect(),..Default::default()},|ctx|(viewport.viewport_ui_cb)(ctx)));
-        });
-        let root=h.ctx.run(Default::default(),|ctx|h.app.settings_ui(ctx,false));let child=output.lock().unwrap().take().unwrap();
-        raster.update_textures(&root.textures_delta);raster.update_textures(&child.textures_delta);h.shapes=child.shapes;
-    }
     for dark in [true,false] {
         let mut h=H::new();h.app.settings.settings_theme=if dark{crate::settings_theme::SettingsTheme::Dark}else{crate::settings_theme::SettingsTheme::Light};
         h.app.settings_tab=10;h.app.open_settings();h.ctx.set_embed_viewports(false);
-        let mut raster=crate::preview_raster::Raster::new(780,1400);
-        assert!(h.app.settings.show_clock,"已有配置默认保持时间常驻");
-        for _ in 0..3{draw(&mut h,&mut raster,vec![]);}
-        let title=h.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()=="时间"=>Some(t.visual_bounding_rect()),_=>None}).expect("状态组件应提供时间开关");
-        let point=h.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Rect(r)if (r.rect.width()-34.0).abs()<0.01&&(r.rect.height()-20.0).abs()<0.01&&r.rect.center().y>title.top()&&r.rect.center().y<title.bottom()+24.0=>Some(r.rect.center()),_=>None}).unwrap();
+        for _ in 0..3 {draw_page_management(&mut h,vec![]);}
+        let switch=page_management_switch(&h,"日程",true).0;
+        let pin=Pos2::new(switch.left()-22.,switch.center().y);
         for expected in [false,true] {
-            for pressed in [true,false]{draw(&mut h,&mut raster,vec![egui::Event::PointerMoved(point),egui::Event::PointerButton{pos:point,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()}]);}
-            draw(&mut h,&mut raster,vec![]);
-            assert_eq!(h.app.settings.show_clock,expected);assert_eq!(crate::model::Settings::load().show_clock,expected,"常驻时间开关应自动保存");
-            let preview=h.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text().contains(':')&&t.galley.job.sections.first().is_some_and(|s|(s.format.font_id.size-crate::theme::size::PILL_CLOCK).abs()<0.01)=>Some(t.fallback_color.a()),_=>None}).expect("常驻排列应保留时间的位置");
-            assert_eq!(preview==255,expected,"关闭时间后排列预览应置灰");
-            if let Some(dest)=std::env::var_os("DAOZAI_CLOCK_RESIDENCY_PREVIEW") {
-                let dest=std::path::PathBuf::from(dest);std::fs::create_dir_all(&dest).unwrap();
-                raster.buf.fill([0.08,0.08,0.09,1.0]);raster.draw(&h.ctx.tessellate(h.shapes.clone(),1.0),1.0);let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
-                image::save_buffer(dest.join(format!("settings-{}-{}.png",if dark{"dark"}else{"light"},if expected{"on"}else{"off"})),&rgba,780,1400,image::ColorType::Rgba8).unwrap();
-            }
+            click_page_management(&mut h,pin);draw_page_management(&mut h,vec![]);
+            assert_eq!(h.app.settings.show_clock,expected);
+            assert_eq!(crate::model::Settings::load().show_clock,expected,"日程行中的图钉自动保存时间常驻偏好");
+            assert!(h.app.module_on(crate::app::CALENDAR_PAGE));
         }
     }
 }
@@ -8590,7 +8432,9 @@ fn clock_12h_formats_boundaries_and_persists() {
     let text_rect=|label:&str|h.shapes.iter().find_map(|s|match &s.shape {
         egui::Shape::Text(t) if t.galley.text()==label=>Some(t.visual_bounding_rect()),_=>None,
     }).unwrap();
-    assert!(h.app.resident.current().x[crate::bar_layout::quota_slot(4)].unwrap()+WIN_W/2.0+13.5<text_rect("上午").left());
+    let clock=text_rect("上午");
+    let quota=h.app.resident.current().x[crate::bar_layout::quota_slot(4)].unwrap()+WIN_W/2.0;
+    assert!(quota+13.5<clock.left() || quota-13.5>clock.right(),"额度和时段时钟不能重叠");
     h.hover(H::local(200.0,40.0),1.0);
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="9:41")));
     h.app.settings.clock_period=0;
@@ -9224,10 +9068,8 @@ fn deepseek_resident_preview_does_not_overlap_icons(){
         let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(600.0,190.0))),time:Some(frame as f64/60.0),viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};
         let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().show(ctx,|ui|{h.app.resident_order_settings(ui);});});raster.update_textures(&output.textures_delta);
         if frame==7{
-            let circles:Vec<_>=output.shapes.iter().filter_map(|shape|if let egui::Shape::Circle(c)=&shape.shape{Some(c)}else{None}).collect();
-            let whale=output.shapes.iter().find_map(|shape|if let egui::Shape::Mesh(mesh)=&shape.shape{let rect=mesh.calc_bounds();((rect.width()-24.0).abs()<0.1).then_some(rect)}else{None}).expect("DeepSeek 图标");
-            let claude=circles.iter().find(|c|c.stroke.color==egui::Color32::from_rgb(255,116,26)&&c.radius>9.0).expect("Claude 圆环");
-            assert!(whale.left()>claude.center.x+claude.radius+4.0,"DeepSeek 不应覆盖前一枚图标");
+            let rects:Vec<_>=h.app.component_keys().iter().map(|key|h.ctx.read_response(egui::Id::new(("component-order",key))).expect("每个组件保留独立图标槽").rect).collect();
+            assert!(rects.windows(2).all(|p|p[0].right()<=p[1].left()),"多账号额度也只占自己的排序槽，不覆盖其它图标");
             if let Some(dest)=std::env::var_os("DAOZAI_DEEPSEEK_PREVIEW_DIR"){
                 raster.buf.fill([0.1,0.1,0.1,1.0]);raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);image::save_buffer(std::path::PathBuf::from(dest).join("resident-preview.png"),&rgba,1200,380,image::ColorType::Rgba8).unwrap();
             }

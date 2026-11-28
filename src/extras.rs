@@ -875,7 +875,7 @@ mod tests {
 
     #[test]
     fn settings_groups_keep_every_page_reachable() {
-        let groups = ["通用", "音乐", "专注与健康", "专注与健康", "待办与置物", "待办与置物", "消息提醒", "邮箱", "日程", "关于", "页面管理", "AI 额度", "天气", "外观", "位置", "系统性能", "无线设备"];
+        let groups = ["通用", "音乐", "专注", "健康", "待办", "置物架", "消息提醒", "邮箱", "日程", "关于", "页面管理", "AI 额度", "天气", "外观", "位置", "系统性能", "无线设备"];
         for (tab, expected) in groups.iter().enumerate() {
             let matches: Vec<_> = SETTINGS_GROUPS.iter().filter(|(_,start,end,_)| (*start..=*end).contains(&tab)).collect();
             assert_eq!(matches.len(), 1, "页面 {tab} 必须且只能属于一个分组");
@@ -1260,15 +1260,9 @@ fn resident_setting_row(ui:&mut egui::Ui,title:&str,description:&str,module_on:b
     });
 }
 
-pub(crate) const PAGE_VISIBILITY_ACTION_WIDTH: f32 = 92.0;
-
-pub(crate) fn page_visibility_action(ui:&mut egui::Ui,on:bool,hidden:bool,can_disable:bool)->bool{
-    let label=if hidden {"显示入口"} else if on {"关闭并隐藏"} else {"隐藏入口"};
-    let response=ui.add_enabled_ui(can_disable,|ui|{
-        ui.add_sized([PAGE_VISIBILITY_ACTION_WIDTH,26.0],egui::Button::new(egui::RichText::new(label).size(12.0)).frame(false))
-    }).inner.on_disabled_hover_text("至少保留一个页面");
-    if response.clicked() {ui.ctx().request_repaint();}
-    response.clicked()
+pub(crate) const PAGE_VISIBILITY_ACTION_WIDTH:f32=28.0;
+pub(crate) fn page_visibility_action(ui:&mut egui::Ui,on:bool,hidden:bool,_can_disable:bool)->bool {
+    crate::app::component_controls::icon_control(ui,false,hidden,on).clicked()
 }
 
 /// 设置页统一的分段选择器（灰色底框 + 选中块）。返回值为是否发生了切换。
@@ -1422,6 +1416,7 @@ fn settings_toggle_chip(ui:&mut egui::Ui,text:&str,on:bool)->egui::Response{
 fn settings_page_icon(page:usize)->egui::ImageSource<'static>{
     use crate::app::*;
     let (name,bytes):(&str,&'static [u8])=match page {
+        BATTERY_PAGE=>("battery",include_bytes!("../assets/settings-icons/system/battery.svg")),
         MUSIC_PAGE=>("music",include_bytes!("../assets/settings-icons/system/music.svg")),
         FOCUS_PAGE=>("focus",include_bytes!("../assets/settings-icons/system/focus.svg")),
         WATER_PAGE=>("health",include_bytes!("../assets/settings-icons/system/health.svg")),
@@ -1445,7 +1440,7 @@ fn paint_wireless_settings_icon(ui:&egui::Ui,rect:egui::Rect,icon:egui::ImageSou
 /// 设置分页对应的功能模块（页面序号）；通用、外观、位置、消息提醒、关于、页面管理不属于任何模块。
 pub(crate) fn settings_tab_module(tab:usize)->Option<usize>{
     use crate::app::*;
-    match tab {1=>Some(MUSIC_PAGE),2=>Some(FOCUS_PAGE),3=>Some(WATER_PAGE),4=>Some(TODO_PAGE),5=>Some(SHELF_PAGE),7=>Some(MAIL_PAGE),8=>Some(CALENDAR_PAGE),11=>Some(QUOTA_PAGE),12=>Some(WEATHER_PAGE),15=>Some(PERFORMANCE_PAGE),SETTINGS_TAB_WIRELESS=>Some(BLUETOOTH_PAGE),_=>None}
+    match tab {1=>Some(MUSIC_PAGE),2=>Some(FOCUS_PAGE),3=>Some(WATER_PAGE),4=>Some(TODO_PAGE),5=>Some(SHELF_PAGE),7=>Some(MAIL_PAGE),8=>Some(CALENDAR_PAGE),11=>Some(QUOTA_PAGE),12=>Some(WEATHER_PAGE),15=>Some(PERFORMANCE_PAGE),SETTINGS_TAB_WIRELESS=>Some(BLUETOOTH_PAGE),SETTINGS_TAB_BATTERY=>Some(crate::app::BATTERY_PAGE),_=>None}
 }
 
 pub(crate) fn settings_label(ui:&mut egui::Ui,text:&str){
@@ -1665,21 +1660,22 @@ pub(crate) const SETTINGS_TAB_APPEARANCE: usize = 13;
 pub(crate) const SETTINGS_TAB_POSITION: usize = 14;
 pub(crate) const SETTINGS_TAB_PAGES: usize = 10;
 pub(crate) const SETTINGS_TAB_WIRELESS: usize = 16;
+pub(crate) const SETTINGS_TAB_BATTERY: usize = 19;
 #[cfg_attr(not(feature="sdk-js"),allow(dead_code))]
 pub(crate) const SETTINGS_TAB_PLUGINS: usize = 17;
 #[cfg(feature="sdk-js")]
 pub(crate) const SETTINGS_TAB_PLUGIN_DETAIL: usize = 18;
-/// 侧栏：一项就是一页，不再有页内子标签。专注与健康（2、3）、待办与置物（4、5）各合成一页；
+/// 侧栏：每个功能单独提供入口，眼睛按钮只隐藏对应功能。
 /// 插件和关于固定在左下角，上方一条细线和功能页分开。
 /// 第四列是这一项之前的分组标题。
-const SETTINGS_GROUPS: [(&str,usize,usize,&str);15 + cfg!(feature="sdk-js") as usize] = [
+const SETTINGS_GROUPS: [(&str,usize,usize,&str);18 + cfg!(feature="sdk-js") as usize] = [
     ("通用",0,0,"岛仔"), ("外观",SETTINGS_TAB_APPEARANCE,SETTINGS_TAB_APPEARANCE,""), ("位置",SETTINGS_TAB_POSITION,SETTINGS_TAB_POSITION,""), ("页面管理",SETTINGS_TAB_PAGES,SETTINGS_TAB_PAGES,""),
-    ("音乐",1,1,"功能"), ("专注与健康",2,3,""), ("待办与置物",4,5,""), ("消息提醒",6,6,""), ("邮箱",7,7,""), ("日程",8,8,""), ("AI 额度",11,11,""), ("天气",12,12,""), ("系统性能",15,15,""), ("无线设备",SETTINGS_TAB_WIRELESS,SETTINGS_TAB_WIRELESS,""),
+    ("音乐",1,1,"功能"), ("专注",2,2,""), ("健康",3,3,""), ("待办",4,4,""), ("置物架",5,5,""), ("消息提醒",6,6,""), ("邮箱",7,7,""), ("日程",8,8,""), ("AI 额度",11,11,""), ("天气",12,12,""), ("系统性能",15,15,""), ("无线设备",SETTINGS_TAB_WIRELESS,SETTINGS_TAB_WIRELESS,""), ("本机电量",SETTINGS_TAB_BATTERY,SETTINGS_TAB_BATTERY,""),
     #[cfg(feature="sdk-js")] ("插件",SETTINGS_TAB_PLUGINS,SETTINGS_TAB_PLUGINS,""),
     ("关于",9,9,""),
 ];
 const SETTINGS_BOTTOM_ROWS: usize = if cfg!(feature="sdk-js") { 2 } else { 1 };
-/// 分页标题；合并页（3→2、5→4）显示合并后的名字。
+/// 分页标题与各功能的独立侧栏入口一致。
 fn settings_tab_title(tab:usize)->&'static str{
     SETTINGS_GROUPS.iter().find(|(_,start,end,_)|(*start..=*end).contains(&tab)).map_or("通用",|g|g.0)
 }
@@ -1748,8 +1744,8 @@ impl App {
             11=>egui::include_image!("../assets/settings-icons/system/quota.svg"),
             10=>egui::include_image!("../assets/settings-icons/system/pages.svg"),
             1=>egui::include_image!("../assets/settings-icons/system/music.svg"),
-            2=>egui::include_image!("../assets/settings-icons/system/focus.svg"),
-            4=>egui::include_image!("../assets/settings-icons/system/tasks.svg"),
+            2|3=>egui::include_image!("../assets/settings-icons/system/focus.svg"),
+            4|5=>egui::include_image!("../assets/settings-icons/system/tasks.svg"),
             6=>egui::include_image!("../assets/settings-icons/system/notifications.svg"),
             15=>egui::include_image!("../assets/settings-icons/system/performance.svg"),
             12=>egui::include_image!("../assets/settings-icons/system/weather.svg"),
@@ -1761,6 +1757,7 @@ impl App {
             SETTINGS_TAB_PLUGINS=>egui::include_image!("../assets/settings-icons/system/shelf.svg"),
             _=>egui::include_image!("../assets/settings-icons/system/about.svg"),
         };
+        let icon=settings_tab_module(start).map(settings_page_icon).unwrap_or(icon);
         #[cfg(feature="sdk-js")]
         let icon = settings_tab_module(start).and_then(|page|self.plugins.appearance_icon(page,true)).unwrap_or(icon);
         let selected = (start..=end).contains(&self.settings_tab);
@@ -2003,8 +2000,8 @@ impl App {
                     }
                 });
                 ui.add_space(6.0);
-                // 合并页：健康（3）并入专注（2），置物（4→5）并入待办，旧序号仍能打开对应页面。
-                let tab=match self.settings_tab {3=>2,5=>4,t=>t};
+                // 保留各功能原有序号；设置链接与独立侧栏入口使用相同目标。
+                let tab=self.settings_tab;
                 if tab != 9 { release_support_images(ctx); }
                 let scroll = egui::ScrollArea::vertical().auto_shrink([false,false]);
                 #[cfg(feature="sdk-js")]
@@ -2069,30 +2066,14 @@ impl App {
                             self.plugins.settings(ui,"quota",on);
                         });
                     }
+                    SETTINGS_TAB_BATTERY=>{
+                        self.settings_feature_header(ui,crate::app::BATTERY_PAGE,"本机电池电量与供电状态",|_,_|{});
+                        settings_hint(ui,"在页面管理中使用图钉选择是否常驻岛体。无电池设备也可打开页面查看供电状态。");
+                    }
                     SETTINGS_TAB_PAGES=>{
                         ui.label(egui::RichText::new("选择需要的页面和状态组件。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
-                        // 岛上显示：收起时的常驻内容在这里统一排序和开关；岛上歌词属于音乐的显示方式，在音乐页设置。
-                        settings_label(ui,"岛上显示");
-                        settings_card(ui,|ui|{
-                            self.resident_order_settings(ui);
-                            ui.separator();
-                            setting_row(ui,"时间","关闭后仍可在展开顶栏查看",&mut self.settings.show_clock);
-                            ui.separator();
-                            setting_row(ui,"电量","无电池设备自动隐藏",&mut self.settings.show_battery);
-                            ui.separator();
-                            resident_setting_row(ui,"天气","天气图标和温度，点击打开天气页",
-                                self.module_on(crate::app::WEATHER_PAGE),&mut self.settings.show_weather);
-                            ui.separator();
-                            resident_setting_row(ui,"无线设备电量","收起时显示，最多两台",
-                                self.module_on(crate::app::BLUETOOTH_PAGE),&mut self.settings.show_bluetooth);
-                            ui.separator();
-                            ui.add_enabled_ui(self.module_on(crate::app::PERFORMANCE_PAGE),|ui|setting_row(ui,"系统性能","点击常驻指标打开性能页",&mut self.settings.show_performance));
-                            ui.separator();
-                            let before=self.quota.config.compact;
-                            resident_setting_row(ui,"AI 额度","常驻账号，WorkBuddy 积分在前，DeepSeek 余额在最后",
-                                self.module_on(crate::app::QUOTA_PAGE),&mut self.quota.config.compact);
-                            if before!=self.quota.config.compact {self.quota.config.save();}
-                        });
+                        settings_label(ui,"岛体图标顺序");
+                        settings_card(ui,|ui|self.resident_order_settings(ui));
                         settings_label(ui,"功能页面");
                         settings_card(ui,|ui|{
                             #[cfg(feature = "sdk-js")]
@@ -2100,13 +2081,12 @@ impl App {
                                 ui.separator();
                             }
                             let descriptions=["播放控制与同步歌词","番茄钟与休息计时","喝水与久坐提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","当地天气与七日预报","处理器、显卡、内存、网络与磁盘","蓝牙设备连接状态与多来源电量","本机电池电量与供电状态"];
-                            settings_hint(ui,"拖动左侧手柄调整岛上顺序。关闭后暂停后台运行，保留已有数据。选择「关闭并隐藏」可从设置左栏收起入口，合并入口需隐藏组内所有功能。");
+                            settings_hint(ui,"图钉控制岛体常驻，开关控制后台运行，眼睛控制左栏入口。关闭后台会隐藏入口；重新开启会显示入口。拖动手柄调整功能页顺序。");
                             use crate::model::OrderedPage;
                             #[derive(Clone)]
                             struct PageDrag(egui::Id);
                             #[cfg(feature = "sdk-js")]
                             let plugins: Vec<_> = self.plugins.status_page_preferences()
-                                .filter(|(_, _, enabled, _)| *enabled)
                                 .map(|(id, _, _, _)| id.to_owned()).collect();
                             #[cfg(not(feature = "sdk-js"))]
                             let plugins: Vec<String> = Vec::new();
@@ -2138,8 +2118,10 @@ impl App {
                                             let hidden=self.settings.hidden_settings_pages[page];
                                             let can_disable=!visible || self.settings.visible_pages.iter().filter(|enabled|**enabled).count()>1;
                                             let jump_w=58.0;
-                                            let text_w=ui.available_width()-jump_w-SETTINGS_SWITCH_W-PAGE_VISIBILITY_ACTION_WIDTH-3.0*ui.spacing().item_spacing.x;
+                                            let text_w=ui.available_width()-jump_w-SETTINGS_SWITCH_W-PAGE_VISIBILITY_ACTION_WIDTH-28.0-4.0*ui.spacing().item_spacing.x;
                                             setting_row_text(ui,PAGE_NAMES[page],descriptions[page],text_w);
+                                            let pin=self.resident_preference(page);
+                                            if crate::app::component_controls::icon_control(ui,true,pin,visible).clicked(){self.set_resident_preference(page,!pin);}
                                             ui.add_enabled_ui(can_disable,|ui|switch(ui,&mut visible));
                                             let change_hidden=page_visibility_action(ui,visible,hidden,can_disable);
                                             if ui.add_sized([jump_w,26.0],egui::Button::new(egui::RichText::new("设置 ›").size(12.0)).frame(false)).on_hover_text(format!("打开「{}」设置",PAGE_NAMES[page])).clicked(){jump=Some(crate::app::PAGE_SETTINGS_TABS[page]);}
@@ -2152,8 +2134,10 @@ impl App {
                                         }
                                         OrderedPage::Plugin(_id) => {
                                             #[cfg(feature="sdk-js")]
-                                            if let Some(route) = self.plugins.status_page_settings(ui, _id) {
-                                                self.apply_settings_navigation(route);
+                                            {
+                                                let mut pinned=self.plugin_resident(_id);let before=pinned;
+                                                if let Some(route)=self.plugins.status_page_controls(ui,_id,&mut pinned){self.apply_settings_navigation(route);}
+                                                if before!=pinned {self.set_plugin_resident(_id,pinned);}
                                             }
                                         }
                                     }
@@ -2440,7 +2424,8 @@ impl App {
                                 settings_hint(ui,"调整后从下一阶段开始生效。");
                             });
                         });
-                        ui.add_space(12.0);
+                    }
+                    3=>{
                         let on=self.settings_feature_header(ui,crate::app::WATER_PAGE,"喝水与久坐提醒",|_,_|{});
                         ui.add_enabled_ui(on,|ui|{
                             settings_card(ui,|ui|{
@@ -2496,7 +2481,8 @@ impl App {
                         let on=self.settings_feature_header(ui,crate::app::TODO_PAGE,"任务清单与到期提醒",|_,_|{});
                         let _=on;
                         #[cfg(feature="sdk-js")] self.plugins.settings(ui,"tasks",on);
-                        ui.add_space(12.0);
+                    }
+                    5=>{
                         let on=self.settings_feature_header(ui,crate::app::SHELF_PAGE,"临时收纳文件与剪贴板",|_,_|{});
                         ui.add_enabled_ui(on,|ui|{
                             settings_card(ui,|ui|{

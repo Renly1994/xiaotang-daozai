@@ -343,6 +343,9 @@ pub struct Settings {
     pub clock_period: u8,
     pub clock_seconds: bool,
     pub resident_order: Vec<usize>,
+    pub resident_pages: [bool; crate::app::PAGE_NAMES.len()],
+    pub resident_plugins: Vec<String>,
+    pub island_order: Vec<String>,
     pub system_hud: bool,
     pub bluetooth_notifications: bool,
     pub show_bluetooth: bool,
@@ -421,7 +424,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, oled_shift: false, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true,true,true,true,true,true,true,true,true,false,true,true], hidden_settings_pages: [false; 12], page_order: [0,1,2,3,4,5,6,7,8,9,10,11], plugin_page_order: Vec::new(), show_page_shortcuts: true, hide_page_arrows: false, show_clock: true, resident_date: ResidentDate::Off, show_battery: true, hover_page_delay_ms: 500, show_weather: true, show_performance: true, performance_bar: Default::default(), performance_metrics: 7, performance_view: Default::default(), clock_12h: false, clock_period: 0, clock_seconds: false, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, show_bluetooth:true, bluetooth_pinned:Vec::new(), bluetooth_resident_style:0, bluetooth_resident_custom:false, bluetooth_battery_notifications:true, read_notifications:false, wechat_notifications:false, wecom_notifications:false, feishu_notifications:false, dingtalk_notifications:false, wechat_tray_open:false, wechat_wake_method:Default::default(), wechat_wake_shortcut:String::new(), qq_only:false, notification_preview:false, notifications: true, system_notify: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, exclude_from_capture: false, avoid_top_bar: true, top_bar_on_top: false, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, sit_remind: true, sit_minutes: 60, lunch_rest: true, lunch_start: 720, lunch_end: 810, mail_enabled: true, mail_sync_operations:false, mail_code_only_notifications: false, mail_code: true, mail_code_popup: false, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, weather_city: String::new(), weather_position: None, weather_saved: Vec::new(), render_compat: false, render_compat_reason: String::new() }
+        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, oled_shift: false, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true,true,true,true,true,true,true,true,true,false,true,true], hidden_settings_pages: [false; 12], page_order: [0,1,2,3,4,5,6,7,8,9,10,11], plugin_page_order: Vec::new(), show_page_shortcuts: true, hide_page_arrows: false, show_clock: true, resident_date: ResidentDate::Off, show_battery: true, hover_page_delay_ms: 500, show_weather: true, show_performance: true, performance_bar: Default::default(), performance_metrics: 7, performance_view: Default::default(), clock_12h: false, clock_period: 0, clock_seconds: false, resident_order: Vec::new(), resident_pages:[true,true,false,false,false,false,true,true,true,true,true,true], resident_plugins:Vec::new(), island_order:Vec::new(), system_hud: true, bluetooth_notifications: true, show_bluetooth:true, bluetooth_pinned:Vec::new(), bluetooth_resident_style:0, bluetooth_resident_custom:false, bluetooth_battery_notifications:true, read_notifications:false, wechat_notifications:false, wecom_notifications:false, feishu_notifications:false, dingtalk_notifications:false, wechat_tray_open:false, wechat_wake_method:Default::default(), wechat_wake_shortcut:String::new(), qq_only:false, notification_preview:false, notifications: true, system_notify: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, exclude_from_capture: false, avoid_top_bar: true, top_bar_on_top: false, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, sit_remind: true, sit_minutes: 60, lunch_rest: true, lunch_start: 720, lunch_end: 810, mail_enabled: true, mail_sync_operations:false, mail_code_only_notifications: false, mail_code: true, mail_code_popup: false, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, weather_city: String::new(), weather_position: None, weather_saved: Vec::new(), render_compat: false, render_compat_reason: String::new() }
     }
 }
 
@@ -475,6 +478,11 @@ impl Settings {
                 "browser_minimal" => s.browser_minimal = v == "1",
                 "avoid_browsers" => s.avoid_browsers = v != "0",
                 "avoid_apps" => s.avoid_apps = serde_json::from_str(&v).unwrap_or_default(),
+                "resident_pages" if v.len()<=s.resident_pages.len() && v.bytes().all(|b|b==b'0'||b==b'1')=>{
+                    for (on,value) in s.resident_pages.iter_mut().zip(v.bytes()) {*on=value==b'1';}
+                },
+                "resident_plugins"=>s.resident_plugins=serde_json::from_str(&v).unwrap_or_default(),
+                "island_order"=>s.island_order=serde_json::from_str(&v).unwrap_or_default(),
                 "resident_order" => {
                     let mut order:Vec<usize>=v.split(',').filter_map(|n|n.parse().ok()).collect();
                     if order.len()==6 && !order.contains(&crate::bar_layout::WEATHER) {
@@ -581,7 +589,7 @@ impl Settings {
         }
         if !s.visible_pages.contains(&true) { s.visible_pages[0]=true; }
         for (hidden,enabled) in s.hidden_settings_pages.iter_mut().zip(s.visible_pages) {
-            *hidden &= !enabled;
+            *hidden |= !enabled;
         }
         // 旧版只有一个指定城市：迁移进已保存列表，升级后下拉框里能直接看到它。
         if let Some(position)=s.weather_position.clone().filter(|p|p.label==s.weather_city) {
@@ -619,6 +627,9 @@ impl Settings {
                 ("performance_bar".into(),self.performance_bar.key().into()),
                 ("performance_metrics".into(),self.performance_metrics.to_string()),
                 ("performance_view".into(),self.performance_view.key().into()),
+                ("resident_pages".into(),self.resident_pages.iter().map(|on|if *on {'1'}else{'0'}).collect()),
+                ("resident_plugins".into(),serde_json::to_string(&self.resident_plugins).unwrap_or_default()),
+                ("island_order".into(),serde_json::to_string(&self.island_order).unwrap_or_default()),
                 ("resident_order".into(),self.resident_order.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
                 ("clock_period".into(), self.clock_period.to_string()),
                 ("clock_12h".into(), (self.clock_12h as u8).to_string()),
