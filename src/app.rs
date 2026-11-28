@@ -199,6 +199,8 @@ pub enum NotificationSound { Silent, System, Health }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Cmd {
     Media(Transport),
+    FeishinCredential(String),
+    FeishinForgetPassword,
     Open(PathBuf),
     ViewMessenger(Unread),
     #[cfg(windows)]

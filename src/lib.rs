@@ -92,6 +92,7 @@ pub mod paint;
 pub mod shape;
 mod fluid;
 pub mod smtc;
+pub mod feishin;
 pub mod music_volume;
 pub mod theme;
 pub mod settings_theme;
