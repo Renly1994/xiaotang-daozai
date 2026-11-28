@@ -58,7 +58,7 @@ pub(crate) fn icon_control(
 pub(crate) fn page_key(page: usize) -> String {
     format!("page:{}", PAGE_SHORTCUT_KEYS[page])
 }
-fn native_slot(page: usize) -> Option<usize> {
+pub(crate) fn native_slot(page: usize) -> Option<usize> {
     Some(match page {
         MUSIC_PAGE => bar::MUSIC,
         FOCUS_PAGE => bar::FOCUS,
@@ -217,7 +217,7 @@ impl App {
         }
         format!("unknown:{page}")
     }
-    fn component_symbol(&self, c: &Card, x: f32, y: f32, page: usize, color: Color32) {
+    pub(crate) fn component_symbol(&self, c: &Card, x: f32, y: f32, page: usize, color: Color32) {
         #[cfg(feature = "sdk-js")]
         if let Some((id, _)) = page
             .checked_sub(PAGE_NAMES.len())
@@ -262,129 +262,6 @@ impl App {
                 destination,
             ),
             self.navigation_page_name(page).into(),
-        );
-    }
-    pub(crate) fn component_order_settings(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label("拖动常驻图标调整顺序");
-            if ui.small_button("恢复默认").clicked() {
-                self.settings.island_order.clear();
-                self.settings.resident_order.clear();
-                self.settings.save();
-            }
-        });
-        let mut order = self.component_keys();
-        let mut movement = None;
-        egui::ScrollArea::horizontal()
-            .id_salt("component-order-scroll")
-            .show(ui, |ui| {
-                let step = 30.0;
-                let (rect, _) = ui.allocate_exact_size(
-                    Vec2::new(
-                        ui.available_width().max(step * order.len() as f32 + 20.0),
-                        64.,
-                    ),
-                    egui::Sense::hover(),
-                );
-                ui.painter()
-                    .rect_filled(rect, 10., ui.visuals().extreme_bg_color);
-                let start = rect.center().x - step * order.len() as f32 / 2.;
-
-                for (i, key) in order.iter().enumerate() {
-                    let x = start + step * (i as f32 + 0.5);
-                    let hit =
-                        Rect::from_center_size(Pos2::new(x, rect.center().y), Vec2::new(step, 40.));
-                    let response = ui.interact(
-                        hit,
-                        egui::Id::new(("component-order", key)),
-                        egui::Sense::drag(),
-                    );
-                    response.dnd_set_drag_payload(key.clone());
-                    let c = Card::new(ui, hit.min, rect.intersect(ui.clip_rect())).ghost();
-                    let page = (0..PAGE_NAMES.len()).find(|&p| page_key(p) == *key);
-                    let (name, on) = if let Some(page) = page {
-                        (PAGE_NAMES[page].to_owned(), self.resident_on(page))
-                    } else if key == "pet" {
-                        ("吉祥物".into(), self.settings.pet)
-                    } else {
-                        #[cfg(feature = "sdk-js")]
-                        {
-                            let id = key.strip_prefix("plugin:").unwrap_or("");
-                            self.plugins
-                                .status_page_preferences()
-                                .find(|(p, _, _, _)| *p == id)
-                                .map(|(_, name, enabled, page_on)| {
-                                    (
-                                        name.to_owned(),
-                                        enabled && page_on && self.plugin_resident(id),
-                                    )
-                                })
-                                .unwrap_or(("插件".into(), false))
-                        }
-                        #[cfg(not(feature = "sdk-js"))]
-                        {
-                            ("组件".into(), false)
-                        }
-                    };
-                    let color = if on {
-                        ui.visuals().text_color()
-                    } else {
-                        ui.visuals().weak_text_color()
-                    };
-                    if let Some(page) = page {
-                        self.component_symbol(&c, step / 2., 20., page, color);
-                    } else if key == "pet" {
-                        #[cfg(feature = "sdk-js")]
-                        self.pet
-                            .draw_canvas_face(&c.shifted(0., 5.), step / 2., None, color);
-                        #[cfg(not(feature = "sdk-js"))]
-                        for dx in [-5.6, 5.6] {
-                            c.seg((step / 2. + dx, 18.), (step / 2. + dx, 22.), 3.6, color);
-                        }
-                    } else {
-                        #[cfg(feature = "sdk-js")]
-                        if let Some(icon) = self
-                            .plugins
-                            .navigation_icon(key.strip_prefix("plugin:").unwrap_or(""))
-                        {
-                            crate::plugin_canvas_ui::draw_navigation_icon(
-                                &c.painter,
-                                c.rect(step / 2. - 7., 13., 14., 14.),
-                                icon.commands(),
-                                color,
-                            );
-                        } else {
-                            paint::page_shortcut_icon(&c, usize::MAX, step / 2., 20., color);
-                        }
-                    }
-                    if let Some(payload) = response.dnd_hover_payload::<String>() {
-                        if payload.as_str() != key {
-                            ui.painter().rect_stroke(
-                                hit,
-                                4.,
-                                egui::Stroke::new(1., theme::BLUE),
-                                egui::StrokeKind::Inside,
-                            );
-                        }
-                    }
-                    if let Some(payload) = response.dnd_release_payload::<String>() {
-                        if let Some(from) = order.iter().position(|k| k == payload.as_str()) {
-                            movement = Some((from, i));
-                        }
-                    }
-                    response.on_hover_text(name);
-                }
-            });
-        if let Some((from, to)) = movement {
-            let key = order.remove(from);
-            order.insert(to, key);
-            self.settings.island_order = order;
-            self.settings.save();
-        }
-        ui.label(
-            egui::RichText::new("灰色图标表示当前未常驻；在下方组件行中调整。")
-                .size(11.5)
-                .color(ui.visuals().weak_text_color()),
         );
     }
 }

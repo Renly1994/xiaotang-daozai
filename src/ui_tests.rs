@@ -7591,12 +7591,13 @@ fn resident_components_can_be_dragged_saved_and_reset(){
     draw(&mut h,vec![egui::Event::PointerMoved(from+egui::vec2(0.0,10.0))],slot);
     draw(&mut h,vec![egui::Event::PointerMoved(to)],slot);
     for _ in 0..3{draw(&mut h,vec![],slot);}
+    assert_eq!(h.app.settings.island_order.first(),Some(&crate::app::component_controls::page_key(if slot==CLOCK {crate::app::CALENDAR_PAGE}else{crate::app::WEATHER_PAGE})),"上游交互：松手前已即时换位");
     draw(&mut h,vec![button(to,false)],slot);
     assert_eq!(h.app.settings.island_order.first(),Some(&crate::app::component_controls::page_key(if slot==CLOCK {crate::app::CALENDAR_PAGE}else{crate::app::WEATHER_PAGE})));
     assert!(h.app.settings.island_order.contains(&crate::app::component_controls::page_key(crate::app::BATTERY_PAGE)));
     h.app.settings.save();assert_eq!(crate::model::Settings::load().island_order,h.app.settings.island_order);
     let reset=point(&h,"恢复默认");draw(&mut h,vec![egui::Event::PointerMoved(reset),button(reset,true)],slot);draw(&mut h,vec![button(reset,false)],slot);
-    assert!(h.app.settings.resident_order.is_empty());
+    assert!(h.app.settings.resident_order.is_empty() && h.app.settings.island_order.is_empty());
     }
 }
 

@@ -333,3 +333,72 @@ fn component_settings_links_open_the_corresponding_independent_settings() {
         assert!(!page_management_text_rects(&h, other).any(|r| r.left() > 180.));
     }
 }
+
+#[test]
+fn component_preview_preserves_upstream_stage_shape_and_live_readings() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for (name, skin, shape) in [
+        (
+            "notch",
+            crate::model::Skin::Classic,
+            crate::model::IslandShape::Notch,
+        ),
+        (
+            "pill",
+            crate::model::Skin::Cream,
+            crate::model::IslandShape::Pill,
+        ),
+        (
+            "glass",
+            crate::model::Skin::GlassDark,
+            crate::model::IslandShape::Notch,
+        ),
+    ] {
+        let mut h = H::new();
+        h.app.settings.skin = skin;
+        h.app.settings.island_shape = shape;
+        h.app.resident_power = (Some(76), false);
+        h.quota_accounts(2);
+        h.app.weather.snapshot = Some(crate::weather::Snapshot {
+            temp: 16.,
+            ..Default::default()
+        });
+        let mut raster = crate::preview_raster::Raster::new(690, 220);
+        for _ in 0..3 {
+            let output = h.ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(690., 220.))),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| h.app.resident_order_settings(ui));
+                },
+            );
+            raster.update_textures(&output.textures_delta);
+            h.shapes = output.shapes;
+        }
+        assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Rect(r) if r.fill==egui::Color32::from_rgb(19,25,36)&&(r.rect.height()-100.).abs()<0.01)),"保留上游 100 高的岛体舞台");
+        for label in ["按住图标左右拖动", "76"] {
+            assert!(
+                h.shapes
+                    .iter()
+                    .any(|s| matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()==label)),
+                "{name}: 缺少原版预览内容 {label}"
+            );
+        }
+        assert!(registered(&h.ctx).is_empty(), "预览不注册真实悬停导航");
+        if let Some(path) = std::env::var_os("DAOZAI_COMPONENT_PREVIEW") {
+            raster.draw(&h.ctx.tessellate(h.shapes, 1.), 1.);
+            let mut rgba = Vec::new();
+            raster.to_rgba8(&mut rgba);
+            image::save_buffer(
+                std::path::Path::new(&path).join(format!("upstream-preview-{name}.png")),
+                &rgba,
+                690,
+                220,
+                image::ColorType::Rgba8,
+            )
+            .unwrap();
+        }
+    }
+}

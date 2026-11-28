@@ -2072,7 +2072,7 @@ impl App {
                     }
                     SETTINGS_TAB_PAGES=>{
                         ui.label(egui::RichText::new("选择需要的页面和状态组件。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
-                        settings_label(ui,"岛体图标顺序");
+                        settings_label(ui,"岛上显示");
                         settings_card(ui,|ui|self.resident_order_settings(ui));
                         settings_label(ui,"功能页面");
                         settings_card(ui,|ui|{
